@@ -1,0 +1,6 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+  <!-- Tema escuro fixo: o app desenha o próprio fundo em Compose. -->
+  <style name="Base.AppTheme" parent="Theme.Material3.Dark.NoActionBar" />
+
+  <style name="AppTheme" parent="Base.AppTheme" />
+</resources>
