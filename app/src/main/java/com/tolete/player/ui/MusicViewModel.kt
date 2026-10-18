@@ -533,14 +533,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // e tentamos sinalizar via sessão se possível
     }
 
-    /** Caminho do soundfont .sf2 importado (null = sintetizador do sistema). */
-    private val _soundfontPath = MutableStateFlow(prefs.getString(KEY_SOUNDFONT, null))
-    val soundfontPath: StateFlow<String?> = _soundfontPath.asStateFlow()
-    fun setSoundfontPath(path: String?) {
-        _soundfontPath.value = path
-        prefs.edit().putString(KEY_SOUNDFONT, path).apply()
-    }
-
     // ---------- Visualizador .milk (presets do usuário) ----------
     private val _milkPresets = MutableStateFlow(
         com.tolete.player.visualizer.MilkPresetStore.list(application)
@@ -623,7 +615,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val albums: StateFlow<List<Album>> = tracks.map { list ->
-        list.groupBy { it.album to it.artist }
+        // Mescla álbuns com mesmo nome e mesmo artista do álbum (albumArtist; fallback artist)
+        list.groupBy { t ->
+            val aa = t.albumArtist.ifBlank { t.artist }
+            t.album to aa
+        }
             .map { (key, l) -> Album(key.first, key.second, l.size, l.firstOrNull()?.year, l.firstNotNullOfOrNull { it.artPath }, l.sumOf { it.duration }) }
             .sortedBy { it.name.lowercase() }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -844,6 +840,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    private val _positionMs = MutableStateFlow(0L)
+    val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
+    private val _durationMs = MutableStateFlow(0L)
+    val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
+
     private val _queue = MutableStateFlow<List<Track>>(emptyList())
     val queue: StateFlow<List<Track>> = _queue.asStateFlow()
 
@@ -872,6 +873,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
             persistPlaybackState(paused = !isPlaying)
+            if (isPlaying) startPositionTicker()
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -1005,9 +1007,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun currentPosition(): Long = controller?.currentPosition ?: 0L
+    fun currentDuration(): Long = controller?.duration?.takeIf { it > 0 } ?: 0L
+
+    private var positionTicker: Job? = null
+    private fun startPositionTicker() {
+        positionTicker?.cancel()
+        positionTicker = viewModelScope.launch {
+            while (isActive) {
+                val c = controller
+                if (c != null) {
+                    _positionMs.value = c.currentPosition
+                    val d = c.duration
+                    if (d > 0) _durationMs.value = d
+                }
+                if (!_isPlaying.value) break
+                delay(250)
+            }
+        }
+    }
 
     fun seekTo(positionMs: Long) {
         controller?.seekTo(positionMs)
+        _positionMs.value = positionMs
     }
 
     fun toggleShuffle() {
@@ -1116,11 +1137,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     .apply { artPath?.let { setArtworkUri(Uri.fromFile(File(it))) } }
                     .build()
             )
-        val isMidi = codec.equals("MIDI", true) ||
-            path.endsWith(".mid", true) || path.endsWith(".midi", true)
-        if (isMidi) {
-            builder.setMimeType("audio/midi")
-        }
         return builder.build()
     }
 
@@ -1686,7 +1702,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
         const val KEY_SHUFFLE_TYPE = "shuffle_type"
         const val KEY_BIT_PERFECT = "bit_perfect"
-        const val KEY_SOUNDFONT = "soundfont_path"
         const val KEY_MILK_INTERVAL = "milk_interval_sec"
         const val KEY_AUDIO_OUTPUT = "audio_output_backend"
         const val KEY_FORCE_MAX_SR = "force_max_sample_rate"
@@ -1707,6 +1722,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_QUEUE_POS = "queue_pos"
         const val KEY_QUEUE_PAUSED = "queue_paused"
     }
+
+    /** Renomeia o arquivo da faixa no disco (mantém extensão) e atualiza a biblioteca. */
+    fun renameTrackFile(track: Track, newBaseName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val src = File(track.path)
+                if (!src.isFile) return@launch
+                val safe = newBaseName.replace(Regex("[\\/:*?\"<>|]"), "_").trim()
+                if (safe.isBlank()) return@launch
+                val dest = File(src.parentFile, safe + "." + src.extension)
+                if (dest.exists() && dest.absolutePath != src.absolutePath) return@launch
+                if (src.renameTo(dest)) {
+                    val updated = track.copy(
+                        title = track.title, // tags intactas
+                        path = dest.absolutePath,
+                        uri = Uri.fromFile(dest)
+                    )
+                    // Atualiza lista em memória
+                    _library.value = _library.value.map { if (it.id == track.id) updated else it }
+                    try {
+                        LibraryCache(getApplication()).save(_library.value)
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+
+    fun playExternalUri(uri: Uri, title: String) {
+        viewModelScope.launch {
+            // Aguarda o MediaController ficar pronto
+            var tries = 0
+            while (controller == null && tries < 40) {
+                kotlinx.coroutines.delay(100)
+                tries++
+            }
+            val c = controller ?: return@launch
+            val item = MediaItem.Builder()
+                .setUri(uri)
+                .setMediaMetadata(
+                    MediaMetadata.Builder().setTitle(title).build()
+                )
+                .build()
+            c.setMediaItem(item)
+            c.prepare()
+            c.play()
+            startPositionTicker()
+        }
+    }
+
 }
 
 

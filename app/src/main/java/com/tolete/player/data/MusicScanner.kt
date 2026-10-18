@@ -20,8 +20,7 @@ import java.util.UUID
 class MusicScanner(private val context: Context) {
 
     private val supportedExtensions = setOf(
-        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "aiff", "alac",
-        "mid", "midi"
+        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "aiff", "alac"
     )
 
     // Capas extraídas ficam em files/art/<sha1>.jpg (mesma capa = mesmo arquivo)
@@ -287,7 +286,6 @@ class MusicScanner(private val context: Context) {
         ext == "wav" -> "WAV"
         ext == "aiff" -> "AIFF"
         ext == "wma" -> "WMA"
-        ext == "mid" || ext == "midi" || mime == "audio/midi" || mime == "audio/mid" -> "MIDI"
         else -> ext.uppercase().ifEmpty { "?" }
     }
 
@@ -300,30 +298,6 @@ class MusicScanner(private val context: Context) {
         sourceTree: String,
         lastModified: Long = 0L
     ): Track? {
-        // MIDI: MediaMetadataRetriever costuma falhar — trata à parte
-        if (extension == "mid" || extension == "midi") {
-            return Track(
-                id = UUID.nameUUIDFromBytes(docId.toByteArray()).toString(),
-                title = fileName.substringBeforeLast('.'),
-                artist = "MIDI",
-                album = "MIDI",
-                genre = "MIDI",
-                duration = 0L,
-                uri = uri,
-                path = fileName,
-                folder = uri.path?.substringBeforeLast('/')?.substringAfterLast('/') ?: "Raiz",
-                artPath = null,
-                sourceTree = sourceTree,
-                codec = "MIDI",
-                bitrate = 0,
-                sampleRate = 44_100,
-                channels = 2,
-                fileSize = size,
-                lastModified = lastModified,
-                bitDepth = 16
-            )
-        }
-
         // Preferência: JAudioTagger quando há path de ficheiro legível
         val resolvedPath = resolveFilePath(uri, fileName)
         val jt = resolvedPath?.let { p ->
@@ -343,6 +317,9 @@ class MusicScanner(private val context: Context) {
             val album = jt?.album
                 ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
                 ?: "Desconhecido"
+            val albumArtist = jt?.albumArtist
+                ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST)
+                ?: ""
             val genre = jt?.genre
                 ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)
                 ?: "Desconhecido"
@@ -385,6 +362,7 @@ class MusicScanner(private val context: Context) {
                 title = title,
                 artist = artist,
                 album = album,
+                albumArtist = albumArtist,
                 genre = genre,
                 duration = duration,
                 uri = uri,
@@ -503,8 +481,7 @@ class MusicScanner(private val context: Context) {
         return when (extension.lowercase()) {
             "flac", "alac", "wav", "aiff", "aif" -> 16
             "mp3", "aac", "m4a", "ogg", "opus", "wma" -> 16
-            "mid", "midi" -> 16
-            else -> props.bitDepth.takeIf { it > 0 } ?: 16
+                        else -> props.bitDepth.takeIf { it > 0 } ?: 16
         }
     }
 

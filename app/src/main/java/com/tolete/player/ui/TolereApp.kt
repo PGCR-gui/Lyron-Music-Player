@@ -1,5 +1,7 @@
 package com.tolete.player.ui
 
+import androidx.compose.material3.RadioButton
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -169,7 +171,6 @@ fun TolereApp(
     onImportM3u: () -> Unit = {},
     onPickFont: () -> Unit = {},
     onPickUiFont: () -> Unit = {},
-    onPickSoundfont: () -> Unit = {},
     onPickMilkFiles: () -> Unit = {},
     onDeleteTracks: (List<Track>) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
@@ -209,7 +210,6 @@ fun TolereApp(
     val shuffleType by vm.shuffleType.collectAsStateWithLifecycle()
     val bitPerfect by vm.bitPerfect.collectAsStateWithLifecycle()
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
-    val soundfontPath by vm.soundfontPath.collectAsStateWithLifecycle()
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
     val milkIntervalSec by vm.milkIntervalSec.collectAsStateWithLifecycle()
     val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
@@ -245,6 +245,8 @@ fun TolereApp(
     var tagEditTrack by remember { mutableStateOf<Track?>(null) }
     var showBatchTagEdit by remember { mutableStateOf(false) }
     var batchTagTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
+    var showBatchRename by remember { mutableStateOf(false) }
+    var batchRenameTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var showAddToPlaylist by remember { mutableStateOf(false) }
     var addToPlaylistTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var showCreatePlaylist by remember { mutableStateOf(false) }
@@ -758,9 +760,6 @@ fun TolereApp(
                     onBitPerfectChange = vm::setBitPerfect,
                     fadeMs = fadeMs,
                     onFadeMsChange = vm::setFadeMs,
-                    soundfontPath = soundfontPath,
-                    onPickSoundfont = onPickSoundfont,
-                    onClearSoundfont = { vm.setSoundfontPath(null) },
                     milkPresetCount = milkPresets.size,
                     milkIntervalSec = milkIntervalSec,
                     onPickMilkFiles = onPickMilkFiles,
@@ -1007,6 +1006,11 @@ fun TolereApp(
                             showBatchTagEdit = true
                         }
                     },
+                    onRenameBatch = {
+                        showSelectionActions = false
+                        batchRenameTracks = selectedTracks
+                        showBatchRename = true
+                    },
                     onDelete = {
                         showSelectionActions = false
                         showDeleteConfirm = true
@@ -1038,6 +1042,30 @@ fun TolereApp(
                     }
                 )
             }
+
+            if (showBatchRename && batchRenameTracks.isNotEmpty()) {
+                BatchRenameDialog(
+                    tracks = batchRenameTracks,
+                    onDismiss = {
+                        showBatchRename = false
+                        batchRenameTracks = emptyList()
+                    },
+                    onConfirm = { pattern ->
+                        // Renomeia arquivos com base no padrão de tags
+                        batchRenameTracks.forEach { t ->
+                            val newName = applyRenamePattern(pattern, t)
+                            // Tenta renomear via ViewModel se disponível
+                            try {
+                                vm.renameTrackFile(t, newName)
+                            } catch (_: Exception) {}
+                        }
+                        showBatchRename = false
+                        batchRenameTracks = emptyList()
+                        selectedTrackIds = emptySet()
+                    }
+                )
+            }
+
 
             if (showDeleteConfirm && selectedTrackIds.isNotEmpty()) {
                 val pool = if (isSearching) searchResults else visible
@@ -1841,6 +1869,7 @@ private fun SelectionActionsMenu(
     onFavorite: () -> Unit,
     onShare: () -> Unit = {},
     onEditTags: (() -> Unit)? = null,
+    onRenameBatch: (() -> Unit)? = null,
     onDelete: () -> Unit
 ) {
     // onEditTags: 1 faixa = editor completo; várias = edição em lote (Artista/Álbum/Artista do Álbum)
@@ -1895,7 +1924,11 @@ private fun SelectionActionsMenu(
                                 onEditTags
                             )
                         }
+                        if (onRenameBatch != null) {
+                            MenuRow("Renomear por tags", onRenameBatch)
+                        }
                         MenuRow("Excluir", onDelete, textColor = Color(0xFFC62828))
+                        MenuRow("Fechar menu", onDismiss)
                     }
                 }
             }
@@ -2371,6 +2404,108 @@ private fun BatchTagEditDialog(
                 },
                 enabled = canApply
             ) { Text("Aplicar") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
+    )
+}
+
+
+private val DEFAULT_RENAME_PATTERNS = listOf(
+    "%ARTIST% - %TITLE%",
+    "%TITLE% - %ARTIST%",
+    "%TITLE% - %ALBUM%",
+    "%TITLE% - %ARTIST% (%ALBUM%)",
+    "%TRACK%. %TITLE%",
+    "%TRACK%. %TITLE% - %ALBUM%",
+    "%TRACK%. %TITLE% - %ARTIST%"
+)
+
+fun applyRenamePattern(pattern: String, track: Track): String {
+    val trackNum = track.trackNumber?.toString()?.padStart(2, '0') ?: "00"
+    return pattern
+        .replace("%ARTIST%", track.artist)
+        .replace("%TITLE%", track.title)
+        .replace("%ALBUM%", track.album)
+        .replace("%ALBUM_ARTIST%", track.albumArtist.ifBlank { track.artist })
+        .replace("%TRACK%", trackNum)
+        .replace("%YEAR%", track.year?.toString() ?: "")
+        .replace("%GENRE%", track.genre)
+        .replace("%COMPOSER%", "")
+        .replace("%COMMENT%", "")
+        .replace("%DISC_NUMBER%", "")
+        .replace("%RECORD_LABEL%", "")
+        .replace("%REMIXER%", "")
+        .trim()
+        .ifBlank { track.title }
+}
+
+@Composable
+private fun BatchRenameDialog(
+    tracks: List<Track>,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var patterns by remember { mutableStateOf(DEFAULT_RENAME_PATTERNS.toMutableList()) }
+    var selected by remember { mutableStateOf(patterns.first()) }
+    var showAdd by remember { mutableStateOf(false) }
+    var newPattern by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Renomear por tags (${tracks.size})") },
+        text = {
+            Column {
+                patterns.forEach { p ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { selected = p }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = selected == p, onClick = { selected = p })
+                        Text(p, Modifier.padding(start = 8.dp), color = Color(0xFF1A1A1A))
+                    }
+                }
+                TextButton(onClick = { showAdd = true }) {
+                    Text("+ Adicionar padrão")
+                }
+                if (showAdd) {
+                    OutlinedTextField(
+                        value = newPattern,
+                        onValueChange = { newPattern = it },
+                        label = { Text("Padrão") },
+                        placeholder = { Text("%ARTIST% - %TITLE%") }
+                    )
+                    Text(
+                        "Códigos: %ARTIST% %TITLE% %ALBUM% %ALBUM_ARTIST% %TRACK% %YEAR% %GENRE%",
+                        fontSize = 11.sp,
+                        color = Color.Gray
+                    )
+                    TextButton(onClick = {
+                        if (newPattern.isNotBlank()) {
+                            patterns = (patterns + newPattern).toMutableList()
+                            selected = newPattern
+                            newPattern = ""
+                            showAdd = false
+                        }
+                    }) { Text("Concluído") }
+                }
+                // Preview
+                tracks.firstOrNull()?.let { t ->
+                    Text(
+                        "Ex.: ${applyRenamePattern(selected, t)}",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(selected) }) { Text("Renomear") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancelar") }

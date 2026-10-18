@@ -55,6 +55,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -131,9 +132,6 @@ fun SettingsScreen(
     onShuffleTypeChange: (ShuffleType) -> Unit = {},
     bitPerfect: Boolean = false,
     onBitPerfectChange: (Boolean) -> Unit = {},
-    soundfontPath: String? = null,
-    onPickSoundfont: () -> Unit = {},
-    onClearSoundfont: () -> Unit = {},
     audioOutput: MusicViewModel.AudioOutputBackend = MusicViewModel.AudioOutputBackend.DEFAULT,
     onAudioOutputChange: (MusicViewModel.AudioOutputBackend) -> Unit = {},
     forceMaxSampleRate: Boolean = false,
@@ -235,9 +233,6 @@ fun SettingsScreen(
                 onBitPerfectChange = onBitPerfectChange,
                 fadeMs = fadeMs,
                 onFadeMsChange = onFadeMsChange,
-                soundfontPath = soundfontPath,
-                onPickSoundfont = onPickSoundfont,
-                onClearSoundfont = onClearSoundfont,
                 onOpenAudioOutput = { onNavigate(SettingsPage.AUDIO_OUTPUT) }
             )
             SettingsPage.AUDIO_OUTPUT -> AudioOutputPage(
@@ -530,10 +525,19 @@ private fun ArtistExceptionsField(
                 text = it
                 onValueChange(it)
             },
-            placeholder = { Text("AC/DC\nCrosby, Stills & Nash") },
+            placeholder = { Text("AC/DC\nCrosby, Stills & Nash", color = Color.White.copy(0.35f)) },
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
-            maxLines = 5
+            maxLines = 5,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White.copy(0.9f),
+                focusedBorderColor = Color(0xFFBB86FC),
+                unfocusedBorderColor = Color.White.copy(0.35f),
+                cursorColor = Color(0xFFBB86FC),
+                focusedContainerColor = Color.White.copy(0.06f),
+                unfocusedContainerColor = Color.White.copy(0.04f)
+            )
         )
     }
 }
@@ -566,9 +570,20 @@ private fun SeparatorOption(
                     onSeparatorsChange(it)
                 },
                 label = { Text("Separadores (separados por espaço)") },
-                placeholder = { Text("; / feat.") },
+                placeholder = { Text("; / feat.", color = Color.White.copy(0.35f)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White.copy(0.9f),
+                    focusedBorderColor = Color(0xFFBB86FC),
+                    unfocusedBorderColor = Color.White.copy(0.35f),
+                    cursorColor = Color(0xFFBB86FC),
+                    focusedLabelColor = Color(0xFFBB86FC),
+                    unfocusedLabelColor = Color.White.copy(0.55f),
+                    focusedContainerColor = Color.White.copy(0.06f),
+                    unfocusedContainerColor = Color.White.copy(0.04f)
+                )
             )
         }
     }
@@ -1160,22 +1175,22 @@ private fun VisualizerPage(
             Column(Modifier.weight(1f)) {
                 Text("Importar presets", fontSize = 16.sp)
                 Text(
-                    if (presetCount > 0) "$presetCount presets importados" else "Nenhum preset importado",
+                    if (presetCount > 0) "$presetCount presets disponíveis (embutidos + importados)" else "Carregando presets embutidos…",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.5f)
                 )
             }
         }
         Text(
-            "Escolha arquivos .milk, texturas usadas por eles (.jpg, .png, .tga) ou um .zip com tudo. " +
-                "Você pode selecionar vários de uma vez.",
+            "Presets .milk já vêm embutidos no app. Você ainda pode importar extras: arquivos .milk, " +
+                "texturas (.jpg, .png, .tga) ou um .zip. Vários de uma vez são aceitos.",
             fontSize = 12.sp,
             color = Color.White.copy(0.4f),
             modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
         )
         if (presetCount > 0) {
             Text(
-                "Remover todos os presets",
+                "Remover presets importados (os embutidos voltam na próxima abertura)",
                 modifier = Modifier
                     .clickable(onClick = onClear)
                     .padding(vertical = 8.dp),
@@ -1415,13 +1430,41 @@ private fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> Un
 @Composable
 private fun ChangelogPage() {
     val entries = listOf(
-    ChangelogEntry(
+        ChangelogEntry(
+            "0.30",
+            "182",
+            listOf(
+                "Álbuns mesclados quando têm o mesmo nome e o mesmo artista do álbum nas tags",
+                "Animações de favoritar/desfavoritar no Now Playing substituídas por GIFs",
+                "Renderizar e exportar vídeo .mp4 no Now Playing (presets 720p–4K, capa + título, salva em Filmes/Lyron)",
+                "Fila de reprodução redesenhada no estilo liquid glass com capa borrada de fundo",
+                "Menu de multi-seleção: fechar menu e renomear arquivos em lote por tags (padrões editáveis)",
+                "Renomear por tags também disponível na tela de edição de tags",
+                "Abertura de músicas a partir de outros apps com miniplayer liquid glass (marca Lyron)"
+            )
+        ),
+        ChangelogEntry(
+            "0.26",
+            "178",
+            listOf(
+                "Contraste corrigido nos diálogos Buscar letra e Informações técnicas (fonte escura em fundo claro)",
+                "Campos de texto na Biblioteca com fonte clara em fundo escuro",
+                "Botão para atrasar/adiantar todas as letras em ms na tela de sincronização",
+                "Presets .milk embutidos no app (ainda é possível importar arquivos extras)",
+                "Menu Visualizer no Now Playing (skin padrão): lista de presets, favoritos no topo, auto-scroll ao preset atual",
+                "Gestos no Now Playing: deslizar para cima bloqueia o preset (ícone cadeado); deslizar para a esquerda desbloqueia",
+                "Animações mais suaves ao deslizar músicas na fila atual",
+                "Visualizador para de renderizar ao pausar; sincronia e precisão melhoradas",
+            )
+        ),
+        ChangelogEntry(
             "0.25",
             "177",
             listOf(
                 "Implementação experimental do projectM",
-                )
-            ),
+                "O projeto agora está no github ʕ•̫͡•ʔ",
+            )
+        ),
         ChangelogEntry(
             "0.20",
             "170",
@@ -1475,7 +1518,7 @@ private fun ChangelogPage() {
             "0.8",
             "142",
             listOf(
-                "Base da versão anterior (skins, letras, tags, biblioteca)"
+                "Daqui pra trás eu não lembro kkkkkkkkkk"
             )
         )
     )
@@ -1522,6 +1565,8 @@ private fun LicensesPage() {
         "Media3 (ExoPlayer)" to "Apache License 2.0",
         "Coil" to "Apache License 2.0",
         "jaudiotagger" to "LGPL 2.1 / Apache 2.0",
+        "projectM" to "LGPL 2.1",
+        "Milkdrop (preset format / community presets)" to "Public domain / author licenses",
         "Kotlin Coroutines" to "Apache License 2.0",
         "Material Icons" to "Apache License 2.0",
         "Palette" to "Apache License 2.0"
@@ -1590,9 +1635,6 @@ private fun PlayerPage(
     onBitPerfectChange: (Boolean) -> Unit,
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
-    soundfontPath: String? = null,
-    onPickSoundfont: () -> Unit = {},
-    onClearSoundfont: () -> Unit = {},
     onOpenAudioOutput: () -> Unit = {}
 ) {
     Column(
@@ -1691,57 +1733,6 @@ private fun PlayerPage(
         )
 
         Spacer(Modifier.height(24.dp))
-        Text(
-            "MIDI",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Text(
-            "Arquivos .mid / .midi entram na biblioteca. A reprodução usa o sintetizador do sistema.",
-            fontSize = 13.sp,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.White.copy(0.08f))
-                .clickable(onClick = onPickSoundfont)
-                .padding(horizontal = 14.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Importar soundfont (.sf2)", fontSize = 16.sp)
-                Text(
-                    soundfontPath?.let { java.io.File(it).name } ?: "Nenhum soundfont importado",
-                    fontSize = 12.sp,
-                    color = Color.White.copy(0.5f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-        if (soundfontPath != null) {
-            Text(
-                "Remover soundfont",
-                modifier = Modifier
-                    .padding(top = 10.dp)
-                    .clickable(onClick = onClearSoundfont)
-                    .padding(vertical = 6.dp),
-                fontSize = 14.sp,
-                color = Color(0xFFFF8A80)
-            )
-        }
-        Text(
-            "O soundfont fica salvo no app. Em dispositivos com suporte, pode ser usado na síntese MIDI.",
-            fontSize = 12.sp,
-            color = Color.White.copy(0.4f),
-            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
-        )
-
         Spacer(Modifier.height(20.dp))
         Row(
             Modifier

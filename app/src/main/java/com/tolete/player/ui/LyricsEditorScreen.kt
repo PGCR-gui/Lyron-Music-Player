@@ -263,8 +263,61 @@ fun LyricsEditorScreen(
                 color = Color.White.copy(0.55f),
                 fontSize = 12.sp,
                 maxLines = 1,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp)
             )
+
+            // Offset global de todas as letras (apenas modo sincronizado)
+            if (!simpleMode) {
+                var offsetMs by remember { mutableStateOf("0") }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Offset (ms)", color = Color.White.copy(0.7f), fontSize = 13.sp)
+                    BasicTextField(
+                        value = offsetMs,
+                        onValueChange = { v ->
+                            if (v.isEmpty() || v == "-" || v.toLongOrNull() != null) offsetMs = v
+                        },
+                        modifier = Modifier
+                            .width(72.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White.copy(0.12f))
+                            .border(1.dp, Color.White.copy(0.25f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
+                        singleLine = true,
+                        cursorBrush = SolidColor(appColors.accent)
+                    )
+                    IconButton(
+                        onClick = {
+                            val delta = offsetMs.toLongOrNull() ?: 0L
+                            if (delta == 0L) return@IconButton
+                            for (i in lines.indices) {
+                                val t = lines[i].timeMs
+                                if (t >= 0) {
+                                    lines[i] = lines[i].copy(timeMs = (t + delta).coerceAtLeast(0L))
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(appColors.accent.copy(alpha = 0.85f))
+                    ) {
+                        Icon(Icons.Rounded.Check, contentDescription = "Aplicar offset", tint = Color.Black, modifier = Modifier.size(18.dp))
+                    }
+                    Text(
+                        "Aplica a todas as linhas sincronizadas",
+                        color = Color.White.copy(0.4f),
+                        fontSize = 11.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
 
             if (simpleMode) {
                 // Uma única caixa grande de texto

@@ -1,5 +1,7 @@
 package com.tolete.player.ui
 
+import androidx.compose.foundation.clickable
+
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -310,6 +313,35 @@ fun TagEditorScreen(
                 color = Color.White.copy(0.4f),
                 maxLines = 2
             )
+            var renomearPorTags by remember { mutableStateOf(false) }
+            var renamePattern by remember { mutableStateOf("%ARTIST% - %TITLE%") }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+                    .clickable { renomearPorTags = !renomearPorTags },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = renomearPorTags,
+                    onCheckedChange = { renomearPorTags = it }
+                )
+                Text("Renomear arquivo por tags ao salvar", fontSize = 14.sp)
+            }
+            if (renomearPorTags) {
+                OutlinedTextField(
+                    value = renamePattern,
+                    onValueChange = { renamePattern = it },
+                    label = { Text("Padrão") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Text(
+                    "%ARTIST% %TITLE% %ALBUM% %ALBUM_ARTIST% %TRACK% %YEAR%",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(0.45f)
+                )
+            }
             fileHint?.let {
                 Text(it, fontSize = 12.sp, color = Color.White.copy(0.5f), modifier = Modifier.padding(top = 4.dp))
             }

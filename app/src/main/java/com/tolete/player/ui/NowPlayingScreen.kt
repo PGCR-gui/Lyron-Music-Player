@@ -1,6 +1,9 @@
 package com.tolete.player.ui
 
+import androidx.compose.material3.RadioButton
+
 import android.content.Context
+import android.content.SharedPreferences
 import android.media.AudioManager
 import android.os.Build
 import android.widget.Toast
@@ -70,6 +73,8 @@ import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.media3.common.Player
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
@@ -78,6 +83,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.rememberCoroutineScope
 import com.tolete.player.data.LrcLibClient
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -125,6 +131,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.Font
 import coil.compose.AsyncImage
+import coil.ImageLoader
+import coil.decode.GifDecoder
+import coil.request.ImageRequest
 import com.tolete.player.R
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
@@ -171,7 +180,6 @@ private fun codecDrawableRes(codec: String?): Int? {
         c.contains("wav") || c.contains("pcm") -> R.drawable.wav
         c.contains("ogg") || c.contains("vorbis") || c.contains("opus") -> R.drawable.ogg
         c.contains("dsd") || c.contains("dsf") || c.contains("dff") -> R.drawable.dsd
-        c.contains("midi") || c.contains("mid") -> R.drawable.midi
         else -> null
     }
 }
@@ -242,10 +250,15 @@ fun NowPlayingScreen(
 ) {
     // Visualizador .milk: liga ao tocar na capa, desliga ao tocar no visualizador
     var showVisualizer by remember { mutableStateOf(false) }
+    var presetLocked by remember { mutableStateOf(false) }
+    var forcePresetPath by remember { mutableStateOf<String?>(null) }
+    var currentPresetPath by remember { mutableStateOf<String?>(null) }
+    var showPresetPicker by remember { mutableStateOf(false) }
     var position by remember { mutableLongStateOf(getPosition()) }
     var dragFraction by remember { mutableStateOf<Float?>(null) }
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var showVideoExport by remember { mutableStateOf(false) }
     var showTechDetails by remember { mutableStateOf(false) }
     var pendingDeleteTrack by remember { mutableStateOf<Track?>(null) }
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
@@ -395,6 +408,31 @@ fun NowPlayingScreen(
                                 showLyricsSearch = true
                             }
                         )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Visualizer", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                if (!ProjectMNative.isAvailable) {
+                                    Toast.makeText(context, "Visualizador indisponível nesta versão do app", Toast.LENGTH_SHORT).show()
+                                } else if (milkPresets.isEmpty()) {
+                                    Toast.makeText(context, "Nenhum preset .milk disponível", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showPresetPicker = true
+                                    showVisualizer = true
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Renderizar e exportar vídeo", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                showVideoExport = true
+                            }
+                        )
                     }
                 }
             }
@@ -486,23 +524,41 @@ fun NowPlayingScreen(
                                 )
                             }
                             .pointerInput(track.id) {
-                                var total = 0f
-                                detectHorizontalDragGestures(
+                                var totalX = 0f
+                                var totalY = 0f
+                                detectDragGestures(
                                     onDragEnd = {
                                         when {
-                                            total < -80f -> {
-                                                artNavForward = true
-                                                onNext()
+                                            // deslizar para cima → bloqueia preset aleatório
+                                            totalY < -80f && kotlin.math.abs(totalY) > kotlin.math.abs(totalX) -> {
+                                                if (showVisualizer) {
+                                                    presetLocked = true
+                                                    Toast.makeText(context, "Preset bloqueado", Toast.LENGTH_SHORT).show()
+                                                }
                                             }
-                                            total > 80f -> {
+                                            // deslizar para a esquerda → desbloqueia (e troca faixa se não visualizer)
+                                            totalX < -80f && kotlin.math.abs(totalX) > kotlin.math.abs(totalY) -> {
+                                                if (showVisualizer && presetLocked) {
+                                                    presetLocked = false
+                                                    Toast.makeText(context, "Preset desbloqueado", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    artNavForward = true
+                                                    onNext()
+                                                }
+                                            }
+                                            totalX > 80f && kotlin.math.abs(totalX) > kotlin.math.abs(totalY) -> {
                                                 artNavForward = false
                                                 onPrevious()
                                             }
                                         }
-                                        total = 0f
+                                        totalX = 0f
+                                        totalY = 0f
                                     },
-                                    onDragCancel = { total = 0f },
-                                    onHorizontalDrag = { _, dx -> total += dx }
+                                    onDragCancel = { totalX = 0f; totalY = 0f },
+                                    onDrag = { _, amount ->
+                                        totalX += amount.x
+                                        totalY += amount.y
+                                    }
                                 )
                             }
                     ) {
@@ -536,12 +592,29 @@ fun NowPlayingScreen(
                                 presets = milkPresets,
                                 intervalSeconds = milkIntervalSec,
                                 cornerRadius = 20.dp,
+                                locked = presetLocked,
+                                isPlaying = isPlaying,
+                                forcePresetPath = forcePresetPath,
                                 modifier = Modifier.fillMaxSize(),
                                 onFailure = {
                                     showVisualizer = false
                                     Toast.makeText(context, "Não foi possível iniciar o visualizador", Toast.LENGTH_SHORT).show()
-                                }
+                                },
+                                onCurrentPreset = { currentPresetPath = it }
                             )
+                            if (presetLocked) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Lock,
+                                    contentDescription = "Preset bloqueado",
+                                    tint = Color.White.copy(0.9f),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(10.dp)
+                                        .size(22.dp)
+                                        .background(Color.Black.copy(0.45f), CircleShape)
+                                        .padding(3.dp)
+                                )
+                            }
                         }
                         if (track.isHiRes) {
                             HdBadge(Modifier.align(Alignment.BottomEnd).padding(12.dp))
@@ -557,20 +630,24 @@ fun NowPlayingScreen(
                         // Qualificado: evita ColumnScope.AnimatedVisibility (este Box está dentro de Column)
                         androidx.compose.animation.AnimatedVisibility(
                             visible = heartBurst != null,
-                            enter = scaleIn(
-                                initialScale = 0.3f,
-                                animationSpec = tween(320, easing = FastOutSlowInEasing)
-                            ) + fadeIn(tween(200)),
-                            exit = scaleOut(targetScale = 1.4f, animationSpec = tween(400)) +
-                                fadeOut(tween(400)),
+                            enter = fadeIn(tween(120)),
+                            exit = fadeOut(tween(300)),
                             modifier = Modifier.align(Alignment.Center)
                         ) {
                             val fav = heartBurst == true
-                            Icon(
-                                imageVector = if (fav) Icons.Rounded.Favorite else Icons.Filled.HeartBroken,
+                            val ctx = LocalContext.current
+                            val gifLoader = remember(ctx) {
+                                ImageLoader.Builder(ctx)
+                                    .components { add(GifDecoder.Factory()) }
+                                    .build()
+                            }
+                            AsyncImage(
+                                model = ImageRequest.Builder(ctx)
+                                    .data(if (fav) R.raw.favoritar else R.raw.desfavoritar)
+                                    .build(),
+                                imageLoader = gifLoader,
                                 contentDescription = null,
-                                tint = if (fav) Color(0xFFE53935) else Color(0xFFB0BEC5),
-                                modifier = Modifier.size(96.dp)
+                                modifier = Modifier.size(140.dp)
                             )
                         }
                     }
@@ -787,6 +864,37 @@ fun NowPlayingScreen(
             }
         }
 
+        
+    if (showVideoExport) {
+        VideoExportDialog(
+            trackTitle = track.title,
+            onDismiss = { showVideoExport = false },
+            onExport = { width, height ->
+                showVideoExport = false
+                Toast.makeText(context, "Renderizando ${width}x${height}…", Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        com.tolete.player.data.VideoExporter.export(
+                            context = context,
+                            title = track.title,
+                            artist = track.artist,
+                            artPath = track.artPath,
+                            durationMs = track.duration.coerceAtLeast(5000L).coerceAtMost(60_000L),
+                            width = width,
+                            height = height,
+                            audioPath = track.path
+                        )
+                    }
+                    Toast.makeText(
+                        context,
+                        if (result.success) result.message else "Falha: ${result.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+    }
+
         if (showQueue) {
             QueueSheet(
                 queue = queue,
@@ -864,6 +972,19 @@ fun NowPlayingScreen(
                 }
             )
         }
+        if (showPresetPicker) {
+            MilkPresetPickerDialog(
+                presets = milkPresets,
+                currentPath = currentPresetPath,
+                onDismiss = { showPresetPicker = false },
+                onSelect = { path ->
+                    forcePresetPath = path
+                    presetLocked = true
+                    showPresetPicker = false
+                    showVisualizer = true
+                }
+            )
+        }
     }
 }
 
@@ -921,7 +1042,7 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Informações técnicas") },
+        title = { Text("Informações técnicas", color = Color(0xFF1A1A1A)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 TechRow("Título", track.title)
@@ -939,15 +1060,15 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 audioLines.forEachIndexed { i, line ->
                     if (i == 0) {
-                        Text(line, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+                        Text(line, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color(0xFF1A1A1A), modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
                     } else {
-                        Text(line, fontSize = 13.sp, color = Color.White.copy(0.85f), modifier = Modifier.padding(vertical = 2.dp))
+                        Text(line, fontSize = 13.sp, color = Color(0xFF333333), modifier = Modifier.padding(vertical = 2.dp))
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fechar") }
+            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
         }
     )
 }
@@ -955,8 +1076,8 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
 @Composable
 private fun TechRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = Color.White.copy(0.55f))
-        Text(value, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = Color(0xFF666666))
+        Text(value, fontSize = 13.sp, color = Color(0xFF1A1A1A), maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1066,6 +1187,7 @@ private fun SeekBar(
     }
 }
 
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun QueueSheet(
@@ -1091,24 +1213,78 @@ internal fun QueueSheet(
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     var menuForIndex by remember { mutableStateOf<Int?>(null) }
 
+    val currentTrack = order.firstOrNull { it.id == currentId } ?: order.firstOrNull()
+    var queueSearch by remember { mutableStateOf("") }
+    val filtered = remember(order, queueSearch) {
+        if (queueSearch.isBlank()) order
+        else order.filter {
+            it.title.contains(queueSearch, true) || it.artist.contains(queueSearch, true)
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF1A1528)
+        containerColor = Color.Transparent,
+        dragHandle = null
     ) {
-        Text(
-            "Fila de reprodução",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold
+        Box(Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
+            // Fundo liquid glass: capa borrada
+            if (currentTrack?.artPath != null) {
+                AsyncImage(
+                    model = currentTrack.artPath,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(40.dp)
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0xCC0A0A12))
+            )
+            Column(Modifier.fillMaxSize()) {
+        // Header estilo vídeo: contagem + fechar
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${order.indexOfFirst { it.id == currentId }.coerceAtLeast(0) + 1} / ${order.size}",
+                color = Color.White.copy(0.7f),
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = Color.White)
+            }
+        }
+        // Busca na fila
+        OutlinedTextField(
+            value = queueSearch,
+            onValueChange = { queueSearch = it },
+            placeholder = { Text("Pesquise nesta fila...", color = Color.White.copy(0.4f)) },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color.White.copy(0.3f),
+                unfocusedBorderColor = Color.White.copy(0.15f),
+                cursorColor = appColors.accent
+            )
         )
         LazyColumn(
             contentPadding = PaddingValues(bottom = 32.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth().weight(1f)
         ) {
-            itemsIndexed(order, key = { _, t -> t.id }) { index, track ->
+            itemsIndexed(filtered, key = { _, t -> t.id }) { index, track ->
+                val realIndex = order.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
                 val active = track.id == currentId
-                val isDragging = draggingFrom == index
+                val isDragging = draggingFrom == realIndex
                 Box {
                     Row(
                         Modifier
@@ -1116,21 +1292,36 @@ internal fun QueueSheet(
                             .graphicsLayer {
                                 if (isDragging) {
                                     translationY = dragOffsetY
-                                    alpha = 0.9f
-                                    shadowElevation = 8f
+                                    alpha = 0.92f
+                                    scaleX = 1.03f
+                                    scaleY = 1.03f
+                                    shadowElevation = 16f
                                 }
                             }
                             .zIndex(if (isDragging) 1f else 0f)
-                            .background(if (active) Color.White.copy(0.08f) else Color.Transparent)
-                            .pointerInput(index) {
+                            .then(
+                                if (active) Modifier
+                                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                                    .border(1.5.dp, Color(0xFF4ADE80).copy(0.85f), RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF4ADE80).copy(0.12f), RoundedCornerShape(12.dp))
+                                else Modifier
+                            )
+                            .pointerInput(realIndex) {
                                 detectTapGestures(
-                                    onTap = { onSkipTo(index); onDismiss() },
-                                    onLongPress = { menuForIndex = index }
+                                    onTap = { onSkipTo(realIndex) },
+                                    onLongPress = { menuForIndex = realIndex }
                                 )
                             }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Handle de arrastar (estilo vídeo)
+                        Icon(
+                            Icons.Rounded.DragHandle,
+                            contentDescription = null,
+                            tint = Color.White.copy(0.35f),
+                            modifier = Modifier.padding(end = 8.dp).size(20.dp)
+                        )
                         ArtImage(path = track.artPath, size = 44.dp)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
                             Text(
@@ -1242,6 +1433,8 @@ internal fun QueueSheet(
                 }
             }
         }
+            } // Column
+        } // Box
     }
 }
 
@@ -1262,32 +1455,44 @@ internal fun LyricsSearchDialog(
     var searched by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    val dialogDark = Color(0xFF1A1A1A)
+    val dialogMuted = Color(0xFF555555)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Buscar letra") },
+        title = { Text("Buscar letra", color = dialogDark) },
         text = {
             Column {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Título") },
+                    label = { Text("Título", color = dialogMuted) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
+                        focusedTextColor = dialogDark,
+                        unfocusedTextColor = dialogDark,
+                        focusedBorderColor = Color(0xFF5C6BC0),
+                        unfocusedBorderColor = Color(0xFFAAAAAA),
+                        cursorColor = Color(0xFF5C6BC0),
+                        focusedLabelColor = Color(0xFF5C6BC0),
+                        unfocusedLabelColor = dialogMuted
                     )
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = artist,
                     onValueChange = { artist = it },
-                    label = { Text("Artista") },
+                    label = { Text("Artista", color = dialogMuted) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
+                        focusedTextColor = dialogDark,
+                        unfocusedTextColor = dialogDark,
+                        focusedBorderColor = Color(0xFF5C6BC0),
+                        unfocusedBorderColor = Color(0xFFAAAAAA),
+                        cursorColor = Color(0xFF5C6BC0),
+                        focusedLabelColor = Color(0xFF5C6BC0),
+                        unfocusedLabelColor = dialogMuted
                     )
                 )
                 Spacer(Modifier.height(12.dp))
@@ -1296,7 +1501,7 @@ internal fun LyricsSearchDialog(
                         CircularProgressIndicator(modifier = Modifier.size(28.dp))
                     }
                 } else if (searched && results.isEmpty()) {
-                    Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = Color.White.copy(0.7f))
+                    Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = dialogMuted)
                 } else if (results.isNotEmpty()) {
                     LazyColumn(Modifier.height(220.dp)) {
                         items(results) { r ->
@@ -1306,7 +1511,7 @@ internal fun LyricsSearchDialog(
                                     .clickable { onPick(r) }
                                     .padding(vertical = 10.dp)
                             ) {
-                                Text(r.trackName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(r.trackName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = dialogDark, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(
                                     buildString {
                                         append(r.artistName)
@@ -1315,7 +1520,7 @@ internal fun LyricsSearchDialog(
                                         append(if (r.hasSynced) " · sincronizada" else " · texto")
                                     },
                                     fontSize = 12.sp,
-                                    color = Color.White.copy(0.65f),
+                                    color = dialogMuted,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -1336,10 +1541,10 @@ internal fun LyricsSearchDialog(
                         searched = true
                     }
                 }
-            ) { Text("Pesquisar") }
+            ) { Text("Pesquisar", color = Color(0xFF5C6BC0)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Descartar") }
+            TextButton(onClick = onDismiss) { Text("Descartar", color = dialogMuted) }
         }
     )
 }
@@ -1559,5 +1764,138 @@ private fun SyllableLine(
         modifier = modifier,
         textAlign = TextAlign.Center,
         lineHeight = (fontSize.value * 1.35f).sp
+    )
+}
+
+
+@Composable
+internal fun MilkPresetPickerDialog(
+    presets: List<String>,
+    currentPath: String?,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val prefs = remember {
+        context.getSharedPreferences("milk_favorites", Context.MODE_PRIVATE)
+    }
+    var favorites by remember {
+        mutableStateOf(prefs.getStringSet("favs", emptySet())?.toSet() ?: emptySet())
+    }
+    fun toggleFav(path: String) {
+        val name = java.io.File(path).name
+        val next = favorites.toMutableSet()
+        if (name in next) next.remove(name) else next.add(name)
+        favorites = next
+        prefs.edit().putStringSet("favs", next).apply()
+    }
+    val sorted = remember(presets, favorites) {
+        val fav = presets.filter { java.io.File(it).name in favorites }
+        val rest = presets.filter { java.io.File(it).name !in favorites }
+        fav + rest
+    }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val currentIndex = remember(sorted, currentPath) {
+        if (currentPath == null) 0
+        else sorted.indexOfFirst {
+            it == currentPath || java.io.File(it).name == java.io.File(currentPath).name
+        }.coerceAtLeast(0)
+    }
+    LaunchedEffect(currentIndex, sorted.size) {
+        if (sorted.isNotEmpty()) listState.scrollToItem(currentIndex)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Visualizer — presets", color = Color(0xFF1A1A1A)) },
+        text = {
+            LazyColumn(state = listState, modifier = Modifier.height(320.dp)) {
+                items(sorted.size) { i ->
+                    val path = sorted[i]
+                    val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
+                    val isFav = java.io.File(path).name in favorites
+                    val isCurrent = currentPath != null && (
+                        path == currentPath || java.io.File(path).name == java.io.File(currentPath).name
+                    )
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(path) }
+                            .background(if (isCurrent) Color(0xFF5C6BC0).copy(0.15f) else Color.Transparent)
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { toggleFav(path) }, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                imageVector = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                contentDescription = "Favoritar",
+                                tint = if (isFav) Color(0xFFE53935) else Color(0xFF888888),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Text(
+                            name,
+                            color = Color(0xFF1A1A1A),
+                            fontSize = 14.sp,
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+        }
+    )
+}
+
+
+@Composable
+private fun VideoExportDialog(
+    trackTitle: String,
+    onDismiss: () -> Unit,
+    onExport: (width: Int, height: Int) -> Unit
+) {
+    val presets = listOf(
+        "720p (1280x720)" to (1280 to 720),
+        "1080p (1920x1080)" to (1920 to 1080),
+        "1440p (2560x1440)" to (2560 to 1440),
+        "4K (3840x2160)" to (3840 to 2160),
+        "Quadrado 1080 (1080x1080)" to (1080 to 1080),
+        "Stories 1080x1920" to (1080 to 1920)
+    )
+    var selected by remember { mutableStateOf(presets[1]) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Exportar vídeo") },
+        text = {
+            Column {
+                Text("Faixa: $trackTitle", fontSize = 13.sp, color = Color.Gray)
+                Spacer(Modifier.height(8.dp))
+                presets.forEach { preset ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { selected = preset }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = selected == preset, onClick = { selected = preset })
+                        Text(preset.first, Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val (w, h) = selected.second
+                onExport(w, h)
+            }) { Text("Exportar MP4") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
     )
 }

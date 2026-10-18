@@ -2,7 +2,6 @@ package com.tolete.player
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.media.MediaPlayer
 import android.net.Uri
 import android.app.PendingIntent
 import android.content.Intent
@@ -41,7 +40,6 @@ class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var consecutiveErrors = 0
-    private var midiPlayer: MediaPlayer? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val toggleFavoriteCommand = SessionCommand(ACTION_TOGGLE_FAVORITE, Bundle.EMPTY)
@@ -129,27 +127,13 @@ class PlaybackService : MediaSessionService() {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) consecutiveErrors = 0
-                // Sincroniza MediaPlayer de MIDI com o estado do ExoPlayer
-                try {
-                    midiPlayer?.let { mp ->
-                        if (isPlaying && !mp.isPlaying) mp.start()
-                        else if (!isPlaying && mp.isPlaying) mp.pause()
-                    }
-                } catch (_: Exception) {}
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 refreshCustomButtons()
-                handleMidiTransition(mediaItem)
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                // Se for MIDI, tenta MediaPlayer antes de pular
-                val item = player.currentMediaItem
-                if (item != null && isMidiItem(item)) {
-                    handleMidiTransition(item)
-                    return
-                }
                 handlePlayerError(player, error)
             }
         })
@@ -240,49 +224,6 @@ class PlaybackService : MediaSessionService() {
      * avisa e pula para a próxima em vez de deixar o player travado em erro.
      * O limite de erros seguidos evita loop infinito com repetição ativada.
      */
-    private fun isMidiItem(item: MediaItem): Boolean {
-        val uri = item.localConfiguration?.uri?.toString()?.lowercase() ?: return false
-        return uri.endsWith(".mid") || uri.endsWith(".midi") ||
-            item.localConfiguration?.mimeType?.contains("midi", true) == true
-    }
-
-    private fun handleMidiTransition(mediaItem: MediaItem?) {
-        stopMidi()
-        if (mediaItem == null || !isMidiItem(mediaItem)) return
-        val uri = mediaItem.localConfiguration?.uri ?: return
-        try {
-            // ExoPlayer não decodifica MIDI — usa o sintetizador do sistema via MediaPlayer
-            mediaSession?.player?.pause()
-            val mp = MediaPlayer().apply {
-                setDataSource(this@PlaybackService, uri)
-                setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                setOnCompletionListener {
-                    // Avança para a próxima no player principal
-                    try { mediaSession?.player?.seekToNextMediaItem() } catch (_: Exception) {}
-                }
-                prepare()
-                start()
-            }
-            midiPlayer = mp
-        } catch (e: Exception) {
-            midiPlayer = null
-            Toast.makeText(this, "Não foi possível reproduzir MIDI", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun stopMidi() {
-        try {
-            midiPlayer?.stop()
-            midiPlayer?.release()
-        } catch (_: Exception) {}
-        midiPlayer = null
-    }
-
     private fun handlePlayerError(player: ExoPlayer, error: PlaybackException) {
         consecutiveErrors++
         Toast.makeText(
@@ -311,7 +252,6 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
-        stopMidi()
         scope.cancel()
         mediaSession?.run {
             player.release()

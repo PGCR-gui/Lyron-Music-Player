@@ -35,7 +35,11 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
 
     @Volatile var presets: List<String> = emptyList()
     @Volatile var intervalMs: Long = 30_000L
+    @Volatile var locked: Boolean = false
+    @Volatile var paused: Boolean = false
+    @Volatile var forcedPresetPath: String? = null
     @Volatile var onFailure: (() -> Unit)? = null
+    @Volatile var currentPresetPath: String? = null
 
     private var handle = 0L
     private var width = 0
@@ -75,18 +79,34 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        if (handle == 0L) {
+        if (handle == 0L || paused) {
             GLES30.glClearColor(0f, 0f, 0f, 1f)
             GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             return
+        }
+
+        // Forçar um preset específico (menu Visualizer)
+        val forced = forcedPresetPath
+        if (forced != null) {
+            forcedPresetPath = null
+            val i = presets.indexOf(forced).takeIf { it >= 0 }
+                ?: presets.indexOfFirst { it.endsWith(File(forced).name) }.takeIf { it >= 0 }
+            if (i != null) loadPreset(i, smooth = false)
+            else if (File(forced).exists()) {
+                index = -1
+                lastSwitch = SystemClock.uptimeMillis()
+                ProjectMNative.nativeLoadPreset(handle, forced, false)
+                currentPresetPath = forced
+            }
         }
 
         // lista de presets mudou (ou primeira vez) -> escolhe um aleatório
         val list = presets
         if (list !== loadedList) {
             loadedList = list
-            if (list.isNotEmpty()) loadPreset(Random.nextInt(list.size), smooth = false)
-        } else if (list.size > 1 && intervalMs > 0 &&
+            if (list.isNotEmpty() && !locked) loadPreset(Random.nextInt(list.size), smooth = false)
+            else if (list.isNotEmpty() && locked && index < 0) loadPreset(0, smooth = false)
+        } else if (!locked && list.size > 1 && intervalMs > 0 &&
             SystemClock.uptimeMillis() - lastSwitch >= intervalMs
         ) {
             var next = Random.nextInt(list.size)
@@ -103,6 +123,7 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
         val path = loadedList.getOrNull(i) ?: return
         index = i
         lastSwitch = SystemClock.uptimeMillis()
+        currentPresetPath = path
         if (File(path).exists()) ProjectMNative.nativeLoadPreset(handle, path, smooth)
     }
 
@@ -135,7 +156,11 @@ fun MilkVisualizer(
     intervalSeconds: Int,
     cornerRadius: Dp,
     modifier: Modifier = Modifier,
-    onFailure: () -> Unit = {}
+    locked: Boolean = false,
+    isPlaying: Boolean = true,
+    forcePresetPath: String? = null,
+    onFailure: () -> Unit = {},
+    onCurrentPreset: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val radiusPx = with(LocalDensity.current) { cornerRadius.toPx() }
@@ -161,22 +186,28 @@ fun MilkVisualizer(
     SideEffect {
         renderer.presets = presets
         renderer.intervalMs = intervalSeconds * 1000L
+        renderer.locked = locked
+        renderer.paused = !isPlaying
+        if (forcePresetPath != null) renderer.forcedPresetPath = forcePresetPath
         renderer.onFailure = onFailure
+        onCurrentPreset(renderer.currentPresetPath)
     }
 
-    // Só captura PCM enquanto o visualizador existe
-    DisposableEffect(Unit) {
+    // Só captura PCM enquanto o visualizador existe e a música toca
+    DisposableEffect(isPlaying) {
         AudioTap.resetReader()
-        AudioTap.active = true
+        AudioTap.active = isPlaying
         onDispose { AudioTap.active = false }
     }
 
-    // ~60 quadros/s (limita também em telas de 120 Hz)
-    LaunchedEffect(glView) {
-        while (true) {
+    // ~60 quadros/s quando tocando; para de pedir frames ao pausar
+    LaunchedEffect(glView, isPlaying) {
+        while (isPlaying) {
             glView.requestRender()
             delay(16)
         }
+        // um último frame limpo ao pausar
+        glView.requestRender()
     }
 
     // pausa/retoma o GL junto com a Activity

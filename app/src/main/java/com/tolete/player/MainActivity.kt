@@ -28,6 +28,11 @@ import androidx.compose.material3.darkColorScheme
 import com.tolete.player.ui.MusicViewModel
 import com.tolete.player.ui.SplashScreen
 import com.tolete.player.ui.TolereApp
+import com.tolete.player.ui.ExternalMiniPlayer
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
@@ -38,6 +43,9 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MusicViewModel by viewModels()
 
     private var showSplash by mutableStateOf(true)
+    private var externalAudioUri by mutableStateOf<Uri?>(null)
+    private var externalTitle by mutableStateOf<String?>("Lyron")
+    private var externalArtist by mutableStateOf<String?>("")
 
     private val pickFolder = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -133,25 +141,6 @@ class MainActivity : ComponentActivity() {
 
     private var pendingBackupJson: String = ""
 
-
-    private val pickSoundfont = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri == null) return@registerForActivityResult
-        try {
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "soundfont.sf2"
-            val dest = File(filesDir, "soundfonts").apply { mkdirs() }.let { dir ->
-                File(dir, name.substringAfterLast(':').ifBlank { "soundfont.sf2" })
-            }
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
-            }
-            viewModel.setSoundfontPath(dest.absolutePath)
-            Toast.makeText(this, "Soundfont importado", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, "Falha ao importar soundfont", Toast.LENGTH_SHORT).show()
-        }
-    }
 
     // Presets do visualizador: .milk, texturas (jpg/png/tga...) ou .zip com tudo junto
     private val pickMilkFiles = registerForActivityResult(
@@ -302,12 +291,46 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        val uri: Uri? = when {
+            action == Intent.ACTION_VIEW -> intent.data
+            action == Intent.ACTION_SEND -> {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+            }
+            else -> null
+        }
+        if (uri != null) {
+            externalAudioUri = uri
+            externalTitle = intent.getStringExtra(Intent.EXTRA_TITLE) ?: uri.lastPathSegment ?: "Música"
+            externalArtist = ""
+            showSplash = false
+            // Toca via ViewModel
+            try {
+                viewModel.playExternalUri(uri, externalTitle ?: "Música")
+            } catch (_: Exception) {}
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        handleIncomingIntent(intent)
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -323,6 +346,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+                val position by viewModel.positionMs.collectAsStateWithLifecycle()
+                val duration by viewModel.durationMs.collectAsStateWithLifecycle()
+                Box {
                 // ViewModel já inicia o carregamento da biblioteca no init (em paralelo à splash)
                 if (showSplash) {
                     val splashSound = remember {
@@ -351,9 +378,6 @@ class MainActivity : ComponentActivity() {
                         onPickUiFont = {
                             pickUiFont.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "*/*"))
                         },
-                        onPickSoundfont = {
-                            pickSoundfont.launch(arrayOf("application/x-font-sf2", "audio/*", "application/octet-stream", "*/*"))
-                        },
                         onPickMilkFiles = { pickMilkFiles.launch(arrayOf("*/*")) },
                         onDeleteTracks = { tracks -> requestPermanentDelete(tracks) },
                         onRequestAllFilesPermission = { requestAllFilesAccess() },
@@ -366,6 +390,24 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 }
+
+                if (externalAudioUri != null && !showSplash) {
+                    ExternalMiniPlayer(
+                        title = externalTitle ?: "Música",
+                        artist = externalArtist ?: "",
+                        isPlaying = isPlaying,
+                        positionMs = position,
+                        durationMs = duration,
+                        onPlayPause = { viewModel.togglePlayPause() },
+                        onSeek = { frac ->
+                            val d = duration
+                            if (d > 0) viewModel.seekTo((frac * d).toLong())
+                        },
+                        onDismiss = { externalAudioUri = null },
+                        onOpenFull = { externalAudioUri = null }
+                    )
+                }
+                } // Box
             }
         }
     }
