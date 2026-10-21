@@ -178,6 +178,46 @@ object TagWriter {
         )
     )
 
+    /**
+     * Substitui a capa embutida do arquivo pela imagem em [imageBytes] (JPEG/PNG).
+     * Também grava uma cópia local em cache para a UI atualizar de imediato.
+     * @return Result + caminho da capa em cache (se ok)
+     */
+    fun writeArtwork(
+        context: Context,
+        track: Track,
+        imageBytes: ByteArray,
+        mimeType: String = "image/jpeg"
+    ): Pair<Result, String?> {
+        val file = resolveWritableFile(context, track)
+            ?: return Result(
+                false,
+                "Sem acesso de escrita ao arquivo. Ative “Acesso a todos os arquivos” nas definições do sistema."
+            ) to null
+        return try {
+            val audio = AudioFileIO.read(file)
+            val tag = audio.tagOrCreateAndSetDefault
+            try {
+                tag.deleteArtworkField()
+            } catch (_: Exception) {}
+            val artwork = org.jaudiotagger.tag.images.ArtworkFactory.getNew()
+            artwork.binaryData = imageBytes
+            artwork.mimeType = mimeType
+            artwork.pictureType = 3 // front cover
+            tag.setField(artwork)
+            audio.commit()
+
+            // Cache local para a UI
+            val cacheDir = File(context.cacheDir, "covers").apply { mkdirs() }
+            val ext = if (mimeType.contains("png")) "png" else "jpg"
+            val out = File(cacheDir, "${track.id.hashCode()}.$ext")
+            out.writeBytes(imageBytes)
+            Result(true, "Capa atualizada em ${file.name}") to out.absolutePath
+        } catch (e: Exception) {
+            Result(false, e.message?.take(160) ?: "Falha ao gravar capa") to null
+        }
+    }
+
     private fun resolveWritableFile(context: Context, track: Track): File? {
         val candidates = ArrayList<File>()
         if (track.path.startsWith("/")) candidates.add(File(track.path))

@@ -112,6 +112,14 @@ val EmberColors = AppColors(
     surface = Color(0xFF2A1408)
 )
 
+/** AMOLED: preto puro (#000000) para economia de bateria em telas OLED. */
+val AmoledColors = AppColors(
+    gradientTop = Color(0xFF000000),
+    gradientBottom = Color(0xFF000000),
+    accent = Color(0xFFBB86FC),
+    surface = Color(0xFF0A0A0A)
+)
+
 fun staticTheme(id: AppThemeId): AppColors = when (id) {
     AppThemeId.AQUA -> AquaColors
     AppThemeId.SUNSET -> SunsetColors
@@ -119,6 +127,7 @@ fun staticTheme(id: AppThemeId): AppColors = when (id) {
     AppThemeId.MIDNIGHT -> MidnightColors
     AppThemeId.ROSE -> RoseColors
     AppThemeId.EMBER -> EmberColors
+    AppThemeId.AMOLED -> AmoledColors
     AppThemeId.DEFAULT, AppThemeId.DYNAMIC -> DefaultAppColors
 }
 
@@ -173,19 +182,40 @@ fun colorsFromArt(artPath: String?, fallback: AppColors = DefaultAppColors): App
     }
 }
 
+/** Monta AppColors a partir de uma cor de destaque escolhida pelo usuário (tema dinâmico idle). */
+fun colorsFromSeed(seed: Color): AppColors {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(seed.toArgb(), hsv)
+    val darkTop = Color.hsv(hsv[0], (hsv[1] * 0.55f).coerceIn(0f, 1f), (hsv[2] * 0.28f).coerceIn(0.08f, 0.4f))
+    val darkBot = Color.hsv(hsv[0], (hsv[1] * 0.4f).coerceIn(0f, 1f), (hsv[2] * 0.12f).coerceIn(0.04f, 0.2f))
+    val surface = Color.hsv(hsv[0], (hsv[1] * 0.35f).coerceIn(0f, 1f), (hsv[2] * 0.18f).coerceIn(0.06f, 0.28f))
+    return AppColors(
+        gradientTop = darkTop,
+        gradientBottom = darkBot,
+        accent = seed,
+        surface = surface
+    )
+}
+
 @Composable
 fun rememberAppColors(
     themeId: AppThemeId,
     artPath: String?,
-    isPlaying: Boolean
+    isPlaying: Boolean,
+    dynamicDefaultArgb: Int = 0xFFBB86FC.toInt()
 ): AppColors {
-    val fixed = remember(themeId) {
-        if (themeId == AppThemeId.DYNAMIC) DefaultAppColors else staticTheme(themeId)
+    val dynamicIdle = remember(dynamicDefaultArgb) {
+        colorsFromSeed(Color(dynamicDefaultArgb))
+    }
+    val fixed = remember(themeId, dynamicDefaultArgb) {
+        if (themeId == AppThemeId.DYNAMIC) dynamicIdle else staticTheme(themeId)
     }
     val useArt = themeId == AppThemeId.DYNAMIC && isPlaying
-    val fromArt by produceState(initialValue = DefaultAppColors, artPath, useArt) {
+    val fromArt by produceState(initialValue = dynamicIdle, artPath, useArt, dynamicDefaultArgb) {
         if (useArt) {
-            value = withContext(Dispatchers.Default) { colorsFromArt(artPath, DefaultAppColors) }
+            value = withContext(Dispatchers.Default) { colorsFromArt(artPath, dynamicIdle) }
+        } else {
+            value = dynamicIdle
         }
     }
     val target = if (useArt) fromArt else fixed

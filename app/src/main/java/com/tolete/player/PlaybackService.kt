@@ -2,7 +2,6 @@ package com.tolete.player
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.media.MediaPlayer
 import android.net.Uri
 import android.app.PendingIntent
 import android.content.Intent
@@ -14,6 +13,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer
+import androidx.media3.decoder.ffmpeg.FfmpegLibrary
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -39,9 +42,19 @@ import kotlinx.coroutines.withContext
 @SuppressLint("UnsafeOptInUsageError")
 class PlaybackService : MediaSessionService() {
 
+    companion object {
+        /** Sessão de áudio do ExoPlayer (para Equalizer nativo). 0 = indisponível. */
+        @Volatile
+        var currentAudioSessionId: Int = 0
+            private set
+
+        private const val MAX_CONSECUTIVE_ERRORS = 3
+        const val ACTION_TOGGLE_FAVORITE = "com.tolete.player.TOGGLE_FAVORITE"
+        const val ACTION_CLOSE_APP = "com.tolete.player.CLOSE_APP"
+    }
+
     private var mediaSession: MediaSession? = null
     private var consecutiveErrors = 0
-    private var midiPlayer: MediaPlayer? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val toggleFavoriteCommand = SessionCommand(ACTION_TOGGLE_FAVORITE, Bundle.EMPTY)
@@ -95,6 +108,14 @@ class PlaybackService : MediaSessionService() {
 
         // Visualizador .milk: o TeeAudioProcessor só "espia" o PCM (repassa os bytes idênticos,
         // então não altera o áudio nem o bit-perfect). Custa ~zero enquanto AudioTap.active == false.
+        // Extensão FFmpeg (AAR local): decodifica codecs que o MediaCodec do aparelho
+        // não cobre (ex.: alguns FLAC/Opus/WMA). Preferência: software FFmpeg antes do decoder nativo.
+        if (FfmpegLibrary.isAvailable()) {
+            android.util.Log.i("PlaybackService", "FFmpeg decoder disponível: ${FfmpegLibrary.getVersion()}")
+        } else {
+            android.util.Log.w("PlaybackService", "FFmpeg decoder indisponível neste ABI")
+        }
+
         val renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(
                 context: Context,
@@ -105,7 +126,36 @@ class PlaybackService : MediaSessionService() {
                 .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                 .setAudioProcessors(arrayOf(TeeAudioProcessor(AudioTap)))
                 .build()
+
+            // Media3 1.3.x: (context, extensionRendererMode, mediaCodecSelector,
+            // enableDecoderFallback, audioSink, eventHandler, eventListener, out)
+            override fun buildAudioRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                audioSink: AudioSink,
+                eventHandler: android.os.Handler,
+                eventListener: AudioRendererEventListener,
+                out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>
+            ) {
+                if (FfmpegLibrary.isAvailable()) {
+                    out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
+                }
+                super.buildAudioRenderers(
+                    context,
+                    extensionRendererMode,
+                    mediaCodecSelector,
+                    enableDecoderFallback,
+                    audioSink,
+                    eventHandler,
+                    eventListener,
+                    out
+                )
+            }
         }
+        // Preferir extensão quando disponível (ordem de renderers já coloca FFmpeg primeiro)
+        renderersFactory.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
 
         val player = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(
@@ -119,6 +169,8 @@ class PlaybackService : MediaSessionService() {
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
 
+        currentAudioSessionId = player.audioSessionId
+
         // Bit-perfect: evita processamento extra (skip silence, etc.)
         player.skipSilenceEnabled = false
         if (bitPerfect) {
@@ -129,27 +181,20 @@ class PlaybackService : MediaSessionService() {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) consecutiveErrors = 0
-                // Sincroniza MediaPlayer de MIDI com o estado do ExoPlayer
-                try {
-                    midiPlayer?.let { mp ->
-                        if (isPlaying && !mp.isPlaying) mp.start()
-                        else if (!isPlaying && mp.isPlaying) mp.pause()
-                    }
-                } catch (_: Exception) {}
+                // Atualiza sessão de áudio (pode mudar após prepare/play)
+                val sid = player.audioSessionId
+                if (sid != 0 && sid != currentAudioSessionId) {
+                    currentAudioSessionId = sid
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 refreshCustomButtons()
-                handleMidiTransition(mediaItem)
+                val sid = player.audioSessionId
+                if (sid != 0) currentAudioSessionId = sid
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                // Se for MIDI, tenta MediaPlayer antes de pular
-                val item = player.currentMediaItem
-                if (item != null && isMidiItem(item)) {
-                    handleMidiTransition(item)
-                    return
-                }
                 handlePlayerError(player, error)
             }
         })
@@ -240,49 +285,6 @@ class PlaybackService : MediaSessionService() {
      * avisa e pula para a próxima em vez de deixar o player travado em erro.
      * O limite de erros seguidos evita loop infinito com repetição ativada.
      */
-    private fun isMidiItem(item: MediaItem): Boolean {
-        val uri = item.localConfiguration?.uri?.toString()?.lowercase() ?: return false
-        return uri.endsWith(".mid") || uri.endsWith(".midi") ||
-            item.localConfiguration?.mimeType?.contains("midi", true) == true
-    }
-
-    private fun handleMidiTransition(mediaItem: MediaItem?) {
-        stopMidi()
-        if (mediaItem == null || !isMidiItem(mediaItem)) return
-        val uri = mediaItem.localConfiguration?.uri ?: return
-        try {
-            // ExoPlayer não decodifica MIDI — usa o sintetizador do sistema via MediaPlayer
-            mediaSession?.player?.pause()
-            val mp = MediaPlayer().apply {
-                setDataSource(this@PlaybackService, uri)
-                setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                setOnCompletionListener {
-                    // Avança para a próxima no player principal
-                    try { mediaSession?.player?.seekToNextMediaItem() } catch (_: Exception) {}
-                }
-                prepare()
-                start()
-            }
-            midiPlayer = mp
-        } catch (e: Exception) {
-            midiPlayer = null
-            Toast.makeText(this, "Não foi possível reproduzir MIDI", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun stopMidi() {
-        try {
-            midiPlayer?.stop()
-            midiPlayer?.release()
-        } catch (_: Exception) {}
-        midiPlayer = null
-    }
-
     private fun handlePlayerError(player: ExoPlayer, error: PlaybackException) {
         consecutiveErrors++
         Toast.makeText(
@@ -311,19 +313,16 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
-        stopMidi()
         scope.cancel()
+        currentAudioSessionId = 0
+        try {
+            com.tolete.player.data.EqualizerManager.release()
+        } catch (_: Exception) {}
         mediaSession?.run {
             player.release()
             release()
         }
         mediaSession = null
         super.onDestroy()
-    }
-
-    private companion object {
-        const val MAX_CONSECUTIVE_ERRORS = 3
-        const val ACTION_TOGGLE_FAVORITE = "com.tolete.player.TOGGLE_FAVORITE"
-        const val ACTION_CLOSE_APP = "com.tolete.player.CLOSE_APP"
     }
 }

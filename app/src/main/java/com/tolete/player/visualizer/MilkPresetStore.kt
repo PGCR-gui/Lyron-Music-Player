@@ -9,30 +9,61 @@ import java.util.zip.ZipInputStream
 
 /**
  * Guarda os presets do usuário em  <filesDir>/milk/
+ * e embute presets padrão em assets/milk/.
  *
  * Os .milk e as texturas que eles usam (jpg/png/tga/...) ficam na MESMA pasta,
  * que também é passada ao projectM como pasta de texturas.
  * Aceita arquivos soltos e .zip (pacotes de presets): o zip é extraído "achatado".
+ *
+ * Presets embutidos são copiados sob demanda para filesDir na primeira listagem
+ * (ou quando a pasta está vazia), mas o usuário ainda pode importar/remover arquivos.
  */
 object MilkPresetStore {
 
     private val TEXTURE_EXT = setOf("jpg", "jpeg", "png", "tga", "bmp", "dds")
+    private const val ASSETS_MILK = "milk"
+    @Volatile private var assetsCopied = false
 
     fun dir(context: Context): File =
         File(context.filesDir, "milk").apply { mkdirs() }
 
-    fun list(context: Context): List<String> =
-        dir(context).listFiles { f -> f.isFile && f.extension.equals("milk", true) }
+    /** Garante que os presets embutidos estejam em filesDir (uma vez por processo). */
+    fun ensureBuiltIn(context: Context) {
+        if (assetsCopied) return
+        synchronized(this) {
+            if (assetsCopied) return
+            val out = dir(context)
+            try {
+                val names = context.assets.list(ASSETS_MILK) ?: emptyArray()
+                for (name in names) {
+                    if (!name.endsWith(".milk", ignoreCase = true)) continue
+                    val dest = File(out, name)
+                    if (dest.exists()) continue
+                    context.assets.open("$ASSETS_MILK/$name").use { input ->
+                        FileOutputStream(dest).use { input.copyTo(it) }
+                    }
+                }
+            } catch (_: Exception) { /* assets ausentes em builds antigos */ }
+            assetsCopied = true
+        }
+    }
+
+    fun list(context: Context): List<String> {
+        ensureBuiltIn(context)
+        return dir(context).listFiles { f -> f.isFile && f.extension.equals("milk", true) }
             ?.map { it.absolutePath }
             ?.sortedBy { it.lowercase() }
             ?: emptyList()
+    }
 
     fun clear(context: Context) {
         dir(context).listFiles()?.forEach { it.delete() }
+        assetsCopied = false // permite recopiar embutidos na próxima listagem
     }
 
     /** Retorna quantos presets (.milk) foram adicionados. Rodar fora da thread principal. */
     fun import(context: Context, uris: List<Uri>): Int {
+        ensureBuiltIn(context)
         val out = dir(context)
         var presets = 0
         for (uri in uris) {

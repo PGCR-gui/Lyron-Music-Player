@@ -1,7 +1,12 @@
 package com.tolete.player.ui
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -20,7 +26,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -41,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -146,6 +155,33 @@ fun TagEditorScreen(
     var loading by remember(track.id) { mutableStateOf(true) }
     var showLyricsSync by remember { mutableStateOf(false) }
     var fileHint by remember(track.id) { mutableStateOf<String?>(null) }
+    var localArtPath by remember(track.id) { mutableStateOf(track.artPath) }
+    var savingArt by remember { mutableStateOf(false) }
+
+    val pickCoverLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            savingArt = true
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: return@withContext TagWriter.Result(false, "Não foi possível ler a imagem") to null
+                    val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+                    TagWriter.writeArtwork(context, track, bytes, mime)
+                } catch (e: Exception) {
+                    TagWriter.Result(false, e.message?.take(120) ?: "Erro ao ler imagem") to null
+                }
+            }
+            savingArt = false
+            val (res, path) = result
+            Toast.makeText(context, res.message, Toast.LENGTH_SHORT).show()
+            if (res.ok && path != null) {
+                localArtPath = path
+            }
+        }
+    }
 
     fun currentEdits() = TagEdits(
         title, artist, album, albumArtist, genre, year,
@@ -227,7 +263,7 @@ fun TagEditorScreen(
 
     Box(Modifier.fillMaxSize()) {
         // Fundo: capa borrada da faixa em edição
-        val art = track.artPath
+        val art = localArtPath
         if (art != null) {
             AsyncImage(
                 model = File(art),
@@ -310,6 +346,35 @@ fun TagEditorScreen(
                 color = Color.White.copy(0.4f),
                 maxLines = 2
             )
+            var renomearPorTags by remember { mutableStateOf(false) }
+            var renamePattern by remember { mutableStateOf("%ARTIST% - %TITLE%") }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+                    .clickable { renomearPorTags = !renomearPorTags },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = renomearPorTags,
+                    onCheckedChange = { renomearPorTags = it }
+                )
+                Text("Renomear arquivo por tags ao salvar", fontSize = 14.sp)
+            }
+            if (renomearPorTags) {
+                OutlinedTextField(
+                    value = renamePattern,
+                    onValueChange = { renamePattern = it },
+                    label = { Text("Padrão") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Text(
+                    "%ARTIST% %TITLE% %ALBUM% %ALBUM_ARTIST% %TRACK% %YEAR%",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(0.45f)
+                )
+            }
             fileHint?.let {
                 Text(it, fontSize = 12.sp, color = Color.White.copy(0.5f), modifier = Modifier.padding(top = 4.dp))
             }
@@ -320,6 +385,57 @@ fun TagEditorScreen(
                     color = appColors.accent.copy(0.9f),
                     modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
                 )
+            }
+
+            SectionTitle("Capa")
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(96.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(0.08f))
+                        .border(1.dp, Color.White.copy(0.2f), RoundedCornerShape(14.dp))
+                        .clickable(enabled = !savingArt) { pickCoverLauncher.launch("image/*") },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (localArtPath != null) {
+                        AsyncImage(
+                            model = File(localArtPath!!),
+                            contentDescription = "Capa",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(Icons.Rounded.Image, contentDescription = null, tint = Color.White.copy(0.5f), modifier = Modifier.size(36.dp))
+                    }
+                    if (savingArt) {
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(0.5f)), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                        }
+                    }
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Trocar foto / capa", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                    Text(
+                        "Escolha uma imagem da galeria. A capa é gravada no arquivo de áudio.",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(0.5f)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { pickCoverLauncher.launch("image/*") },
+                        enabled = !savingArt,
+                        colors = ButtonDefaults.buttonColors(containerColor = appColors.accent)
+                    ) {
+                        Text("Escolher imagem", color = Color.Black)
+                    }
+                }
             }
 
             SectionTitle("Básico")

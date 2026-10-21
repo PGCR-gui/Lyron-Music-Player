@@ -1,12 +1,17 @@
 package com.tolete.player.ui
 
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
+
 import android.content.Context
+import android.content.SharedPreferences
 import android.media.AudioManager
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -69,7 +74,12 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Share
 import androidx.media3.common.Player
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
@@ -78,6 +88,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.rememberCoroutineScope
 import com.tolete.player.data.LrcLibClient
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -125,6 +136,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.Font
 import coil.compose.AsyncImage
+import coil.ImageLoader
+import coil.decode.GifDecoder
+import coil.request.ImageRequest
 import com.tolete.player.R
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
@@ -171,7 +185,6 @@ private fun codecDrawableRes(codec: String?): Int? {
         c.contains("wav") || c.contains("pcm") -> R.drawable.wav
         c.contains("ogg") || c.contains("vorbis") || c.contains("opus") -> R.drawable.ogg
         c.contains("dsd") || c.contains("dsf") || c.contains("dff") -> R.drawable.dsd
-        c.contains("midi") || c.contains("mid") -> R.drawable.midi
         else -> null
     }
 }
@@ -234,6 +247,9 @@ fun NowPlayingScreen(
     appColors: AppColors = DefaultAppColors,
     milkPresets: List<String> = emptyList(),
     milkIntervalSec: Int = 30,
+    changeSongWithMilkInterval: Boolean = false,
+    changePresetOnSongChange: Boolean = true,
+    onSkipToRandom: () -> Unit = {},
     lyricsFontSize: Float = 22f,
     lyricsPrimaryColor: Int = 0xFFFFFFFF.toInt(),
     lyricsSecondaryColor: Int = 0x66FFFFFF,
@@ -242,6 +258,10 @@ fun NowPlayingScreen(
 ) {
     // Visualizador .milk: liga ao tocar na capa, desliga ao tocar no visualizador
     var showVisualizer by remember { mutableStateOf(false) }
+    var presetLocked by remember { mutableStateOf(false) }
+    var forcePresetPath by remember { mutableStateOf<String?>(null) }
+    var currentPresetPath by remember { mutableStateOf<String?>(null) }
+    var showPresetPicker by remember { mutableStateOf(false) }
     var position by remember { mutableLongStateOf(getPosition()) }
     var dragFraction by remember { mutableStateOf<Float?>(null) }
     var showQueue by remember { mutableStateOf(false) }
@@ -251,6 +271,27 @@ fun NowPlayingScreen(
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
     var showLyricsSearch by remember { mutableStateOf(false) }
     var showFullLyrics by remember { mutableStateOf(false) }
+
+    // Troca de preset ao mudar de música
+    LaunchedEffect(track.id, changePresetOnSongChange, showVisualizer) {
+        if (changePresetOnSongChange && showVisualizer && milkPresets.size > 1 && !presetLocked) {
+            forcePresetPath = milkPresets.random()
+        }
+    }
+
+    // Timer: além do preset, opcionalmente troca a música aleatoriamente
+    LaunchedEffect(milkIntervalSec, changeSongWithMilkInterval, showVisualizer, isPlaying) {
+        if (!changeSongWithMilkInterval || milkIntervalSec <= 0 || !showVisualizer || !isPlaying) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(milkIntervalSec * 1000L)
+            if (changeSongWithMilkInterval && showVisualizer && isPlaying) {
+                onSkipToRandom()
+            }
+        }
+    }
+    var showEqualizer by remember { mutableStateOf(false) }
+    var showSleepTimer by remember { mutableStateOf(false) }
+    var sleepJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var lyrics by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
     // Animação de coração grande sobre a capa (favoritar / desfavoritar)
     var heartBurst by remember { mutableStateOf<Boolean?>(null) } // true = fav, false = unfav, null = idle
@@ -259,6 +300,22 @@ fun NowPlayingScreen(
     var artNavForward by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var sleepMinutes by remember {
+        mutableIntStateOf(
+            context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                .getInt("sleep_timer_min", 0)
+        )
+    }
+    var milkPresetFavorites by remember {
+        mutableStateOf(
+            context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                .getStringSet("milk_preset_favs", emptySet())?.toSet() ?: emptySet()
+        )
+    }
+    LaunchedEffect(milkPresetFavorites) {
+        context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+            .edit().putStringSet("milk_preset_favs", milkPresetFavorites).apply()
+    }
 
     LaunchedEffect(isFavorite, track.id) {
         if (isFavorite != prevFavorite) {
@@ -395,6 +452,40 @@ fun NowPlayingScreen(
                                 showLyricsSearch = true
                             }
                         )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (sleepMinutes > 0) "Timer de sono (${sleepMinutes} min)" else "Timer de sono",
+                                    color = MenuDarkText
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                showSleepTimer = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Compartilhar trecho", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                val pos = shownPosition
+                                val timeStr = formatDuration(pos)
+                                val lyric = activeLine?.text?.takeIf { it.isNotBlank() }
+                                val text = buildString {
+                                    append("🎶 ${track.title} — ${track.artist}\n")
+                                    append("⏱ $timeStr")
+                                    if (lyric != null) append("\n💬 $lyric")
+                                    append("\n\n— via Lyron Music Player")
+                                }
+                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(android.content.Intent.EXTRA_TEXT, text)
+                                }
+                                context.startActivity(android.content.Intent.createChooser(intent, "Compartilhar trecho"))
+                            }
+                        )
                     }
                 }
             }
@@ -485,24 +576,60 @@ fun NowPlayingScreen(
                                     }
                                 )
                             }
-                            .pointerInput(track.id) {
-                                var total = 0f
-                                detectHorizontalDragGestures(
+                            .pointerInput(track.id, showVisualizer, milkPresets.size, currentPresetPath) {
+                                var totalX = 0f
+                                var totalY = 0f
+                                detectDragGestures(
                                     onDragEnd = {
                                         when {
-                                            total < -80f -> {
-                                                artNavForward = true
-                                                onNext()
+                                            // deslizar para cima → bloqueia preset
+                                            totalY < -80f && kotlin.math.abs(totalY) > kotlin.math.abs(totalX) -> {
+                                                if (showVisualizer) {
+                                                    presetLocked = true
+                                                    Toast.makeText(context, "Preset bloqueado", Toast.LENGTH_SHORT).show()
+                                                }
                                             }
-                                            total > 80f -> {
-                                                artNavForward = false
-                                                onPrevious()
+                                            // deslizar para baixo → desbloqueia preset
+                                            totalY > 80f && kotlin.math.abs(totalY) > kotlin.math.abs(totalX) -> {
+                                                if (showVisualizer && presetLocked) {
+                                                    presetLocked = false
+                                                    Toast.makeText(context, "Preset desbloqueado", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                            // com visualizer: esquerda/direita trocam preset ALEATORIAMENTE; sem: trocam faixa
+                                            totalX < -80f && kotlin.math.abs(totalX) > kotlin.math.abs(totalY) -> {
+                                                if (showVisualizer && milkPresets.isNotEmpty()) {
+                                                    val candidates = milkPresets.filter { it != currentPresetPath }
+                                                    val next = (candidates.ifEmpty { milkPresets }).random()
+                                                    forcePresetPath = next
+                                                    presetLocked = true
+                                                    currentPresetPath = next
+                                                } else {
+                                                    artNavForward = true
+                                                    onNext()
+                                                }
+                                            }
+                                            totalX > 80f && kotlin.math.abs(totalX) > kotlin.math.abs(totalY) -> {
+                                                if (showVisualizer && milkPresets.isNotEmpty()) {
+                                                    val candidates = milkPresets.filter { it != currentPresetPath }
+                                                    val prev = (candidates.ifEmpty { milkPresets }).random()
+                                                    forcePresetPath = prev
+                                                    presetLocked = true
+                                                    currentPresetPath = prev
+                                                } else {
+                                                    artNavForward = false
+                                                    onPrevious()
+                                                }
                                             }
                                         }
-                                        total = 0f
+                                        totalX = 0f
+                                        totalY = 0f
                                     },
-                                    onDragCancel = { total = 0f },
-                                    onHorizontalDrag = { _, dx -> total += dx }
+                                    onDragCancel = { totalX = 0f; totalY = 0f },
+                                    onDrag = { _, amount ->
+                                        totalX += amount.x
+                                        totalY += amount.y
+                                    }
                                 )
                             }
                     ) {
@@ -536,13 +663,40 @@ fun NowPlayingScreen(
                                 presets = milkPresets,
                                 intervalSeconds = milkIntervalSec,
                                 cornerRadius = 20.dp,
+                                locked = presetLocked,
+                                isPlaying = isPlaying,
+                                forcePresetPath = forcePresetPath,
                                 modifier = Modifier.fillMaxSize(),
                                 onFailure = {
                                     showVisualizer = false
                                     Toast.makeText(context, "Não foi possível iniciar o visualizador", Toast.LENGTH_SHORT).show()
+                                },
+                                onCurrentPreset = { path ->
+                                    // Atualiza sempre o nome exibido (auto e manual)
+                                    if (path != null) currentPresetPath = path
                                 }
                             )
-                        }
+                            // Limpa force após aplicar para não reaplicar
+                            LaunchedEffect(forcePresetPath) {
+                                if (forcePresetPath != null) {
+                                    kotlinx.coroutines.delay(400)
+                                    forcePresetPath = null
+                                }
+                            }
+                            if (presetLocked) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Lock,
+                                    contentDescription = "Preset bloqueado",
+                                    tint = Color.White.copy(0.9f),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(10.dp)
+                                        .size(22.dp)
+                                        .background(Color.Black.copy(0.45f), CircleShape)
+                                        .padding(3.dp)
+                                )
+                            }
+                            }
                         if (track.isHiRes) {
                             HdBadge(Modifier.align(Alignment.BottomEnd).padding(12.dp))
                         }
@@ -557,22 +711,45 @@ fun NowPlayingScreen(
                         // Qualificado: evita ColumnScope.AnimatedVisibility (este Box está dentro de Column)
                         androidx.compose.animation.AnimatedVisibility(
                             visible = heartBurst != null,
-                            enter = scaleIn(
-                                initialScale = 0.3f,
-                                animationSpec = tween(320, easing = FastOutSlowInEasing)
-                            ) + fadeIn(tween(200)),
-                            exit = scaleOut(targetScale = 1.4f, animationSpec = tween(400)) +
-                                fadeOut(tween(400)),
+                            enter = fadeIn(tween(120)),
+                            exit = fadeOut(tween(300)),
                             modifier = Modifier.align(Alignment.Center)
                         ) {
                             val fav = heartBurst == true
-                            Icon(
-                                imageVector = if (fav) Icons.Rounded.Favorite else Icons.Filled.HeartBroken,
+                            val ctx = LocalContext.current
+                            val gifLoader = remember(ctx) {
+                                ImageLoader.Builder(ctx)
+                                    .components { add(GifDecoder.Factory()) }
+                                    .build()
+                            }
+                            AsyncImage(
+                                model = ImageRequest.Builder(ctx)
+                                    .data(if (fav) R.raw.favoritar else R.raw.desfavoritar)
+                                    .build(),
+                                imageLoader = gifLoader,
                                 contentDescription = null,
-                                tint = if (fav) Color(0xFFE53935) else Color(0xFFB0BEC5),
-                                modifier = Modifier.size(96.dp)
+                                modifier = Modifier.size(140.dp)
                             )
                         }
+                    }
+
+                    // Chip do preset ABAIXO da capa (não por cima)
+                    if (showVisualizer && milkPresets.isNotEmpty()) {
+                        PresetGlassBar(
+                            presetPath = currentPresetPath,
+                            isFavorite = currentPresetPath?.let { java.io.File(it).name in milkPresetFavorites } == true,
+                            onFavorite = {
+                                currentPresetPath?.let { path ->
+                                    val name = java.io.File(path).name
+                                    milkPresetFavorites = if (name in milkPresetFavorites) milkPresetFavorites - name
+                                    else milkPresetFavorites + name
+                                }
+                            },
+                            onOpenList = { showPresetPicker = true },
+                            modifier = Modifier
+                                .padding(horizontal = 4.dp, vertical = 6.dp)
+                                .fillMaxWidth()
+                        )
                     }
 
                     // Letra sincronizada (até 2 linhas) — toque abre tela cheia
@@ -587,9 +764,16 @@ fun NowPlayingScreen(
                             AnimatedContent(
                                 targetState = activeLine?.text.orEmpty(),
                                 transitionSpec = {
-                                    (fadeIn(tween(350, easing = FastOutSlowInEasing)) +
-                                        scaleIn(initialScale = 0.92f, animationSpec = tween(350))) togetherWith
-                                        (fadeOut(tween(220)) + scaleOut(targetScale = 1.04f, animationSpec = tween(220)))
+                                    (slideInVertically(
+                                        initialOffsetY = { it / 3 },
+                                        animationSpec = tween(420, easing = FastOutSlowInEasing)
+                                    ) + fadeIn(tween(320, easing = FastOutSlowInEasing)) +
+                                        scaleIn(initialScale = 0.88f, animationSpec = tween(420, easing = FastOutSlowInEasing))) togetherWith
+                                        (slideOutVertically(
+                                            targetOffsetY = { -it / 4 },
+                                            animationSpec = tween(280, easing = FastOutSlowInEasing)
+                                        ) + fadeOut(tween(240)) +
+                                            scaleOut(targetScale = 1.06f, animationSpec = tween(280)))
                                 },
                                 label = "lyricLine"
                             ) { line ->
@@ -778,13 +962,50 @@ fun NowPlayingScreen(
                     }
                 }
 
-                Column(Modifier.width(64.dp).fillMaxHeight(), horizontalAlignment = Alignment.End) {
+                Column(Modifier.width(96.dp).fillMaxHeight(), horizontalAlignment = Alignment.End) {
                     Text(formatDuration(duration), fontSize = 13.sp, color = Color.White.copy(alpha = 0.75f))
-                    IconButton(onClick = { showQueue = true }, modifier = Modifier.offset(x = 12.dp)) {
-                        Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "Fila")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                Icons.Rounded.GraphicEq,
+                                contentDescription = "Equalizador",
+                                modifier = Modifier.size(22.dp),
+                                tint = Color.White.copy(alpha = 0.85f)
+                            )
+                        }
+                        IconButton(onClick = { showQueue = true }, modifier = Modifier.offset(x = 4.dp).size(40.dp)) {
+                            Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "Fila")
+                        }
                     }
                 }
             }
+        }
+
+        if (showEqualizer) {
+            EqualizerSheet(onDismiss = { showEqualizer = false })
+        }
+
+        if (showSleepTimer) {
+            SleepTimerDialog(
+                currentMinutes = sleepMinutes,
+                onDismiss = { showSleepTimer = false },
+                onSet = { mins ->
+                    sleepMinutes = mins
+                    context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                        .edit().putInt("sleep_timer_min", mins).apply()
+                    sleepJob?.cancel()
+                    if (mins > 0) {
+                        sleepJob = scope.launch {
+                            kotlinx.coroutines.delay(mins * 60_000L)
+                            onToggle() // pausa se estiver tocando
+                            sleepMinutes = 0
+                            context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                                .edit().putInt("sleep_timer_min", 0).apply()
+                        }
+                    }
+                    showSleepTimer = false
+                }
+            )
         }
 
         if (showQueue) {
@@ -864,6 +1085,19 @@ fun NowPlayingScreen(
                 }
             )
         }
+        if (showPresetPicker) {
+            MilkPresetPickerDialog(
+                presets = milkPresets,
+                currentPath = currentPresetPath,
+                onDismiss = { showPresetPicker = false },
+                onSelect = { path ->
+                    forcePresetPath = path
+                    presetLocked = true
+                    showPresetPicker = false
+                    showVisualizer = true
+                }
+            )
+        }
     }
 }
 
@@ -921,7 +1155,7 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Informações técnicas") },
+        title = { Text("Informações técnicas", color = Color(0xFF1A1A1A)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 TechRow("Título", track.title)
@@ -939,15 +1173,15 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 audioLines.forEachIndexed { i, line ->
                     if (i == 0) {
-                        Text(line, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+                        Text(line, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color(0xFF1A1A1A), modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
                     } else {
-                        Text(line, fontSize = 13.sp, color = Color.White.copy(0.85f), modifier = Modifier.padding(vertical = 2.dp))
+                        Text(line, fontSize = 13.sp, color = Color(0xFF333333), modifier = Modifier.padding(vertical = 2.dp))
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fechar") }
+            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
         }
     )
 }
@@ -955,8 +1189,8 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
 @Composable
 private fun TechRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = Color.White.copy(0.55f))
-        Text(value, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = Color(0xFF666666))
+        Text(value, fontSize = 13.sp, color = Color(0xFF1A1A1A), maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1008,6 +1242,9 @@ private fun SeekBar(
     onDragCancel: () -> Unit
 ) {
     var barWidth by remember { mutableFloatStateOf(1f) }
+    // Mantém o último valor arrastado localmente para não depender de recomposição
+    // (o parâmetro `fraction` pode estar defasado no momento do onDragEnd).
+    var lastDragFraction by remember { mutableFloatStateOf(fraction) }
     val density = LocalDensity.current.density
     // Sem animateFloatAsState: anima a cada tick de posição e custa GPU/CPU à toa.
     Box(
@@ -1018,20 +1255,26 @@ private fun SeekBar(
                 detectDragGestures(
                     onDragStart = { o ->
                         barWidth = size.width.toFloat().coerceAtLeast(1f)
-                        onDrag((o.x / barWidth).coerceIn(0f, 1f))
+                        val f = (o.x / barWidth).coerceIn(0f, 1f)
+                        lastDragFraction = f
+                        onDrag(f)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        onDrag((change.position.x / barWidth).coerceIn(0f, 1f))
+                        val f = (change.position.x / barWidth).coerceIn(0f, 1f)
+                        lastDragFraction = f
+                        onDrag(f)
                     },
-                    onDragEnd = { onDragEnd(fraction) },
+                    onDragEnd = { onDragEnd(lastDragFraction) },
                     onDragCancel = onDragCancel
                 )
             }
             .pointerInput(Unit) {
                 detectTapGestures { o ->
                     barWidth = size.width.toFloat().coerceAtLeast(1f)
-                    onDragEnd((o.x / barWidth).coerceIn(0f, 1f))
+                    val f = (o.x / barWidth).coerceIn(0f, 1f)
+                    lastDragFraction = f
+                    onDragEnd(f)
                 }
             },
         contentAlignment = Alignment.Center
@@ -1066,6 +1309,7 @@ private fun SeekBar(
     }
 }
 
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun QueueSheet(
@@ -1091,24 +1335,87 @@ internal fun QueueSheet(
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     var menuForIndex by remember { mutableStateOf<Int?>(null) }
 
+    val currentTrack = order.firstOrNull { it.id == currentId } ?: order.firstOrNull()
+    var queueSearch by remember { mutableStateOf("") }
+    val filtered = remember(order, queueSearch) {
+        if (queueSearch.isBlank()) order
+        else order.filter {
+            it.title.contains(queueSearch, true) || it.artist.contains(queueSearch, true)
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF1A1528)
+        containerColor = Color.Transparent,
+        dragHandle = null
     ) {
-        Text(
-            "Fila de reprodução",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        LazyColumn(
-            contentPadding = PaddingValues(bottom = 32.dp),
-            modifier = Modifier.fillMaxWidth()
+        Box(Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
+            // Fundo liquid glass: capa borrada
+            if (currentTrack?.artPath != null) {
+                AsyncImage(
+                    model = currentTrack.artPath,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(40.dp)
+                )
+            }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0xCC0A0A12))
+            )
+            Column(Modifier.fillMaxSize()) {
+        // Header estilo vídeo: contagem + fechar
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            itemsIndexed(order, key = { _, t -> t.id }) { index, track ->
+            Text(
+                "${order.indexOfFirst { it.id == currentId }.coerceAtLeast(0) + 1} / ${order.size}",
+                color = Color.White.copy(0.7f),
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = Color.White)
+            }
+        }
+        // Busca na fila
+        OutlinedTextField(
+            value = queueSearch,
+            onValueChange = { queueSearch = it },
+            placeholder = { Text("Pesquise nesta fila...", color = Color.White.copy(0.4f)) },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color.White.copy(0.3f),
+                unfocusedBorderColor = Color.White.copy(0.15f),
+                cursorColor = appColors.accent
+            )
+        )
+        val listState = rememberLazyListState()
+        LaunchedEffect(currentId, order.size, queueSearch) {
+            if (queueSearch.isNotBlank()) return@LaunchedEffect
+            val idx = order.indexOfFirst { it.id == currentId }
+            if (idx >= 0) {
+                listState.scrollToItem(idx.coerceAtMost((order.size - 1).coerceAtLeast(0)))
+            }
+        }
+        LazyColumn(
+            state = listState,
+            contentPadding = PaddingValues(bottom = 32.dp),
+            modifier = Modifier.fillMaxWidth().weight(1f)
+        ) {
+            itemsIndexed(filtered, key = { _, t -> t.id }) { index, track ->
+                val realIndex = order.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
                 val active = track.id == currentId
-                val isDragging = draggingFrom == index
+                val isDragging = draggingFrom == realIndex
                 Box {
                     Row(
                         Modifier
@@ -1116,21 +1423,36 @@ internal fun QueueSheet(
                             .graphicsLayer {
                                 if (isDragging) {
                                     translationY = dragOffsetY
-                                    alpha = 0.9f
-                                    shadowElevation = 8f
+                                    alpha = 0.92f
+                                    scaleX = 1.03f
+                                    scaleY = 1.03f
+                                    shadowElevation = 16f
                                 }
                             }
                             .zIndex(if (isDragging) 1f else 0f)
-                            .background(if (active) Color.White.copy(0.08f) else Color.Transparent)
-                            .pointerInput(index) {
+                            .then(
+                                if (active) Modifier
+                                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                                    .border(1.5.dp, Color(0xFF4ADE80).copy(0.85f), RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF4ADE80).copy(0.12f), RoundedCornerShape(12.dp))
+                                else Modifier
+                            )
+                            .pointerInput(realIndex) {
                                 detectTapGestures(
-                                    onTap = { onSkipTo(index); onDismiss() },
-                                    onLongPress = { menuForIndex = index }
+                                    onTap = { onSkipTo(realIndex) },
+                                    onLongPress = { menuForIndex = realIndex }
                                 )
                             }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Handle de arrastar (estilo vídeo)
+                        Icon(
+                            Icons.Rounded.DragHandle,
+                            contentDescription = null,
+                            tint = Color.White.copy(0.35f),
+                            modifier = Modifier.padding(end = 8.dp).size(20.dp)
+                        )
                         ArtImage(path = track.artPath, size = 44.dp)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
                             Text(
@@ -1242,6 +1564,8 @@ internal fun QueueSheet(
                 }
             }
         }
+            } // Column
+        } // Box
     }
 }
 
@@ -1262,32 +1586,44 @@ internal fun LyricsSearchDialog(
     var searched by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    val dialogDark = Color(0xFF1A1A1A)
+    val dialogMuted = Color(0xFF555555)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Buscar letra") },
+        title = { Text("Buscar letra", color = dialogDark) },
         text = {
             Column {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Título") },
+                    label = { Text("Título", color = dialogMuted) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
+                        focusedTextColor = dialogDark,
+                        unfocusedTextColor = dialogDark,
+                        focusedBorderColor = Color(0xFF5C6BC0),
+                        unfocusedBorderColor = Color(0xFFAAAAAA),
+                        cursorColor = Color(0xFF5C6BC0),
+                        focusedLabelColor = Color(0xFF5C6BC0),
+                        unfocusedLabelColor = dialogMuted
                     )
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = artist,
                     onValueChange = { artist = it },
-                    label = { Text("Artista") },
+                    label = { Text("Artista", color = dialogMuted) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
+                        focusedTextColor = dialogDark,
+                        unfocusedTextColor = dialogDark,
+                        focusedBorderColor = Color(0xFF5C6BC0),
+                        unfocusedBorderColor = Color(0xFFAAAAAA),
+                        cursorColor = Color(0xFF5C6BC0),
+                        focusedLabelColor = Color(0xFF5C6BC0),
+                        unfocusedLabelColor = dialogMuted
                     )
                 )
                 Spacer(Modifier.height(12.dp))
@@ -1296,29 +1632,99 @@ internal fun LyricsSearchDialog(
                         CircularProgressIndicator(modifier = Modifier.size(28.dp))
                     }
                 } else if (searched && results.isEmpty()) {
-                    Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = Color.White.copy(0.7f))
+                    Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = dialogMuted)
                 } else if (results.isNotEmpty()) {
-                    LazyColumn(Modifier.height(220.dp)) {
-                        items(results) { r ->
+                    var expandedId by remember { mutableStateOf<Int?>(null) }
+                    LazyColumn(Modifier.height(280.dp)) {
+                        items(results, key = { it.id }) { r ->
+                            val expanded = expandedId == r.id
                             Column(
                                 Modifier
                                     .fillMaxWidth()
-                                    .clickable { onPick(r) }
-                                    .padding(vertical = 10.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (expanded) Color(0xFF1B3A2A) else Color.Transparent)
+                                    .clickable {
+                                        if (expanded) onPick(r)
+                                        else expandedId = r.id
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 10.dp)
                             ) {
-                                Text(r.trackName, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(
-                                    buildString {
-                                        append(r.artistName)
-                                        if (r.albumName.isNotBlank()) append(" · ${r.albumName}")
-                                        if (r.durationSec > 0) append(" · ${r.durationSec}s")
-                                        append(if (r.hasSynced) " · sincronizada" else " · texto")
-                                    },
-                                    fontSize = 12.sp,
-                                    color = Color.White.copy(0.65f),
-                                    maxLines = 2,
+                                    if (expanded) "Letra correta" else r.trackName,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (expanded) Color(0xFFB8F5C8) else dialogDark,
+                                    maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                if (!expanded) {
+                                    Text(
+                                        buildString {
+                                            append(r.artistName)
+                                            if (r.albumName.isNotBlank()) append(" · ${r.albumName}")
+                                            if (r.durationSec > 0) append(" · ${r.durationSec}s")
+                                            append(if (r.hasSynced) " · sincronizada" else " · texto")
+                                        },
+                                        fontSize = 12.sp,
+                                        color = dialogMuted,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                } else {
+                                    // Preview estilo referência: faixa/artista + linhas sincronizadas
+                                    Text("faixa", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                    Text(
+                                        "${r.trackName}",
+                                        fontSize = 13.sp,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text("artista", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                    Text(
+                                        r.artistName,
+                                        fontSize = 13.sp,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text("Linha sincronizada", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                    val previewLines = remember(r.id) {
+                                        r.toLyricLines().take(12)
+                                    }
+                                    if (previewLines.isEmpty()) {
+                                        Text(
+                                            r.plainLyrics?.lines()?.take(8)?.joinToString("\n")
+                                                ?: "(sem prévia)",
+                                            fontSize = 12.sp,
+                                            color = Color(0xFFD0E8D8)
+                                        )
+                                    } else {
+                                        previewLines.forEach { line ->
+                                            val ts = if (line.timeMs >= 0) {
+                                                val totalSec = line.timeMs / 1000
+                                                val m = totalSec / 60
+                                                val s = totalSec % 60
+                                                val cs = ((line.timeMs % 1000) / 10)
+                                                "[%02d:%02d.%02d]".format(m, s, cs)
+                                            } else ""
+                                            Text(
+                                                "$ts${line.text}",
+                                                fontSize = 12.sp,
+                                                color = Color(0xFFD0E8D8),
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        "Toque de novo para usar esta letra",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF8BC9A0),
+                                        modifier = Modifier.padding(top = 6.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1336,10 +1742,10 @@ internal fun LyricsSearchDialog(
                         searched = true
                     }
                 }
-            ) { Text("Pesquisar") }
+            ) { Text("Pesquisar", color = Color(0xFF5C6BC0)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Descartar") }
+            TextButton(onClick = onDismiss) { Text("Descartar", color = dialogMuted) }
         }
     )
 }
@@ -1359,6 +1765,7 @@ internal fun FullscreenLyrics(
     onSeek: (Long) -> Unit,
     onClose: () -> Unit
 ) {
+    val context = LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val activeIndex = remember(lyrics, position) {
         var idx = 0
@@ -1367,9 +1774,11 @@ internal fun FullscreenLyrics(
         }
         idx
     }
+    var selectMode by remember { mutableStateOf(false) }
+    var selectedLines by remember { mutableStateOf(setOf<Int>()) }
 
     LaunchedEffect(activeIndex) {
-        if (activeIndex in lyrics.indices) {
+        if (!selectMode && activeIndex in lyrics.indices) {
             listState.animateScrollToItem(
                 index = activeIndex,
                 scrollOffset = -200
@@ -1421,12 +1830,17 @@ internal fun FullscreenLyrics(
                     .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onClose) {
+                IconButton(onClick = {
+                    if (selectMode) {
+                        selectMode = false
+                        selectedLines = emptySet()
+                    } else onClose()
+                }) {
                     Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "Fechar", modifier = Modifier.size(32.dp))
                 }
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        track.title,
+                        if (selectMode) "${selectedLines.size} linha(s)" else track.title,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White,
@@ -1434,14 +1848,31 @@ internal fun FullscreenLyrics(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        track.artist,
+                        if (selectMode) "Toque nas linhas para selecionar" else track.artist,
                         fontSize = 12.sp,
                         color = Color.White.copy(0.7f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                Spacer(Modifier.size(48.dp))
+                IconButton(onClick = {
+                    if (selectMode) {
+                        if (selectedLines.isNotEmpty()) {
+                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }
+                            LyricsShareHelper.shareSnippet(context, track, ordered)
+                            selectMode = false
+                            selectedLines = emptySet()
+                        }
+                    } else {
+                        selectMode = true
+                    }
+                }) {
+                    Icon(
+                        imageVector = if (selectMode) Icons.Rounded.Share else Icons.Rounded.Share,
+                        contentDescription = "Compartilhar trecho",
+                        tint = if (selectMode && selectedLines.isNotEmpty()) Color(0xFF69F0AE) else Color.White
+                    )
+                }
             }
 
             LazyColumn(
@@ -1455,44 +1886,76 @@ internal fun FullscreenLyrics(
                 itemsIndexed(lyrics) { index, line ->
                     val isActive = index == activeIndex
                     val baseSize = if (isActive) (fontSizeSp + 4f).sp else fontSizeSp.sp
-                    if (isActive && line.hasSyllableSync) {
-                        // Sincronização silábica: cada palavra com cor primária/secundária
-                        SyllableLine(
-                            line = line,
-                            position = position,
-                            fontSize = baseSize,
-                            fontFamily = lyricsFont,
-                            primary = primaryColor,
-                            secondary = secondaryColor,
-                            borderColor = borderColor,
-                            borderWidth = borderWidth,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSeek(line.timeMs.coerceAtLeast(0L)) }
-                                .padding(vertical = 12.dp)
-                        )
-                    } else {
-                        Text(
-                            line.text,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSeek(line.timeMs.coerceAtLeast(0L)) }
-                                .padding(vertical = 12.dp),
-                            textAlign = TextAlign.Center,
-                            fontSize = baseSize,
-                            lineHeight = (baseSize.value * 1.35f).sp,
-                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isActive) primaryColor else secondaryColor,
-                            fontFamily = lyricsFont,
-                            style = if (borderWidth > 0f) {
-                                androidx.compose.ui.text.TextStyle(
-                                    shadow = androidx.compose.ui.graphics.Shadow(
-                                        color = borderColor,
-                                        blurRadius = borderWidth * 2f
+                    val scale by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = if (isActive) 1.06f else 1f,
+                        animationSpec = tween(320, easing = FastOutSlowInEasing),
+                        label = "lyricScale"
+                    )
+                    val alpha by androidx.compose.animation.core.animateFloatAsState(
+                        targetValue = when {
+                            isActive -> 1f
+                            kotlin.math.abs(index - activeIndex) <= 1 -> 0.55f
+                            else -> 0.32f
+                        },
+                        animationSpec = tween(280, easing = FastOutSlowInEasing),
+                        label = "lyricAlpha"
+                    )
+                    val isSelected = index in selectedLines
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                                this.alpha = if (selectMode) 1f else alpha
+                            }
+                            .then(
+                                if (selectMode && isSelected)
+                                    Modifier.background(Color(0xFF69F0AE).copy(0.2f), RoundedCornerShape(10.dp))
+                                else Modifier
+                            )
+                            .clickable {
+                                if (selectMode) {
+                                    selectedLines = if (isSelected) selectedLines - index else selectedLines + index
+                                } else {
+                                    onSeek(line.timeMs.coerceAtLeast(0L))
+                                }
+                            }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isActive && line.hasSyllableSync) {
+                            SyllableLine(
+                                line = line,
+                                position = position,
+                                fontSize = baseSize,
+                                fontFamily = lyricsFont,
+                                primary = primaryColor,
+                                secondary = secondaryColor,
+                                borderColor = borderColor,
+                                borderWidth = borderWidth,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            Text(
+                                line.text,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                                fontSize = baseSize,
+                                lineHeight = (baseSize.value * 1.35f).sp,
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isActive) primaryColor else secondaryColor,
+                                fontFamily = lyricsFont,
+                                style = if (borderWidth > 0f) {
+                                    androidx.compose.ui.text.TextStyle(
+                                        shadow = androidx.compose.ui.graphics.Shadow(
+                                            color = borderColor,
+                                            blurRadius = borderWidth * 2f
+                                        )
                                     )
-                                )
-                            } else androidx.compose.ui.text.TextStyle.Default
-                        )
+                                } else androidx.compose.ui.text.TextStyle.Default
+                            )
+                        }
                     }
                 }
             }
@@ -1559,5 +2022,175 @@ private fun SyllableLine(
         modifier = modifier,
         textAlign = TextAlign.Center,
         lineHeight = (fontSize.value * 1.35f).sp
+    )
+}
+
+
+@Composable
+private fun PresetGlassBar(
+    presetPath: String?,
+    isFavorite: Boolean,
+    onFavorite: () -> Unit,
+    onOpenList: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val name = presetPath?.let { java.io.File(it).nameWithoutExtension } ?: "Preset"
+    Row(
+        modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.Black.copy(alpha = 0.45f))
+            .border(1.dp, Color.White.copy(0.22f), RoundedCornerShape(16.dp))
+            .clickable(onClick = onOpenList)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(
+            name,
+            color = Color.White,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Spacer(Modifier.width(8.dp))
+        Icon(
+            if (isFavorite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+            contentDescription = "Favoritar preset",
+            tint = if (isFavorite) Color(0xFFE53935) else Color.White.copy(0.85f),
+            modifier = Modifier
+                .size(20.dp)
+                .clickable(onClick = onFavorite)
+        )
+    }
+}
+
+@Composable
+internal fun MilkPresetPickerDialog(
+    presets: List<String>,
+    currentPath: String?,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    val context = LocalContext.current
+    // Mesma SharedPreferences / chave do chip do Now Playing
+    val prefs = remember {
+        context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+    }
+    var favorites by remember {
+        mutableStateOf(prefs.getStringSet("milk_preset_favs", emptySet())?.toSet() ?: emptySet())
+    }
+    fun toggleFav(path: String) {
+        val name = java.io.File(path).name
+        val next = favorites.toMutableSet()
+        if (name in next) next.remove(name) else next.add(name)
+        favorites = next
+        prefs.edit().putStringSet("milk_preset_favs", next).apply()
+    }
+    val sorted = remember(presets, favorites) {
+        val fav = presets.filter { java.io.File(it).name in favorites }
+        val rest = presets.filter { java.io.File(it).name !in favorites }
+        fav + rest
+    }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val currentIndex = remember(sorted, currentPath) {
+        if (currentPath == null) 0
+        else sorted.indexOfFirst {
+            it == currentPath || java.io.File(it).name == java.io.File(currentPath).name
+        }.coerceAtLeast(0)
+    }
+    LaunchedEffect(currentIndex, sorted.size) {
+        if (sorted.isNotEmpty()) listState.scrollToItem(currentIndex)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Visualizer — presets", color = Color(0xFF1A1A1A)) },
+        text = {
+            LazyColumn(state = listState, modifier = Modifier.height(320.dp)) {
+                items(sorted.size) { i ->
+                    val path = sorted[i]
+                    val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
+                    val isFav = java.io.File(path).name in favorites
+                    val isCurrent = currentPath != null && (
+                        path == currentPath || java.io.File(path).name == java.io.File(currentPath).name
+                    )
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(path) }
+                            .background(if (isCurrent) Color(0xFF5C6BC0).copy(0.15f) else Color.Transparent)
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            name,
+                            color = Color(0xFF1A1A1A),
+                            fontSize = 14.sp,
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { toggleFav(path) }, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                imageVector = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                contentDescription = "Favoritar",
+                                tint = if (isFav) Color(0xFFE53935) else Color(0xFF888888),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        if (isCurrent) {
+                            Icon(
+                                Icons.Rounded.Check,
+                                contentDescription = "Atual",
+                                tint = Color(0xFF5C6BC0),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+        }
+    )
+}
+
+
+
+@Composable
+private fun SleepTimerDialog(
+    currentMinutes: Int,
+    onDismiss: () -> Unit,
+    onSet: (Int) -> Unit
+) {
+    val options = listOf(0, 5, 10, 15, 30, 45, 60)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1A1A24),
+        title = { Text("Timer de sono", color = Color.White) },
+        text = {
+            Column {
+                options.forEach { m ->
+                    val label = if (m == 0) "Desligado" else "$m minutos"
+                    Text(
+                        text = label,
+                        color = if (m == currentMinutes) Color(0xFFB388FF) else Color.White.copy(0.85f),
+                        fontSize = 16.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSet(m) }
+                            .padding(vertical = 12.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = Color.White.copy(0.7f))
+            }
+        }
     )
 }

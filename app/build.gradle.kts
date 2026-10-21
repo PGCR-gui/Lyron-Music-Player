@@ -17,8 +17,8 @@ android {
         applicationId = "gui.pgcr.music"
         minSdk = 26
         targetSdk = 36
-        versionCode = 177
-        versionName = "0.25"
+        versionCode = 192
+        versionName = "0.42"
 
         if (hasProjectM) {
             ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
@@ -62,12 +62,16 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("androidx.palette:palette-ktx:1.0.0")
 
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-session:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
 
-    // Metadados de áudio — JAR local em app/libs (sem depender do Maven no telefone)
-    implementation(files("libs/jaudiotagger-3.0.1.jar"))
+    // Locais em app/libs — listados uma vez só (evita D8 duplicate classes)
+    implementation(files(
+        "libs/jaudiotagger-3.0.1.jar",
+        "libs/lib-decoder-ffmpeg-release.aar"
+    ))
 }

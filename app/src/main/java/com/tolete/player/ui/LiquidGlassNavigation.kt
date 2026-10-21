@@ -24,9 +24,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Category
+import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material3.Icon
@@ -53,11 +53,11 @@ private data class NavItem(
 )
 
 private val navItems = listOf(
+    NavItem(MusicViewModel.Tab.HOME, Icons.Rounded.Home, "Início"),
     NavItem(MusicViewModel.Tab.ALL, Icons.Rounded.LibraryMusic, "Todas"),
     NavItem(MusicViewModel.Tab.ARTISTS, Icons.Rounded.Person, "Artistas"),
     NavItem(MusicViewModel.Tab.ALBUMS, Icons.Rounded.Album, "Álbuns"),
-    NavItem(MusicViewModel.Tab.GENRES, Icons.Rounded.Category, "Gêneros"),
-    NavItem(MusicViewModel.Tab.PLAYLISTS, Icons.AutoMirrored.Rounded.QueueMusic, "Playlists")
+    NavItem(MusicViewModel.Tab.GENRES, Icons.Rounded.Category, "Gêneros")
 )
 
 @Composable
