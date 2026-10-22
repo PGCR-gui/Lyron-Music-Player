@@ -151,6 +151,8 @@ fun SettingsScreen(
     onSplashEnabledChange: (Boolean) -> Unit = {},
     splashSoundEnabled: Boolean = true,
     onSplashSoundChange: (Boolean) -> Unit = {},
+    floatingIconsEnabled: Boolean = true,
+    onFloatingIconsChange: (Boolean) -> Unit = {},
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
@@ -263,7 +265,9 @@ fun SettingsScreen(
                 splashEnabled = splashEnabled,
                 onSplashEnabledChange = onSplashEnabledChange,
                 splashSoundEnabled = splashSoundEnabled,
-                onSplashSoundChange = onSplashSoundChange
+                onSplashSoundChange = onSplashSoundChange,
+                floatingIconsEnabled = floatingIconsEnabled,
+                onFloatingIconsChange = onFloatingIconsChange
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,

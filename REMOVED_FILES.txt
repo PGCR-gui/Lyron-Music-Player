@@ -1,3 +1,0 @@
-DELETE if present:
-  app/src/main/java/com/tolete/player/ui/NyxTSkin.kt
-  app/src/main/java/com/tolete/player/data/VideoExporter.kt

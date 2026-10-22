@@ -1562,6 +1562,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putBoolean(KEY_SPLASH_SOUND, enabled).apply()
     }
 
+    // ---------- Ícones flutuantes no fundo ----------
+    private val _floatingIconsEnabled = MutableStateFlow(prefs.getBoolean(KEY_FLOATING_ICONS, true))
+    val floatingIconsEnabled: StateFlow<Boolean> = _floatingIconsEnabled.asStateFlow()
+    fun setFloatingIconsEnabled(enabled: Boolean) {
+        _floatingIconsEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_FLOATING_ICONS, enabled).apply()
+    }
+
     /** Duração do fade in/out ao play/pause em milissegundos (0 = instantâneo). */
     private val _fadeMs = MutableStateFlow(prefs.getInt(KEY_FADE_MS, 300).coerceIn(0, 3000))
     val fadeMs: StateFlow<Int> = _fadeMs.asStateFlow()
@@ -1953,6 +1961,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_LYRICS_BORDER_W = "lyrics_border_width"
         const val KEY_SPLASH_ENABLED = "splash_enabled"
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
+        const val KEY_FLOATING_ICONS = "floating_icons_enabled"
         const val KEY_FADE_MS = "fade_ms"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"

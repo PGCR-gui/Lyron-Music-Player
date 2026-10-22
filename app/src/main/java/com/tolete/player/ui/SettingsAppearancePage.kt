@@ -72,8 +72,12 @@ internal fun AppearancePage(
     splashEnabled: Boolean = true,
     onSplashEnabledChange: (Boolean) -> Unit = {},
     splashSoundEnabled: Boolean = true,
-    onSplashSoundChange: (Boolean) -> Unit = {}
+    onSplashSoundChange: (Boolean) -> Unit = {},
+    floatingIconsEnabled: Boolean = true,
+    onFloatingIconsChange: (Boolean) -> Unit = {}
 ) {
+    var fontsExpanded by remember { mutableStateOf(false) }
+
     val themes = listOf(
         AppThemeId.DYNAMIC to "Dinâmico",
         AppThemeId.DEFAULT to "Padrão",
@@ -178,87 +182,161 @@ internal fun AppearancePage(
                 )
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Espectro RGB",
+                    "Cor personalizada (hex)",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White.copy(0.55f),
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                RgbSpectrumPicker(
+                HexColorPicker(
                     selected = dynamicDefaultColor,
                     onColorChange = onDynamicDefaultColorChange,
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
         item {
             Spacer(Modifier.height(20.dp))
+            // --- Fontes (submenu) ---
             Text(
-                "Fonte do player",
+                "Fontes",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White.copy(0.55f),
                 modifier = Modifier.padding(bottom = 8.dp)
             )
-            Text(
-                "Selecionada: ${BuiltInFonts.displayLabel(uiFontPath)}",
-                fontSize = 12.sp,
-                color = Color.White.copy(0.5f),
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            // Sistema
-            FontOptionRow(
-                label = "Padrão do sistema",
-                selected = uiFontPath.isNullOrBlank() || uiFontPath == "system",
-                onClick = onClearUiFont
-            )
-            BuiltInFonts.ALL.forEach { font ->
-                FontOptionRow(
-                    label = font.displayName,
-                    selected = uiFontPath == font.storageKey,
-                    onClick = { onSelectUiFont(font.storageKey) }
-                )
-            }
             Row(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
                     .background(Color.White.copy(0.08f))
-                    .clickable(onClick = onPickUiFont)
+                    .clickable { fontsExpanded = !fontsExpanded }
                     .padding(horizontal = 14.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(Icons.Rounded.FontDownload, contentDescription = null)
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                    Text("Carregar fonte personalizada", fontSize = 16.sp)
+                    Text("Fonte do player", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(
-                        if (uiFontPath != null && !uiFontPath.startsWith("builtin:") && uiFontPath != "system")
-                            File(uiFontPath).name else "Arquivo .ttf / .otf",
+                        "Selecionada: ${BuiltInFonts.displayLabel(uiFontPath)}",
                         fontSize = 12.sp,
-                        color = Color.White.copy(0.5f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        color = Color.White.copy(0.5f)
                     )
                 }
-            }
-            if (uiFontPath != null && !uiFontPath.startsWith("builtin:") && uiFontPath != "system") {
-                Text(
-                    "Remover fonte personalizada",
+                Icon(
+                    Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = Color.White.copy(0.5f),
                     modifier = Modifier
-                        .padding(top = 10.dp)
-                        .clickable(onClick = onClearUiFont)
-                        .padding(vertical = 6.dp),
-                    fontSize = 14.sp,
-                    color = Color(0xFFFF8A80)
                 )
             }
-            Text(
-                "Afeta títulos, listas e interface — não altera a fonte das letras.",
-                fontSize = 12.sp,
-                color = Color.White.copy(0.4f),
-                modifier = Modifier.padding(top = 8.dp, bottom = 16.dp)
-            )
+            if (fontsExpanded) {
+                Spacer(Modifier.height(8.dp))
+                FontOptionRow(
+                    label = "Padrão do sistema",
+                    selected = uiFontPath.isNullOrBlank() || uiFontPath == "system",
+                    onClick = onClearUiFont
+                )
+                BuiltInFonts.ALL.forEach { font ->
+                    FontOptionRow(
+                        label = font.displayName,
+                        selected = uiFontPath == font.storageKey,
+                        onClick = { onSelectUiFont(font.storageKey) }
+                    )
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(0.08f))
+                        .clickable(onClick = onPickUiFont)
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.FontDownload, contentDescription = null)
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                        Text("Carregar fonte personalizada", fontSize = 16.sp)
+                        Text(
+                            if (uiFontPath != null && !uiFontPath.startsWith("builtin:") && uiFontPath != "system")
+                                File(uiFontPath).name else "Arquivo .ttf / .otf",
+                            fontSize = 12.sp,
+                            color = Color.White.copy(0.5f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (uiFontPath != null && !uiFontPath.startsWith("builtin:") && uiFontPath != "system") {
+                    Text(
+                        "Remover fonte personalizada",
+                        modifier = Modifier
+                            .padding(top = 10.dp)
+                            .clickable(onClick = onClearUiFont)
+                            .padding(vertical = 6.dp),
+                        fontSize = 14.sp,
+                        color = Color(0xFFFF8A80)
+                    )
+                }
+                Text(
+                    "Afeta títulos, listas e interface — não altera a fonte das letras.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.4f),
+                    modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(0.08f))
+                    .clickable(onClick = onOpenLyricsViewer)
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.FontDownload, contentDescription = null)
+                Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                    Text("Fonte das letras", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Abre o visualizador de legendas (fonte, tamanho, cores)",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(0.5f)
+                    )
+                }
+                Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = Color.White.copy(0.5f))
+            }
 
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Ícones flutuantes",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(0.08f))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mostrar ícones flutuantes", fontSize = 16.sp)
+                    Text(
+                        "No fundo de Início, músicas, artistas, álbuns e gêneros",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(0.5f)
+                    )
+                }
+                Switch(
+                    checked = floatingIconsEnabled,
+                    onCheckedChange = onFloatingIconsChange
+                )
+            }
+
+            Spacer(Modifier.height(20.dp))
             Text(
                 "Splash screen",
                 fontSize = 13.sp,
@@ -594,59 +672,78 @@ internal fun FontOptionRow(label: String, selected: Boolean, onClick: () -> Unit
 
 
 @Composable
-internal fun RgbSpectrumPicker(
+internal fun HexColorPicker(
     selected: Int,
     onColorChange: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val hues = remember {
-        List(36) { i ->
-            android.graphics.Color.HSVToColor(floatArrayOf(i * 10f, 0.85f, 1f))
+    fun toHex(argb: Int): String {
+        val r = (argb shr 16) and 0xFF
+        val g = (argb shr 8) and 0xFF
+        val b = argb and 0xFF
+        return String.format("#%02X%02X%02X", r, g, b)
+    }
+    fun parseHex(raw: String): Int? {
+        var s = raw.trim().removePrefix("#")
+        if (s.length == 3) {
+            s = s.map { "$it$it" }.joinToString("")
+        }
+        if (s.length != 6) return null
+        return try {
+            (0xFF shl 24) or s.toInt(16)
+        } catch (_: Exception) {
+            null
         }
     }
-    BoxWithConstraints(
-        modifier
-            .clip(RoundedCornerShape(12.dp))
-            .border(1.dp, Color.White.copy(0.2f), RoundedCornerShape(12.dp))
+
+    var text by remember(selected) { mutableStateOf(toHex(selected)) }
+    var isError by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        val w = constraints.maxWidth.toFloat().coerceAtLeast(1f)
-        Canvas(
+        Box(
             Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures { offset ->
-                        val frac = (offset.x / size.width).coerceIn(0f, 1f)
-                        val hue = frac * 360f
-                        val argb = android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.85f, 1f))
-                        onColorChange(argb)
-                    }
-                    detectDragGestures { change, _ ->
-                        change.consume()
-                        val frac = (change.position.x / size.width).coerceIn(0f, 1f)
-                        val hue = frac * 360f
-                        val argb = android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.85f, 1f))
-                        onColorChange(argb)
-                    }
-                }
-        ) {
-            val step = size.width / hues.size
-            hues.forEachIndexed { i, c ->
-                drawRect(
-                    color = Color(c),
-                    topLeft = androidx.compose.ui.geometry.Offset(i * step, 0f),
-                    size = androidx.compose.ui.geometry.Size(step + 1f, size.height)
-                )
-            }
-            // marker
-            val hsv = FloatArray(3)
-            android.graphics.Color.colorToHSV(selected, hsv)
-            val mx = (hsv[0] / 360f) * size.width
-            drawCircle(
-                color = Color.White,
-                radius = 10f,
-                center = androidx.compose.ui.geometry.Offset(mx, size.height / 2f),
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                .size(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(selected))
+                .border(1.dp, Color.White.copy(0.35f), RoundedCornerShape(12.dp))
+        )
+        OutlinedTextField(
+            value = text,
+            onValueChange = { input ->
+                // permite só # e hex
+                val filtered = input.filter { it in "#0123456789abcdefABCDEF" }.take(7)
+                text = filtered
+                val parsed = parseHex(filtered)
+                isError = parsed == null && filtered.length >= 6
+                if (parsed != null) onColorChange(parsed)
+            },
+            singleLine = true,
+            isError = isError,
+            label = { Text("Hex (#RRGGBB)") },
+            placeholder = { Text("#BB86FC") },
+            modifier = Modifier.weight(1f),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color(0xFF69F0AE),
+                unfocusedBorderColor = Color.White.copy(0.3f),
+                focusedLabelColor = Color.White.copy(0.7f),
+                unfocusedLabelColor = Color.White.copy(0.5f),
+                cursorColor = Color(0xFF69F0AE),
+                errorBorderColor = Color(0xFFFF8A80)
             )
-        }
+        )
+    }
+    if (isError) {
+        Text(
+            "Use o formato #RRGGBB (ex.: #FF5722)",
+            fontSize = 11.sp,
+            color = Color(0xFFFF8A80),
+            modifier = Modifier.padding(top = 4.dp)
+        )
     }
 }

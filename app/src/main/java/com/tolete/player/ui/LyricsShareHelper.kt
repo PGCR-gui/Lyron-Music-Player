@@ -26,34 +26,54 @@ object LyricsShareHelper {
         lines: List<String>
     ) {
         if (lines.isEmpty()) return
-        val bmp = renderCard(context, track, lines) ?: return
-        val cache = File(context.cacheDir, "share").apply { mkdirs() }
-        val outFile = File(cache, "lyron_lyric_${System.currentTimeMillis()}.png")
-        FileOutputStream(outFile).use { fos ->
-            bmp.compress(Bitmap.CompressFormat.PNG, 95, fos)
-        }
-        bmp.recycle()
+        try {
+            val bmp = renderCard(context, track, lines) ?: return
+            val cache = File(context.cacheDir, "share").apply { mkdirs() }
+            val outFile = File(cache, "lyron_lyric_${System.currentTimeMillis()}.png")
+            FileOutputStream(outFile).use { fos ->
+                bmp.compress(Bitmap.CompressFormat.PNG, 95, fos)
+            }
+            bmp.recycle()
 
-        val uri: Uri = try {
-            FileProvider.getUriForFile(
-                context,
-                context.packageName + ".fileprovider",
-                outFile
-            )
-        } catch (_: Exception) {
-            Uri.fromFile(outFile)
-        }
+            val uri: Uri = try {
+                FileProvider.getUriForFile(
+                    context,
+                    context.packageName + ".fileprovider",
+                    outFile
+                )
+            } catch (_: Exception) {
+                Uri.fromFile(outFile)
+            }
 
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "image/png"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(
-                Intent.EXTRA_TEXT,
-                "${track.title} — ${track.artist}\n\n${lines.joinToString("\n")}"
-            )
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(
+                    Intent.EXTRA_TEXT,
+                    "${track.title} — ${track.artist}\n\n${lines.joinToString("\n")}"
+                )
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // Usa FLAG_ACTIVITY_NEW_TASK se o contexto não for Activity (ex.: fullscreen overlay)
+            if (context !is android.app.Activity) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(Intent.createChooser(intent, "Compartilhar trecho"))
+        } catch (e: Exception) {
+            // Evita crash na tela de letras em tela cheia
+            android.util.Log.e("LyricsShareHelper", "Falha ao compartilhar trecho", e)
+            try {
+                val textIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(
+                        Intent.EXTRA_TEXT,
+                        "${track.title} — ${track.artist}\n\n${lines.joinToString("\n")}"
+                    )
+                    if (context !is android.app.Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(Intent.createChooser(textIntent, "Compartilhar trecho"))
+            } catch (_: Exception) {}
         }
-        context.startActivity(Intent.createChooser(intent, "Compartilhar trecho"))
     }
 
     private fun renderCard(context: Context, track: Track, lines: List<String>): Bitmap? {
