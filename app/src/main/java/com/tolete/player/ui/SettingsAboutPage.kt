@@ -57,7 +57,7 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
             modifier = Modifier.padding(bottom = 4.dp)
         )
         Text(
-            "Versão 0.42 (192)",
+            "Versão 0.43 (193)",
             fontSize = 13.sp,
             color = Color.White.copy(0.55f),
             modifier = Modifier.padding(bottom = 16.dp)
@@ -114,9 +114,43 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
                 )
             }
         }
-        CreditLine(label = "Desenhista do icon", value = "Taci")
+        CreditLine(label = "Desenhista do ícone do app", value = "Taci")
+        CreditLine(
+            label = "Ícones",
+            value = "Good Ware",
+            isLink = true,
+            onLinkClick = {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.flaticon.com/br/autores/good-ware"))
+                context.startActivity(intent)
+            }
+        )
 
         Spacer(Modifier.height(16.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PGCR-gui/Lyron-Music-Player/releases"))
+                    context.startActivity(intent)
+                }
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.Refresh, contentDescription = null, tint = Color.White)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Verificar atualizações", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text("Checa novas versões no GitHub Releases", fontSize = 12.sp, color = Color.White.copy(0.5f))
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.4f)
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
         Row(
             Modifier
                 .fillMaxWidth()
@@ -211,6 +245,23 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 @Composable
 internal fun ChangelogPage() {
     val entries = listOf(
+        ChangelogEntry(
+            "0.43",
+            "193",
+            listOf(
+                "Layout da aba Início redesenhado com botões liquid glass no formato do desenho e ícones default/pressed",
+                "Ícones flutuantes no fundo das telas (Início, Todas as músicas, Artistas, Álbuns, Gêneros) com opção de ativar/desativar em Aparência",
+                "Fontes do Player e das letras agrupadas em submenu em Aparência",
+                "Seletor de cor do tema dinâmico agora usa sistema hexadecimal (em vez de espectro RGB)",
+                "Caixa de ajuda atualizada com instruções úteis: fontes, presets .milk e gestos no Now Playing",
+                "Correção de crash ao compartilhar trecho de letra na tela de letras em tela cheia",
+                "Exceções do separador de artistas: agora conta apenas um por linha",
+                "Atualizador do app que verifica novas versões em https://github.com/PGCR-gui/Lyron-Music-Player/releases",
+                "Na tela de créditos: ícone e link clicável para Good Ware (Flaticon)",
+                "Equalizador refeito do zero, versão simples",
+                "Versão 0.43 (193)"
+            )
+        ),
         ChangelogEntry(
             "0.42",
             "192",

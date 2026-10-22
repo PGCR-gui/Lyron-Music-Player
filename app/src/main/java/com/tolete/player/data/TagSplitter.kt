@@ -29,7 +29,7 @@ class TagSplitter(
 ) {
 
     private val exceptionSet: Set<String> = exceptions
-        .split(Regex("[,;\\n]+"))
+        .split(Regex("\\n+"))  // um artista por linha
         .map { it.trim() }
         .filter { it.isNotEmpty() }
         .map { it.lowercase() }

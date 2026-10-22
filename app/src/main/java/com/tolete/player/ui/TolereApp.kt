@@ -11,6 +11,12 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -25,6 +31,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -52,8 +59,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.res.painterResource
+import com.tolete.player.R
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material.icons.Icons
@@ -118,6 +130,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
@@ -248,6 +261,7 @@ fun TolereApp(
     val lyricsBorderWidth by vm.lyricsBorderWidth.collectAsStateWithLifecycle()
     val splashEnabled by vm.splashEnabled.collectAsStateWithLifecycle()
     val splashSoundEnabled by vm.splashSoundEnabled.collectAsStateWithLifecycle()
+    val floatingIconsEnabled by vm.floatingIconsEnabled.collectAsStateWithLifecycle()
     val groupSort by vm.groupSort.collectAsStateWithLifecycle()
     val groupOrder by vm.groupOrder.collectAsStateWithLifecycle()
     val trackSort by vm.trackSort.collectAsStateWithLifecycle()
@@ -373,6 +387,20 @@ fun TolereApp(
                         .background(rememberFloatingGradient(appColors))
                         .nestedScroll(navScrollConnection)
                 ) {
+                    // Ícones flutuantes de fundo (Início, músicas, artistas, álbuns, gêneros)
+                    if (floatingIconsEnabled && filter == null && !isSearching) {
+                        val floatTab = when (tab) {
+                            MusicViewModel.Tab.HOME -> "inicio"
+                            MusicViewModel.Tab.ALL -> "musicas"
+                            MusicViewModel.Tab.ARTISTS -> "artistas"
+                            MusicViewModel.Tab.ALBUMS -> "albuns"
+                            MusicViewModel.Tab.GENRES -> "generos"
+                            else -> null
+                        }
+                        if (floatTab != null) {
+                            FloatingIconsBackground(kind = floatTab)
+                        }
+                    }
                     Column(Modifier.fillMaxSize().statusBarsPadding()) {
                         if (isSearching) {
                             SearchHeader(
@@ -830,7 +858,9 @@ fun TolereApp(
                     splashEnabled = splashEnabled,
                     onSplashEnabledChange = vm::setSplashEnabled,
                     splashSoundEnabled = splashSoundEnabled,
-                    onSplashSoundChange = vm::setSplashSoundEnabled
+                    onSplashSoundChange = vm::setSplashSoundEnabled,
+                    floatingIconsEnabled = floatingIconsEnabled,
+                    onFloatingIconsChange = vm::setFloatingIconsEnabled
                 )
             }
 
@@ -1275,12 +1305,15 @@ private fun HelpDialog(onDismiss: () -> Unit) {
         text = {
             Column {
                 Text(
-                    "• Toque em uma música para reproduzir.\n" +
-                        "• Pressione e segure uma faixa para opções (tocar a seguir, adicionar à playlist…).\n" +
-                        "• Use as abas para navegar por artistas, álbuns, gêneros e playlists.\n" +
-                        "• Em Configurações → Biblioteca você pode adicionar pastas e controlar a separação de artistas/gêneros.\n" +
-                        "• Em Aparência escolha temas e fontes do player e das letras.\n" +
-                        "• A busca está na caixa ao lado do botão de ajuda.",
+                    "• Fontes: em Configurações → Aparência → Fontes você troca a fonte do player e das letras. " +
+                        "Para importar uma fonte personalizada, use o botão de adicionar e selecione um arquivo .ttf ou .otf.\n\n" +
+                        "• Presets .milk: o visualizador usa presets no formato ProjectM (.milk). " +
+                        "Importe novos em Configurações → Visualizador (ou pela pasta de presets). " +
+                        "Eles controlam as animações e efeitos visuais sincronizados com a música.\n\n" +
+                        "• Gestos no Now Playing: deslize horizontalmente (esquerda/direita) sobre a área do visualizador " +
+                        "para navegar entre os presets .milk. Toque no nome do preset para abrir a lista completa.\n\n" +
+                        "• Toque em uma música para reproduzir. Pressione e segure para opções (tocar a seguir, adicionar à playlist…). " +
+                        "Use as abas para artistas, álbuns, gêneros e playlists. A busca fica ao lado do botão de ajuda.",
                     fontSize = 14.sp
                 )
             }
@@ -2846,152 +2879,204 @@ private fun LysPlaceHome(
     appColors: AppColors
 ) {
     var section by remember { mutableStateOf<String?>(null) }
-    Column(
+    Box(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp)
             .padding(bottom = bottomPadding)
     ) {
-        Text(
-            "Início",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
-            modifier = Modifier.padding(top = 12.dp, bottom = 20.dp)
-        )
-        if (section == null) {
-            val buttons = listOf(
-                Triple("Mais Tocadas", Color(0xFF4FC3F7), mostPlayed),
-                Triple("Últimas Reproduzidas", Color(0xFF81C784), history),
-                Triple("Playlists", Color(0xFFFFB74D), emptyList()),
-                Triple("Favoritas", Color(0xFFBA68C8), favorites)
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp)
+        ) {
+            Text(
+                "Início",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier.padding(top = 12.dp, bottom = 16.dp)
             )
-            buttons.forEach { (label, color, _) ->
-                HomeGameButton(
-                    label = label,
-                    color = color,
-                    onClick = {
-                        when (label) {
-                            "Mais Tocadas" -> section = "most"
-                            "Últimas Reproduzidas" -> section = "history"
-                            "Playlists" -> section = "playlists"
-                            "Favoritas" -> section = "favorites"
-                        }
-                    },
-                    modifier = Modifier
+            if (section == null) {
+                // Layout inspirado no desenho:
+                // Topo diagonal: Mais Tocadas (esq) + Favoritas (dir)
+                // Meio: Playlists
+                // Base: Histórico (área maior)
+                Column(
+                    Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 8.dp)
-                )
-            }
-        } else {
-            Row(
-                Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { section = null }) {
-                    Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar", tint = Color.White)
+                        .weight(1f)
+                        .padding(bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Zona superior (~42%)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(0.42f),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HomeLiquidGlassButton(
+                            label = "MAIS\nTOCADAS",
+                            defaultIconRes = R.drawable.ic_mais_tocadas_default,
+                            pressedIconRes = R.drawable.ic_mais_tocadas_pressed,
+                            onClick = { section = "most" },
+                            shape = RoundedCornerShape(
+                                topStart = 36.dp, topEnd = 18.dp,
+                                bottomStart = 18.dp, bottomEnd = 40.dp
+                            ),
+                            iconAlignment = Alignment.TopStart,
+                            modifier = Modifier.weight(1.05f).fillMaxHeight()
+                        )
+                        HomeLiquidGlassButton(
+                            label = "FAVORITAS",
+                            defaultIconRes = R.drawable.ic_favoritas_default,
+                            pressedIconRes = R.drawable.ic_favoritas_pressed,
+                            onClick = { section = "favorites" },
+                            shape = RoundedCornerShape(
+                                topStart = 18.dp, topEnd = 36.dp,
+                                bottomStart = 40.dp, bottomEnd = 18.dp
+                            ),
+                            iconAlignment = Alignment.BottomEnd,
+                            modifier = Modifier.weight(1f).fillMaxHeight()
+                        )
+                    }
+                    // Playlists
+                    HomeLiquidGlassButton(
+                        label = "PLAYLISTS",
+                        defaultIconRes = R.drawable.ic_playlists_default,
+                        pressedIconRes = R.drawable.ic_playlists_pressed,
+                        onClick = { section = "playlists" },
+                        shape = RoundedCornerShape(
+                            topStart = 28.dp, topEnd = 28.dp,
+                            bottomStart = 20.dp, bottomEnd = 36.dp
+                        ),
+                        iconAlignment = Alignment.CenterEnd,
+                        modifier = Modifier.fillMaxWidth().weight(0.22f)
+                    )
+                    // Histórico (maior)
+                    HomeLiquidGlassButton(
+                        label = "HISTÓRICO",
+                        defaultIconRes = R.drawable.ic_historico_default,
+                        pressedIconRes = R.drawable.ic_historico_pressed,
+                        onClick = { section = "history" },
+                        shape = RoundedCornerShape(
+                            topStart = 40.dp, topEnd = 28.dp,
+                            bottomStart = 32.dp, bottomEnd = 32.dp
+                        ),
+                        iconAlignment = Alignment.BottomStart,
+                        modifier = Modifier.fillMaxWidth().weight(0.36f)
+                    )
                 }
-                Text(
-                    when (section) {
-                        "most" -> "Mais Tocadas"
-                        "history" -> "Últimas Reproduzidas"
-                        "playlists" -> "Playlists"
-                        else -> "Favoritas"
-                    },
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-            }
-            when (section) {
-                "most" -> {
-                    if (mostPlayed.isEmpty()) {
-                        Text("Nenhuma reprodução registrada ainda.", color = Color.White.copy(0.6f))
-                    } else {
-                        androidx.compose.foundation.lazy.LazyColumn(
-                            contentPadding = PaddingValues(bottom = 8.dp)
-                        ) {
-                            items(mostPlayed.size) { index ->
-                                val track = mostPlayed[index]
-                                val count = playCountOf(track.id)
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onPlayTracks(mostPlayed, index) }
-                                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "${index + 1}",
-                                        color = Color.White.copy(0.45f),
-                                        fontSize = 13.sp,
-                                        modifier = Modifier.width(28.dp)
-                                    )
-                                    Column(Modifier.weight(1f)) {
-                                        Text(track.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { section = null }) {
+                        Icon(Icons.Rounded.ArrowBack, contentDescription = "Voltar", tint = Color.White)
+                    }
+                    Text(
+                        when (section) {
+                            "most" -> "Mais Tocadas"
+                            "history" -> "Histórico"
+                            "playlists" -> "Playlists"
+                            else -> "Favoritas"
+                        },
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                }
+                when (section) {
+                    "most" -> {
+                        if (mostPlayed.isEmpty()) {
+                            Text("Nenhuma reprodução registrada ainda.", color = Color.White.copy(0.6f))
+                        } else {
+                            androidx.compose.foundation.lazy.LazyColumn(
+                                contentPadding = PaddingValues(bottom = 8.dp)
+                            ) {
+                                items(mostPlayed.size) { index ->
+                                    val track = mostPlayed[index]
+                                    val count = playCountOf(track.id)
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clickable { onPlayTracks(mostPlayed, index) }
+                                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Text(
-                                            track.artist,
-                                            color = Color.White.copy(0.55f),
+                                            "${index + 1}",
+                                            color = Color.White.copy(0.45f),
                                             fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            modifier = Modifier.width(28.dp)
+                                        )
+                                        Column(Modifier.weight(1f)) {
+                                            Text(track.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(
+                                                track.artist,
+                                                color = Color.White.copy(0.55f),
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Text(
+                                            if (count == 1) "1 play" else "$count plays",
+                                            color = appColors.accent,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold
                                         )
                                     }
-                                    Text(
-                                        if (count == 1) "1 play" else "$count plays",
-                                        color = appColors.accent,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
                                 }
                             }
                         }
                     }
-                }
-                "history" -> {
-                    if (history.isEmpty()) {
-                        Text("Nenhuma faixa recente.", color = Color.White.copy(0.6f))
-                    } else {
-                        TrackList(
-                            tracks = history,
-                            nowPlayingId = null,
+                    "history" -> {
+                        if (history.isEmpty()) {
+                            Text("Nenhuma faixa recente.", color = Color.White.copy(0.6f))
+                        } else {
+                            TrackList(
+                                tracks = history,
+                                nowPlayingId = null,
+                                bottomPadding = 0.dp,
+                                showTrackNumbers = false,
+                                selectedIds = emptySet(),
+                                selectionMode = false,
+                                onClick = { index, _ -> onPlayTracks(history, index) },
+                                onLongClick = {}
+                            )
+                        }
+                    }
+                    "favorites" -> {
+                        if (favorites.isEmpty()) {
+                            Text("Nenhuma favorita ainda.", color = Color.White.copy(0.6f))
+                        } else {
+                            TrackList(
+                                tracks = favorites,
+                                nowPlayingId = null,
+                                bottomPadding = 0.dp,
+                                showTrackNumbers = false,
+                                selectedIds = emptySet(),
+                                selectionMode = false,
+                                onClick = { index, _ -> onPlayTracks(favorites, index) },
+                                onLongClick = {}
+                            )
+                        }
+                    }
+                    "playlists" -> {
+                        PlaylistList(
+                            playlists = playlists,
+                            trackCount = { id ->
+                                playlists.firstOrNull { it.id == id }?.trackIds?.size ?: 0
+                            },
                             bottomPadding = 0.dp,
-                            showTrackNumbers = false,
-                            selectedIds = emptySet(),
-                            selectionMode = false,
-                            onClick = { index, _ -> onPlayTracks(history, index) },
-                            onLongClick = {}
+                            onOpen = onOpenPlaylist,
+                            onCreate = onCreatePlaylist,
+                            onImport = {},
+                            onExport = {}
                         )
                     }
-                }
-                "favorites" -> {
-                    if (favorites.isEmpty()) {
-                        Text("Nenhuma favorita ainda.", color = Color.White.copy(0.6f))
-                    } else {
-                        TrackList(
-                            tracks = favorites,
-                            nowPlayingId = null,
-                            bottomPadding = 0.dp,
-                            showTrackNumbers = false,
-                            selectedIds = emptySet(),
-                            selectionMode = false,
-                            onClick = { index, _ -> onPlayTracks(favorites, index) },
-                            onLongClick = {}
-                        )
-                    }
-                }
-                "playlists" -> {
-                    PlaylistList(
-                        playlists = playlists,
-                        trackCount = { id ->
-                            playlists.firstOrNull { it.id == id }?.trackIds?.size ?: 0
-                        },
-                        bottomPadding = 0.dp,
-                        onOpen = onOpenPlaylist,
-                        onCreate = onCreatePlaylist,
-                        onImport = {},
-                        onExport = {}
-                    )
                 }
             }
         }
@@ -2999,54 +3084,187 @@ private fun LysPlaceHome(
 }
 
 @Composable
-private fun HomeGameButton(
+private fun HomeLiquidGlassButton(
     label: String,
-    color: Color,
+    defaultIconRes: Int,
+    pressedIconRes: Int,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(28.dp),
+    iconAlignment: Alignment = Alignment.Center
 ) {
-    // Estilo inspirado nos botões glossy do Cool_Game_Buttons.eps
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+
     Box(
-        modifier
-            .height(56.dp)
-            .clip(RoundedCornerShape(28.dp))
+        modifier = modifier
+            .clip(shape)
             .background(
                 Brush.verticalGradient(
-                    listOf(color.copy(alpha = 0.95f), color.copy(alpha = 0.7f))
+                    listOf(
+                        Color.White.copy(alpha = if (isPressed) 0.16f else 0.26f),
+                        Color.White.copy(alpha = if (isPressed) 0.05f else 0.09f),
+                        Color.Black.copy(alpha = 0.10f)
+                    )
                 )
             )
             .border(
-                width = 2.dp,
+                width = 1.5.dp,
                 brush = Brush.verticalGradient(
-                    listOf(Color.White.copy(0.55f), color.copy(0.4f), Color.Black.copy(0.25f))
+                    listOf(
+                        Color.White.copy(alpha = 0.55f),
+                        Color.White.copy(alpha = 0.16f),
+                        Color.White.copy(alpha = 0.05f)
+                    )
                 ),
-                shape = RoundedCornerShape(28.dp)
+                shape = shape
             )
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
     ) {
-        // Highlight superior (brilho do botão de jogo)
+        // Highlight superior estilo liquid glass
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(18.dp)
+                .height(20.dp)
                 .align(Alignment.TopCenter)
-                .padding(horizontal = 10.dp, vertical = 4.dp)
+                .padding(horizontal = 16.dp, vertical = 6.dp)
                 .clip(RoundedCornerShape(50))
-                .background(Color.White.copy(alpha = 0.22f))
+                .background(Color.White.copy(alpha = if (isPressed) 0.10f else 0.20f))
         )
+        // Ícone na posição inspirada no desenho
+        Image(
+            painter = painterResource(if (isPressed) pressedIconRes else defaultIconRes),
+            contentDescription = null,
+            modifier = Modifier
+                .align(iconAlignment)
+                .padding(14.dp)
+                .size(if (iconAlignment == Alignment.Center) 44.dp else 40.dp)
+                .graphicsLayer { alpha = if (isPressed) 0.85f else 1f }
+        )
+        // Rótulo central
         Text(
             label,
             color = Color.White,
             fontWeight = FontWeight.Bold,
-            fontSize = 17.sp,
+            fontSize = 16.sp,
+            textAlign = TextAlign.Center,
+            lineHeight = 20.sp,
+            modifier = Modifier.align(Alignment.Center).padding(horizontal = 12.dp),
             style = androidx.compose.ui.text.TextStyle(
                 shadow = androidx.compose.ui.graphics.Shadow(
-                    color = Color.Black.copy(0.4f),
+                    color = Color.Black.copy(0.45f),
                     offset = androidx.compose.ui.geometry.Offset(0f, 1.5f),
-                    blurRadius = 2f
+                    blurRadius = 3f
                 )
             )
         )
+    }
+}
+
+
+@Composable
+private fun FloatingIconsBackground(kind: String) {
+    val baseIcons = when (kind) {
+        "inicio" -> listOf(
+            R.drawable.ic_float_inicio_1,
+            R.drawable.ic_float_inicio_2,
+            R.drawable.ic_float_inicio_3
+        )
+        "musicas" -> listOf(
+            R.drawable.ic_float_musicas_1,
+            R.drawable.ic_float_musicas_2,
+            R.drawable.ic_float_musicas_3
+        )
+        "artistas" -> listOf(
+            R.drawable.ic_float_artistas_1,
+            R.drawable.ic_float_artistas_2,
+            R.drawable.ic_float_artistas_3
+        )
+        "albuns" -> listOf(
+            R.drawable.ic_float_albuns_1,
+            R.drawable.ic_float_albuns_2,
+            R.drawable.ic_float_albuns_3
+        )
+        "generos" -> listOf(
+            R.drawable.ic_float_generos_1,
+            R.drawable.ic_float_generos_2,
+            R.drawable.ic_float_generos_3
+        )
+        else -> emptyList()
+    }
+    if (baseIcons.isEmpty()) return
+
+    data class Floater(
+        val res: Int,
+        val xFrac: Float,
+        val yFrac: Float,
+        val sizeDp: Float,
+        val baseAlpha: Float,
+        val phase: Float,
+        val ampDp: Float,
+        val rotAmp: Float
+    )
+
+    val floaters = remember(kind) {
+        val rnd = java.util.Random(kind.hashCode().toLong())
+        List(18) { i ->
+            Floater(
+                res = baseIcons[i % baseIcons.size],
+                xFrac = 0.04f + rnd.nextFloat() * 0.82f,
+                yFrac = 0.06f + rnd.nextFloat() * 0.78f,
+                sizeDp = 30f + rnd.nextFloat() * 42f,
+                baseAlpha = 0.08f + rnd.nextFloat() * 0.14f,
+                phase = rnd.nextFloat(),
+                ampDp = 8f + rnd.nextFloat() * 18f,
+                rotAmp = 4f + rnd.nextFloat() * 10f
+            )
+        }
+    }
+
+    val infinite = rememberInfiniteTransition(label = "floatIcons")
+    val t by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 6000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "t"
+    )
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val maxW = this.maxWidth
+        val maxH = this.maxHeight
+        floaters.forEach { f ->
+            val local = (t + f.phase) % 1f
+            val angle = local * (Math.PI * 2.0)
+            val yOff = (kotlin.math.sin(angle) * f.ampDp).toFloat()
+            val xOff = (kotlin.math.cos(angle * 0.6) * f.ampDp * 0.35).toFloat()
+            val rot = (kotlin.math.sin(angle * 0.8) * f.rotAmp).toFloat()
+            val scale = 0.92f + 0.08f * (0.5f + 0.5f * kotlin.math.sin(angle + 1.0).toFloat())
+            val alphaPulse = f.baseAlpha * (
+                0.75f + 0.25f * (0.5f + 0.5f * kotlin.math.sin(angle * 1.3).toFloat())
+            )
+            val xDp = maxW * f.xFrac + xOff.dp
+            val yDp = maxH * f.yFrac + yOff.dp
+
+            Image(
+                painter = painterResource(f.res),
+                contentDescription = null,
+                modifier = Modifier
+                    .offset(x = xDp, y = yDp)
+                    .size(f.sizeDp.dp)
+                    .graphicsLayer {
+                        rotationZ = rot
+                        scaleX = scale
+                        scaleY = scale
+                        this.alpha = alphaPulse
+                    }
+            )
+        }
     }
 }
