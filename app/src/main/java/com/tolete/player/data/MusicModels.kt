@@ -15,6 +15,7 @@ data class Track(
     val folder: String,
     val year: Int? = null,
     val trackNumber: Int? = null,
+    val discNumber: Int? = null,
     val artPath: String? = null,
     val sourceTree: String = "",
     val codec: String? = null,

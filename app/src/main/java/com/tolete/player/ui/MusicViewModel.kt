@@ -20,6 +20,7 @@ import com.tolete.player.data.Album
 import com.tolete.player.data.Artist
 import com.tolete.player.data.ArtistMetaStore
 import com.tolete.player.data.FavoritesBridge
+import com.tolete.player.data.FavoritesFile
 import com.tolete.player.data.Genre
 import com.tolete.player.data.LibraryCache
 import com.tolete.player.data.LyricLine
@@ -198,6 +199,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         persistPlaylists()
     }
 
+    fun reorderPlaylistTracks(playlistId: String, orderedTrackIds: List<String>) {
+        _playlists.value = _playlists.value.map { pl ->
+            if (pl.id != playlistId) pl
+            else pl.copy(trackIds = orderedTrackIds)
+        }
+        persistPlaylists()
+    }
+
     fun removeFromPlaylist(playlistId: String, trackId: String) {
         val list = _playlists.value.toMutableList()
         val idx = list.indexOfFirst { it.id == playlistId }
@@ -205,6 +214,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val pl = list[idx]
         list[idx] = pl.copy(trackIds = pl.trackIds - trackId)
         _playlists.value = list
+        persistPlaylists()
+    }
+
+    /** Reordena as playlists (Favoritos fica sempre primeiro). [orderedIds] = ids das demais, na nova ordem. */
+    fun reorderPlaylists(orderedIds: List<String>) {
+        val current = _playlists.value
+        val fav = current.filter { it.isFavorites }
+        val byId = current.filter { !it.isFavorites }.associateBy { it.id }
+        val ordered = orderedIds.mapNotNull { byId[it] }
+        val missing = byId.values.filter { it.id !in orderedIds.toSet() }
+        _playlists.value = fav + ordered + missing
         persistPlaylists()
     }
 
@@ -359,23 +379,145 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return sb.toString()
     }
 
-    /** Importa .m3u: tenta casar por path ou URI com a biblioteca atual. */
-    fun importPlaylistM3u(name: String, content: String): String? {
-        val lines = content.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
-        if (lines.isEmpty()) return null
-        val byPath = tracks.value.associateBy { it.path }
-        val byUri = tracks.value.associateBy { it.uri.toString() }
-        val ids = mutableListOf<String>()
-        for (line in lines) {
-            val t = byPath[line] ?: byUri[line] ?: byPath[line.removePrefix("file://")]
-            if (t != null && t.id !in ids) ids.add(t.id)
+    /** Resultado da importação de .m3u: [id] é null quando nenhuma faixa casou. */
+    data class M3uImportResult(val id: String?, val matched: Int, val total: Int)
+
+    /**
+     * Importa .m3u/.m3u8. Aceita caminhos absolutos, RELATIVOS (ex.: "Músicas/Alternative/x.m4a"),
+     * file://, content:// (com %XX), barras invertidas do Windows, acentos em NFC/NFD e maiúsc./minúsc.
+     * O casamento com a biblioteca é feito em etapas, da mais precisa à mais flexível:
+     *  1) fim do caminho/URI da faixa == caminho da linha (mais segmentos em comum = melhor)
+     *  2) mesmo nome de arquivo
+     *  3) mesmo nome de arquivo ignorando a extensão (ex.: .flac na lista, .m4a na biblioteca)
+     *  4) "Artista - Título" da linha #EXTINF contra as tags da faixa
+     */
+    fun importPlaylistM3u(name: String, content: String): M3uImportResult {
+        val lib = tracks.value
+        val entries = parseM3u(content)
+        if (entries.isEmpty()) return M3uImportResult(null, 0, 0)
+        if (lib.isEmpty()) return M3uImportResult(null, 0, entries.size)
+
+        class Key(val t: Track, val locs: List<String>, val base: String, val baseNoExt: String)
+
+        fun locationsOf(t: Track): List<String> {
+            val out = ArrayList<String>(3)
+            if (t.path.isNotBlank()) out += normM3uPath(t.path)
+            // URIs SAF/MediaStore guardam o caminho relativo codificado: ".../document/primary%3AMúsicas%2FX.m4a"
+            val u = try { Uri.decode(t.uri.toString()) } catch (_: Exception) { t.uri.toString() }
+            out += normM3uPath(u.substringAfter("/document/", u).substringAfter("primary:"))
+            out += normM3uPath(u)
+            return out.filter { it.isNotEmpty() }.distinct()
         }
-        if (ids.isEmpty()) return null
-        return createPlaylist(name.ifBlank { "Importada" }, ids)
+
+        val keys = lib.map { t ->
+            val locs = locationsOf(t)
+            val base = locs.firstOrNull { it.contains('/') }?.substringAfterLast('/')
+                ?: locs.firstOrNull()?.substringAfterLast('/') ?: ""
+            val fileBase = normM3uPath(t.path).substringAfterLast('/').ifBlank { base }
+            Key(t, locs, fileBase, fileBase.substringBeforeLast('.', fileBase))
+        }
+        val byBase = keys.groupBy { it.base }
+        val byBaseNoExt = keys.groupBy { it.baseNoExt }
+        val byArtistTitle = keys.groupBy { normM3uText(it.t.artist) + "|" + normM3uText(it.t.title) }
+        val byTitleOnly = keys.groupBy { normM3uText(it.t.title) }
+
+        fun commonSuffixSegments(a: String, b: String): Int {
+            val x = a.split('/').filter { it.isNotEmpty() }.asReversed()
+            val y = b.split('/').filter { it.isNotEmpty() }.asReversed()
+            var n = 0
+            while (n < x.size && n < y.size && x[n] == y[n]) n++
+            return n
+        }
+
+        fun best(cands: List<Key>, wanted: String): Key? {
+            if (cands.isEmpty()) return null
+            if (cands.size == 1) return cands[0]
+            return cands.maxByOrNull { k -> k.locs.maxOf { commonSuffixSegments(it, wanted) } }
+        }
+
+        val ids = LinkedHashSet<String>()
+        var matched = 0
+        for (e in entries) {
+            val wanted = normM3uPath(e.path)
+            val wantedBase = wanted.substringAfterLast('/')
+            val wantedNoExt = wantedBase.substringBeforeLast('.', wantedBase)
+
+            var hit: Key? = null
+            // 1) caminho completo/sufixo
+            if (wanted.contains('/')) {
+                hit = keys.filter { k -> k.locs.any { it == wanted || it.endsWith("/$wanted") || wanted.endsWith("/$it") } }
+                    .let { best(it, wanted) }
+            }
+            // 2) nome do arquivo
+            if (hit == null) hit = best(byBase[wantedBase].orEmpty(), wanted)
+            // 3) nome sem extensão
+            if (hit == null) hit = best(byBaseNoExt[wantedNoExt].orEmpty(), wanted)
+            // 4) Artista - Título do #EXTINF (ou do nome do arquivo "Artista - Título.ext")
+            if (hit == null) {
+                val label = e.label.ifBlank { wantedNoExt }
+                val parts = label.split(" - ", limit = 2)
+                if (parts.size == 2) {
+                    hit = byArtistTitle[normM3uText(parts[0]) + "|" + normM3uText(parts[1])]?.firstOrNull()
+                        ?: byTitleOnly[normM3uText(parts[1])]?.takeIf { it.size == 1 }?.firstOrNull()
+                } else {
+                    hit = byTitleOnly[normM3uText(label)]?.takeIf { it.size == 1 }?.firstOrNull()
+                }
+            }
+            if (hit != null) {
+                matched++
+                ids.add(hit.t.id)
+            }
+        }
+        if (ids.isEmpty()) return M3uImportResult(null, 0, entries.size)
+        val id = createPlaylist(name.ifBlank { "Importada" }, ids.toList())
+        return M3uImportResult(id, matched, entries.size)
     }
 
+    private data class M3uEntry(val path: String, val label: String)
+
+    private fun parseM3u(raw: String): List<M3uEntry> {
+        val out = ArrayList<M3uEntry>()
+        var label = ""
+        for (l in raw.removePrefix("\uFEFF").lineSequence()) {
+            val line = l.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#")) {
+                if (line.startsWith("#EXTINF", ignoreCase = true)) {
+                    label = line.substringAfter(',', "").trim()
+                }
+                continue
+            }
+            out += M3uEntry(line, label)
+            label = ""
+        }
+        return out
+    }
+
+    /** Normaliza caminho: decodifica %XX, tira file://, barras, ./, minúsculas e Unicode NFC. */
+    private fun normM3uPath(p: String): String {
+        var s = p.trim()
+        if (s.contains('%')) s = try { Uri.decode(s) } catch (_: Exception) { s }
+        s = s.removePrefix("file://").replace('\\', '/')
+        s = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFC).lowercase()
+        while (s.startsWith("./")) s = s.removePrefix("./")
+        return s.trimStart('/').replace(Regex("/+"), "/")
+    }
+
+    private fun normM3uText(t: String): String =
+        java.text.Normalizer.normalize(t, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+            .trim()
+
+    // Salvamos sempre o ESTADO MAIS RECENTE, uma gravação por vez. Antes, várias gravações simultâneas
+    // (ex.: adicionar várias faixas) disputavam o mesmo arquivo temporário e podiam apagar playlists.json.
     private fun persistPlaylists() {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) { writePlaylistsNow() }
+    }
+
+    private fun writePlaylistsNow() {
+        synchronized(FavoritesFile.lock) {
             try {
                 val arr = JSONArray()
                 for (pl in _playlists.value) {
@@ -386,50 +528,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         put("trackIds", JSONArray(pl.trackIds))
                     })
                 }
+                val json = JSONObject().put("v", 1).put("playlists", arr).toString()
                 val tmp = File(playlistsFile.parentFile, "playlists.json.tmp")
-                tmp.writeText(JSONObject().put("v", 1).put("playlists", arr).toString())
+                tmp.writeText(json)
+                if (playlistsFile.exists()) {
+                    try { playlistsFile.copyTo(File(playlistsFile.parentFile, "playlists.json.bak"), overwrite = true) } catch (_: Exception) {}
+                }
                 if (!tmp.renameTo(playlistsFile)) {
-                    playlistsFile.delete()
-                    tmp.renameTo(playlistsFile)
+                    playlistsFile.writeText(json) // nunca apaga antes de ter o novo conteúdo salvo
+                    tmp.delete()
                 }
             } catch (_: Exception) { }
         }
     }
 
+    private fun parsePlaylistsFile(f: File): List<Playlist> {
+        val root = JSONObject(f.readText())
+        val arr = root.getJSONArray("playlists")
+        val loaded = mutableListOf<Playlist>()
+        var hasFav = false
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val idsArr = o.getJSONArray("trackIds")
+            val ids = List(idsArr.length()) { idsArr.getString(it) }
+            val isFav = o.optBoolean("isFavorites") || o.getString("id") == Playlist.FAVORITES_ID
+            if (isFav) hasFav = true
+            loaded.add(
+                Playlist(
+                    id = o.getString("id"),
+                    name = if (isFav) "Favoritos" else o.getString("name"),
+                    trackIds = ids,
+                    isFavorites = isFav
+                )
+            )
+        }
+        if (!hasFav) loaded.add(0, Playlist.favorites())
+        loaded.sortBy { if (it.isFavorites) 0 else 1 }
+        return loaded
+    }
+
+    /** Carrega na hora (arquivo pequeno) para nenhuma gravação ocorrer antes e sobrescrever o que existe. */
     private fun loadPlaylists() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                if (!playlistsFile.exists()) {
-                    _playlists.value = listOf(Playlist.favorites())
-                    return@launch
-                }
-                val root = JSONObject(playlistsFile.readText())
-                val arr = root.getJSONArray("playlists")
-                val loaded = mutableListOf<Playlist>()
-                var hasFav = false
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val idsArr = o.getJSONArray("trackIds")
-                    val ids = List(idsArr.length()) { idsArr.getString(it) }
-                    val isFav = o.optBoolean("isFavorites") || o.getString("id") == Playlist.FAVORITES_ID
-                    if (isFav) hasFav = true
-                    loaded.add(
-                        Playlist(
-                            id = o.getString("id"),
-                            name = if (isFav) "Favoritos" else o.getString("name"),
-                            trackIds = ids,
-                            isFavorites = isFav
-                        )
-                    )
-                }
-                if (!hasFav) loaded.add(0, Playlist.favorites())
-                // Favoritos sempre no topo
-                loaded.sortBy { if (it.isFavorites) 0 else 1 }
-                _playlists.value = loaded
-                FavoritesBridge.notifyChanged()
-            } catch (_: Exception) {
-                _playlists.value = listOf(Playlist.favorites())
+        val bak = File(playlistsFile.parentFile, "playlists.json.bak")
+        val loaded: List<Playlist>? = synchronized(FavoritesFile.lock) {
+            listOf(playlistsFile, bak).firstNotNullOfOrNull { f ->
+                if (!f.exists()) null else try { parsePlaylistsFile(f) } catch (_: Exception) { null }
             }
+        }
+        if (loaded != null) {
+            _playlists.value = loaded
+            FavoritesBridge.notifyChanged()
         }
     }
 
@@ -440,7 +588,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             artistSeparators = prefs.getString(KEY_ARTIST_SEPARATORS, null) ?: "; /",
             artistExceptions = prefs.getString(KEY_ARTIST_EXCEPTIONS, null) ?: "",
             splitGenres = prefs.getBoolean(KEY_SPLIT_GENRES, false),
-            genreSeparators = prefs.getString(KEY_GENRE_SEPARATORS, null) ?: "; /"
+            genreSeparators = prefs.getString(KEY_GENRE_SEPARATORS, null) ?: "; /",
+            ignoredFolders = prefs.getString(KEY_IGNORED_FOLDERS, null) ?: "",
+            minDurationSec = prefs.getInt(KEY_MIN_DURATION_SEC, 0).coerceIn(0, 50)
         )
     )
     val librarySettings: StateFlow<LibrarySettings> = _librarySettings.asStateFlow()
@@ -468,6 +618,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setGenreSeparators(value: String) {
         _librarySettings.update { it.copy(genreSeparators = value) }
         prefs.edit().putString(KEY_GENRE_SEPARATORS, value).apply()
+    }
+
+    fun setIgnoredFolders(value: String) {
+        _librarySettings.update { it.copy(ignoredFolders = value) }
+        prefs.edit().putString(KEY_IGNORED_FOLDERS, value).apply()
+    }
+
+    fun setMinDurationSec(sec: Int) {
+        val v = sec.coerceIn(0, 50)
+        _librarySettings.update { it.copy(minDurationSec = v) }
+        prefs.edit().putInt(KEY_MIN_DURATION_SEC, v).apply()
+    }
+
+    /** Aplica blacklist de pastas e duração mínima sobre a lista escaneada. */
+    private fun filterLibrary(tracks: List<Track>): List<Track> {
+        val st = _librarySettings.value
+        val ignored = st.ignoredFolders
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        val minMs = if (st.minDurationSec > 0) st.minDurationSec * 1000L else 0L
+        return tracks.filter { t ->
+            if (minMs > 0 && t.duration > 0 && t.duration < minMs) return@filter false
+            if (ignored.isNotEmpty()) {
+                val path = t.path
+                if (ignored.any { ign -> path.contains(ign, ignoreCase = true) }) return@filter false
+            }
+            true
+        }
     }
 
     // ---------- Acesso a todos os arquivos (MediaStore) ----------
@@ -806,7 +985,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     // uma pasta com problema não impede as outras
                 }
             }
-            _library.value = result
+            _library.value = filterLibrary(result)
         }
     }
 
@@ -840,7 +1019,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (_: Exception) { }
             }
             if (result.isNotEmpty()) {
-                _library.value = result
+                _library.value = filterLibrary(result)
             }
         }
     }
@@ -1010,6 +1189,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 c.addMediaItem(track.toMediaItem())
             }
         }
+    }
+
+    /** Várias faixas logo após a atual, mantendo a ordem recebida (1ª da lista toca primeiro). */
+    fun playNextAll(list: List<Track>) {
+        // Inserir de trás para frente: cada uma entra logo após a atual, então a 1ª termina na frente.
+        if ((controller?.mediaItemCount ?: 0) == 0) { playTracks(list, 0); return }
+        list.asReversed().forEach { playNext(it) }
+    }
+
+    /** Várias faixas no fim da fila, na ordem recebida. */
+    fun playLastAll(list: List<Track>) {
+        list.forEach { playLast(it) }
+    }
+
+    /** Abre uma playlist (a partir da Início) mostrando suas faixas. */
+    fun openPlaylist(id: String) {
+        _filter.value = Filter(Tab.PLAYLISTS, id)
     }
 
     /** Adiciona a faixa no final da fila. */
@@ -1251,13 +1447,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         val yearInt = fields.year.trim().take(4).toIntOrNull()?.takeIf { it in 1000..9999 }
         val trackInt = fields.track.trim().substringBefore('/').toIntOrNull()?.takeIf { it > 0 }
+        val newArtPath = fields.cover?.let {
+            try { TagWriter.saveCoverPreview(getApplication(), it, "image/jpeg") } catch (_: Exception) { null }
+        }
         fun patch(t: Track): Track = if (t.id != trackId) t else t.copy(
             title = fields.title.ifBlank { t.title },
             artist = fields.artist.ifBlank { t.artist },
             album = fields.album.ifBlank { t.album },
             genre = fields.genre.ifBlank { t.genre },
             year = yearInt ?: t.year,
-            trackNumber = trackInt ?: t.trackNumber
+            trackNumber = trackInt ?: t.trackNumber,
+            artPath = newArtPath ?: t.artPath
         )
         _library.value = _library.value.map(::patch)
         _queue.value = _queue.value.map(::patch)
@@ -1281,13 +1481,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         artist: String?,
         album: String?,
         albumArtist: String?,
+        genre: String? = null,
+        year: String? = null,
+        trackTotal: String? = null,
+        discTotal: String? = null,
         onDone: ((Int, Int) -> Unit)? = null
     ) {
         val idSet = trackIds.toSet()
         val hasArtist = !artist.isNullOrBlank()
         val hasAlbum = !album.isNullOrBlank()
         val hasAlbumArtist = !albumArtist.isNullOrBlank()
-        if (idSet.isEmpty() || (!hasArtist && !hasAlbum && !hasAlbumArtist)) {
+        val hasGenre = !genre.isNullOrBlank()
+        val hasYear = !year.isNullOrBlank()
+        val hasTrackTotal = !trackTotal.isNullOrBlank()
+        val hasDiscTotal = !discTotal.isNullOrBlank()
+        if (idSet.isEmpty() || (!hasArtist && !hasAlbum && !hasAlbumArtist && !hasGenre && !hasYear && !hasTrackTotal && !hasDiscTotal)) {
             onDone?.invoke(0, 0)
             return
         }
@@ -1295,7 +1503,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (t.id !in idSet) return t
             return t.copy(
                 artist = if (hasArtist) artist!! else t.artist,
-                album = if (hasAlbum) album!! else t.album
+                album = if (hasAlbum) album!! else t.album,
+                genre = if (hasGenre) genre!! else t.genre,
+                year = if (hasYear) year!!.take(4).toIntOrNull() ?: t.year else t.year
             )
         }
         _library.value = _library.value.map(::patch)
@@ -1313,7 +1523,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         track = track,
                         artist = if (hasArtist) artist else null,
                         album = if (hasAlbum) album else null,
-                        albumArtist = if (hasAlbumArtist) albumArtist else null
+                        albumArtist = if (hasAlbumArtist) albumArtist else null,
+                        genre = if (hasGenre) genre else null,
+                        year = if (hasYear) year else null,
+                        trackTotal = if (hasTrackTotal) trackTotal else null,
+                        discTotal = if (hasDiscTotal) discTotal else null
                     )
                     if (result.ok) ok++ else fail++
                 }
@@ -1560,6 +1774,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setSplashSoundEnabled(enabled: Boolean) {
         _splashSoundEnabled.value = enabled
         prefs.edit().putBoolean(KEY_SPLASH_SOUND, enabled).apply()
+    }
+
+    // ---------- Ícones flutuantes no fundo ----------
+    private val _floatingIconsEnabled = MutableStateFlow(prefs.getBoolean(KEY_FLOATING_ICONS, true))
+    val floatingIconsEnabled: StateFlow<Boolean> = _floatingIconsEnabled.asStateFlow()
+    fun setFloatingIconsEnabled(enabled: Boolean) {
+        _floatingIconsEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_FLOATING_ICONS, enabled).apply()
+    }
+
+    // Cor ARGB dos menus claros (pop-ups brancos). Default ~ branco translúcido.
+    private val _menuBgColor = MutableStateFlow(
+        prefs.getInt(KEY_MENU_BG_COLOR, 0xE8F2F2F7.toInt())
+    )
+    val menuBgColor: StateFlow<Int> = _menuBgColor.asStateFlow()
+
+    fun setMenuBgColor(argb: Int) {
+        _menuBgColor.value = argb
+        prefs.edit().putInt(KEY_MENU_BG_COLOR, argb).apply()
     }
 
     /** Duração do fade in/out ao play/pause em milissegundos (0 = instantâneo). */
@@ -1937,6 +2170,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_ARTIST_EXCEPTIONS = "artist_exceptions"
         const val KEY_SPLIT_GENRES = "split_genres"
         const val KEY_GENRE_SEPARATORS = "genre_separators"
+        const val KEY_IGNORED_FOLDERS = "ignored_folders"
+        const val KEY_MIN_DURATION_SEC = "min_duration_sec"
         const val KEY_ALL_FILES = "all_files_mode"
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
         const val KEY_SHUFFLE_TYPE = "shuffle_type"
@@ -1953,6 +2188,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_LYRICS_BORDER_W = "lyrics_border_width"
         const val KEY_SPLASH_ENABLED = "splash_enabled"
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
+        const val KEY_FLOATING_ICONS = "floating_icons_enabled"
+        const val KEY_MENU_BG_COLOR = "menu_bg_color"
         const val KEY_FADE_MS = "fade_ms"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"

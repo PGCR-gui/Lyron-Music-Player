@@ -30,6 +30,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -150,7 +151,6 @@ import java.util.Locale
 
 /** Cor de texto em menus com fundo claro (glass). */
 private val MenuDarkText = Color(0xFF1A1A1A)
-private val MenuGlassBg = Color(0xE8F2F2F7)
 
 private fun formatSampleRate(hz: Int): String =
     if (hz <= 0) "—"
@@ -254,8 +254,12 @@ fun NowPlayingScreen(
     lyricsPrimaryColor: Int = 0xFFFFFFFF.toInt(),
     lyricsSecondaryColor: Int = 0x66FFFFFF,
     lyricsBorderColor: Int = 0xFF000000.toInt(),
-    lyricsBorderWidth: Float = 0f
+    lyricsBorderWidth: Float = 0f,
+    menuBgColor: Int = 0xE8F2F2F7.toInt()
 ) {
+    // Mantém a tela acesa enquanto o Now Playing estiver aberto
+    KeepScreenOn()
+
     // Visualizador .milk: liga ao tocar na capa, desliga ao tocar no visualizador
     var showVisualizer by remember { mutableStateOf(false) }
     var presetLocked by remember { mutableStateOf(false) }
@@ -321,7 +325,8 @@ fun NowPlayingScreen(
         if (isFavorite != prevFavorite) {
             heartBurst = isFavorite
             prevFavorite = isFavorite
-            kotlinx.coroutines.delay(900)
+            // favoritar: ~0.9s; desfavoritar.gif: 1.1s
+            kotlinx.coroutines.delay(if (isFavorite) 900L else 1100L)
             heartBurst = null
         }
     }
@@ -414,7 +419,7 @@ fun NowPlayingScreen(
                     DropdownMenu(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false },
-                        containerColor = MenuGlassBg,
+                        containerColor = Color(menuBgColor),
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .border(
@@ -840,7 +845,7 @@ fun NowPlayingScreen(
                 DropdownMenu(
                     expanded = showArtistMenu,
                     onDismissRequest = { showArtistMenu = false },
-                    containerColor = MenuGlassBg,
+                    containerColor = Color(menuBgColor),
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier
                         .border(
@@ -903,78 +908,97 @@ fun NowPlayingScreen(
             )
 
             Row(
-                Modifier.fillMaxWidth().height(88.dp),
-                verticalAlignment = Alignment.Top
+                Modifier.fillMaxWidth().height(80.dp).padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.width(72.dp).fillMaxHeight(), horizontalAlignment = Alignment.Start) {
-                    Text(formatDuration(shownPosition), fontSize = 13.sp, color = Color.White.copy(alpha = 0.75f))
+                Column(Modifier.width(88.dp), horizontalAlignment = Alignment.Start) {
+                    Text(formatDuration(shownPosition), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
                     Row {
-                        IconButton(onClick = onToggleShuffle, modifier = Modifier.offset(x = (-8).dp).size(40.dp)) {
+                        IconButton(onClick = onToggleShuffle, modifier = Modifier.size(40.dp)) {
                             Icon(
-                                Icons.Rounded.Shuffle,
+                                painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
                                 contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
-                                tint = if (shuffle) appColors.accent else Color.White.copy(alpha = 0.6f),
-                                modifier = Modifier.size(22.dp)
+                                tint = Color.Unspecified,
+                                modifier = Modifier.size(24.dp)
                             )
                         }
-                        IconButton(onClick = onCycleRepeat, modifier = Modifier.offset(x = (-12).dp).size(40.dp)) {
-                            val repeatActive = repeatMode != Player.REPEAT_MODE_OFF
+                        IconButton(onClick = onCycleRepeat, modifier = Modifier.size(40.dp)) {
+                            val repeatIcon = when (repeatMode) {
+                                Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
+                                Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
+                                else -> R.drawable.ic_repeat_off
+                            }
                             Icon(
-                                if (repeatMode == Player.REPEAT_MODE_ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
+                                painter = painterResource(repeatIcon),
                                 contentDescription = when (repeatMode) {
                                     Player.REPEAT_MODE_ONE -> "Repetir música atual"
                                     Player.REPEAT_MODE_ALL -> "Repetir fila"
                                     else -> "Repetição desligada"
                                 },
-                                tint = if (repeatActive) appColors.accent else Color.White.copy(alpha = 0.6f),
-                                modifier = Modifier.size(22.dp)
+                                tint = Color.Unspecified,
+                                modifier = Modifier.size(24.dp)
                             )
                         }
                     }
                 }
 
                 Row(
-                    Modifier.weight(1f).fillMaxHeight(),
+                    Modifier.weight(1f),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(56.dp)) {
-                        Icon(Icons.Rounded.SkipPrevious, contentDescription = "Anterior", modifier = Modifier.size(38.dp))
+                    IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(52.dp)) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_previous),
+                            contentDescription = "Anterior",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
                     }
                     Box(
                         Modifier
-                            .padding(horizontal = 8.dp)
-                            .size(68.dp)
+                            .padding(horizontal = 6.dp)
+                            .size(64.dp)
                             .clip(CircleShape)
                             .background(Color.White)
                             .clickable(onClick = onToggle),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
                             contentDescription = if (isPlaying) "Pausar" else "Tocar",
-                            tint = Color(0xFF0B0B14),
-                            modifier = Modifier.size(40.dp)
+                            tint = Color.Unspecified,
+                            modifier = Modifier.size(36.dp)
                         )
                     }
-                    IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(56.dp)) {
-                        Icon(Icons.Rounded.SkipNext, contentDescription = "Próxima", modifier = Modifier.size(38.dp))
+                    IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(52.dp)) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_next),
+                            contentDescription = "Próxima",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
                     }
                 }
 
-                Column(Modifier.width(96.dp).fillMaxHeight(), horizontalAlignment = Alignment.End) {
-                    Text(formatDuration(duration), fontSize = 13.sp, color = Color.White.copy(alpha = 0.75f))
+                Column(Modifier.width(88.dp), horizontalAlignment = Alignment.End) {
+                    Text(formatDuration(duration), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(40.dp)) {
                             Icon(
-                                Icons.Rounded.GraphicEq,
+                                painter = painterResource(R.drawable.ic_equalizer),
                                 contentDescription = "Equalizador",
-                                modifier = Modifier.size(22.dp),
-                                tint = Color.White.copy(alpha = 0.85f)
+                                modifier = Modifier.size(24.dp),
+                                tint = Color.White.copy(alpha = 0.9f)
                             )
                         }
-                        IconButton(onClick = { showQueue = true }, modifier = Modifier.offset(x = 4.dp).size(40.dp)) {
-                            Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "Fila")
+                        IconButton(onClick = { showQueue = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_queue),
+                                contentDescription = "Fila",
+                                tint = Color.White.copy(alpha = 0.9f),
+                                modifier = Modifier.size(24.dp)
+                            )
                         }
                     }
                 }
@@ -1018,7 +1042,8 @@ fun NowPlayingScreen(
                 onMove = onMoveQueueItem,
                 onRemoveFromQueue = onRemoveFromQueue,
                 onToggleFavorite = onToggleFavoriteTrack,
-                onDelete = { t -> pendingDeleteTrack = t }
+                onDelete = { t -> pendingDeleteTrack = t },
+                menuBgColor = menuBgColor
             )
         }
 
@@ -1048,7 +1073,7 @@ fun NowPlayingScreen(
         }
 
         if (showTechDetails) {
-            TechDetailsDialog(track = track, onDismiss = { showTechDetails = false })
+            TechDetailsDialog(track = track, onDismiss = { showTechDetails = false }, menuBgColor = menuBgColor)
         }
 
         if (showFullLyrics && synced.isNotEmpty()) {
@@ -1102,7 +1127,7 @@ fun NowPlayingScreen(
 }
 
 @Composable
-internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
+internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit, menuBgColor: Int = 0xE8F2F2F7.toInt()) {
     val context = LocalContext.current
     val audioLines = remember {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -1155,6 +1180,7 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = Color(menuBgColor),
         title = { Text("Informações técnicas", color = Color(0xFF1A1A1A)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -1321,7 +1347,8 @@ internal fun QueueSheet(
     onMove: (Int, Int) -> Unit,
     onRemoveFromQueue: (Int) -> Unit = {},
     onToggleFavorite: (Track) -> Unit = {},
-    onDelete: (Track) -> Unit = {}
+    onDelete: (Track) -> Unit = {},
+    menuBgColor: Int = 0xE8F2F2F7.toInt()
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val order = remember { mutableStateListOf<Track>().apply { addAll(queue) } }
@@ -1331,8 +1358,10 @@ internal fun QueueSheet(
             order.addAll(queue)
         }
     }
-    var draggingFrom by remember { mutableIntStateOf(-1) }
+    var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var dropTargetId by remember { mutableStateOf<String?>(null) }   // linha sobre a qual o item vai ficar
+    var dropAfter by remember { mutableStateOf(false) }              // true = indicador abaixo da linha alvo
     var menuForIndex by remember { mutableStateOf<Int?>(null) }
 
     val currentTrack = order.firstOrNull { it.id == currentId } ?: order.firstOrNull()
@@ -1400,6 +1429,84 @@ internal fun QueueSheet(
             )
         )
         val listState = rememberLazyListState()
+        val dragScope = rememberCoroutineScope()
+        val autoScrollJob = remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+        /** Recalcula a posição de destino usando as alturas/offsets reais das linhas visíveis. */
+        fun updateDropTarget() {
+            val id = draggingId ?: return
+            val infos = listState.layoutInfo.visibleItemsInfo
+            val me = infos.firstOrNull { it.key == id } ?: return
+            val center = me.offset + me.size / 2f + dragOffsetY
+            val target = infos.firstOrNull { center >= it.offset && center < it.offset + it.size }
+                ?: if (center < (infos.firstOrNull()?.offset ?: 0)) infos.firstOrNull() else infos.lastOrNull()
+            if (target == null) return
+            dropTargetId = target.key as? String
+            // alvo abaixo da origem => item fica depois dele (indicador embaixo); acima => antes (indicador em cima)
+            dropAfter = target.index > me.index
+        }
+
+        fun stopDrag() {
+            autoScrollJob.value?.cancel()
+            autoScrollJob.value = null
+            draggingId = null
+            dropTargetId = null
+            dragOffsetY = 0f
+        }
+
+        fun finishDrag() {
+            val id = draggingId
+            val targetId = dropTargetId
+            val after = dropAfter
+            if (id != null && targetId != null && targetId != id) {
+                val from = order.indexOfFirst { it.id == id }
+                val targetIdx = order.indexOfFirst { it.id == targetId }
+                if (from >= 0 && targetIdx >= 0) {
+                    val to = if (after) {
+                        if (targetIdx >= from) targetIdx else targetIdx + 1
+                    } else {
+                        if (targetIdx > from) targetIdx - 1 else targetIdx
+                    }.coerceIn(0, order.lastIndex)
+                    if (to != from) {
+                        val item = order.removeAt(from)
+                        order.add(to, item)
+                        onMove(from, to)
+                    }
+                }
+            }
+            stopDrag()
+        }
+
+        /** Rolagem automática quando o item arrastado chega perto das bordas da lista. */
+        fun startAutoScroll() {
+            autoScrollJob.value?.cancel()
+            autoScrollJob.value = dragScope.launch {
+                while (draggingId != null) {
+                    val id = draggingId
+                    val info = listState.layoutInfo
+                    val me = info.visibleItemsInfo.firstOrNull { it.key == id }
+                    if (me != null) {
+                        val top = me.offset + dragOffsetY
+                        val bottom = top + me.size
+                        val edge = me.size * 0.9f
+                        val viewportEnd = info.viewportEndOffset - info.afterContentPadding
+                        val delta = when {
+                            top < info.viewportStartOffset + edge -> -18f
+                            bottom > viewportEnd - edge -> 18f
+                            else -> 0f
+                        }
+                        if (delta != 0f) {
+                            val consumed = listState.scrollBy(delta)
+                            // mantém o item sob o dedo enquanto a lista rola
+                            dragOffsetY += consumed
+                            updateDropTarget()
+                        }
+                    }
+                    kotlinx.coroutines.delay(16)
+                }
+            }
+        }
+
         LaunchedEffect(currentId, order.size, queueSearch) {
             if (queueSearch.isNotBlank()) return@LaunchedEffect
             val idx = order.indexOfFirst { it.id == currentId }
@@ -1415,7 +1522,9 @@ internal fun QueueSheet(
             itemsIndexed(filtered, key = { _, t -> t.id }) { index, track ->
                 val realIndex = order.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
                 val active = track.id == currentId
-                val isDragging = draggingFrom == realIndex
+                val isDragging = draggingId == track.id
+                val showLineAbove = dropTargetId == track.id && !dropAfter && !isDragging
+                val showLineBelow = dropTargetId == track.id && dropAfter && !isDragging
                 Box {
                     Row(
                         Modifier
@@ -1446,13 +1555,6 @@ internal fun QueueSheet(
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Handle de arrastar (estilo vídeo)
-                        Icon(
-                            Icons.Rounded.DragHandle,
-                            contentDescription = null,
-                            tint = Color.White.copy(0.35f),
-                            modifier = Modifier.padding(end = 8.dp).size(20.dp)
-                        )
                         ArtImage(path = track.artPath, size = 44.dp)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
                             Text(
@@ -1477,41 +1579,53 @@ internal fun QueueSheet(
                             tint = Color.White.copy(0.45f),
                             modifier = Modifier
                                 .size(28.dp)
-                                .pointerInput(index) {
+                                .pointerInput(track.id) {
                                     detectDragGestures(
                                         onDragStart = {
-                                            draggingFrom = index
+                                            draggingId = track.id
                                             dragOffsetY = 0f
+                                            dropTargetId = null
+                                            updateDropTarget()
+                                            startAutoScroll()
                                         },
                                         onDrag = { change, amount ->
                                             change.consume()
                                             dragOffsetY += amount.y
+                                            updateDropTarget()
                                         },
-                                        onDragEnd = {
-                                            val from = draggingFrom
-                                            draggingFrom = -1
-                                            val rowH = 64f
-                                            val delta = (dragOffsetY / rowH).toInt()
-                                            val to = (from + delta).coerceIn(0, order.lastIndex)
-                                            if (from >= 0 && to != from) {
-                                                val item = order.removeAt(from)
-                                                order.add(to, item)
-                                                onMove(from, to)
-                                            }
-                                            dragOffsetY = 0f
-                                        },
-                                        onDragCancel = {
-                                            draggingFrom = -1
-                                            dragOffsetY = 0f
-                                        }
+                                        onDragEnd = { finishDrag() },
+                                        onDragCancel = { stopDrag() }
                                     )
                                 }
                         )
                     }
+                    // Indicador de onde a música vai ficar ao soltar
+                    if (showLineAbove) {
+                        Box(
+                            Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(horizontal = 12.dp)
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(appColors.accent)
+                        )
+                    }
+                    if (showLineBelow) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 12.dp)
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(appColors.accent)
+                        )
+                    }
                     DropdownMenu(
-                        expanded = menuForIndex == index,
+                        expanded = menuForIndex == realIndex,
                         onDismissRequest = { menuForIndex = null },
-                        containerColor = MenuGlassBg,
+                        containerColor = Color(menuBgColor),
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .border(
@@ -1533,7 +1647,7 @@ internal fun QueueSheet(
                             },
                             onClick = {
                                 menuForIndex = null
-                                onRemoveFromQueue(index)
+                                onRemoveFromQueue(realIndex)
                             }
                         )
                         DropdownMenuItem(
@@ -1765,6 +1879,7 @@ internal fun FullscreenLyrics(
     onSeek: (Long) -> Unit,
     onClose: () -> Unit
 ) {
+    KeepScreenOn()
     val context = LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val activeIndex = remember(lyrics, position) {

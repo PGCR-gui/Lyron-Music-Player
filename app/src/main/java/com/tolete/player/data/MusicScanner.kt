@@ -148,6 +148,7 @@ class MusicScanner(private val context: Context) {
                             folder = path.substringBeforeLast('/').substringAfterLast('/'),
                             year = year,
                             trackNumber = trackNum,
+                            discNumber = null,
                             artPath = null,
                             sourceTree = "all_files",
                             codec = null,
@@ -331,6 +332,7 @@ class MusicScanner(private val context: Context) {
             val trackNumber = jt?.track?.toIntOrNull()
                 ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
                     ?.substringBefore('/')?.toIntOrNull()
+            val discNumber = jt?.disc?.toIntOrNull()
 
             val props = readAudioProps(uri)
             var bitrate = jt?.bitRate?.takeIf { it > 0 }
@@ -370,6 +372,7 @@ class MusicScanner(private val context: Context) {
                 folder = folder,
                 year = year,
                 trackNumber = trackNumber,
+                discNumber = discNumber,
                 artPath = artPath,
                 sourceTree = sourceTree,
                 codec = jt?.format?.uppercase() ?: codecLabel(props.mime, extension),

@@ -14,7 +14,11 @@ data class LibrarySettings(
     val artistExceptions: String = "",
     val splitGenres: Boolean = false,
     /** Separadores de gêneros, separados por espaço. */
-    val genreSeparators: String = "; /"
+    val genreSeparators: String = "; /",
+    /** Pastas a ignorar (uma por linha; compara com o caminho do arquivo). */
+    val ignoredFolders: String = "",
+    /** Duração mínima em segundos (2–50). Faixas menores são excluídas. 0 = desligado. */
+    val minDurationSec: Int = 0
 )
 
 /**
@@ -29,7 +33,7 @@ class TagSplitter(
 ) {
 
     private val exceptionSet: Set<String> = exceptions
-        .split(Regex("[,;\\n]+"))
+        .split(Regex("\\n+"))  // um artista por linha
         .map { it.trim() }
         .filter { it.isNotEmpty() }
         .map { it.lowercase() }

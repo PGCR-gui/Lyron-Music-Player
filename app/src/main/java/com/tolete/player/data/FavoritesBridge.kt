@@ -37,7 +37,7 @@ object FavoritesBridge {
 /** Acesso direto ao playlists.json (mesmo formato do ViewModel) para quando o app está fechado. */
 object FavoritesFile {
 
-    private val lock = Any()
+    internal val lock = Any()
 
     private fun file(context: Context) = File(context.filesDir, "playlists.json")
 

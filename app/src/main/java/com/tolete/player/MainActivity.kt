@@ -28,6 +28,8 @@ import androidx.compose.material3.darkColorScheme
 import com.tolete.player.ui.MusicViewModel
 import com.tolete.player.ui.SplashScreen
 import com.tolete.player.ui.TolereApp
+import com.tolete.player.ui.UpdateHost
+import com.tolete.player.ui.ChangelogOnUpdateDialog
 import com.tolete.player.ui.ExternalMiniPlayer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.collectAsState
@@ -63,6 +65,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val pickIgnoredFolder = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) { }
+        val docId = try {
+            android.provider.DocumentsContract.getTreeDocumentId(uri)
+        } catch (_: Exception) {
+            uri.toString()
+        }
+        // primary:WhatsApp/Media -> "WhatsApp/Media" ou docId completo
+        val rel = docId.substringAfter(':', docId).trim('/')
+        val label = rel.ifBlank { docId }
+        val current = viewModel.librarySettings.value.ignoredFolders
+        val lines = current.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+        if (lines.none { it.equals(label, ignoreCase = true) }) {
+            lines.add(label)
+            viewModel.setIgnoredFolders(lines.joinToString("\n"))
+            Toast.makeText(this, "Pasta ignorada: $label", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Pasta já está na lista", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+
     private val importM3u = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -71,13 +103,18 @@ class MainActivity : ComponentActivity() {
             val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".m3u")?.removeSuffix(".M3U")
                 ?: "Importada"
             contentResolver.openInputStream(uri)?.use { stream ->
-                val text = BufferedReader(InputStreamReader(stream)).readText()
-                val id = viewModel.importPlaylistM3u(name, text)
-                Toast.makeText(
-                    this,
-                    if (id != null) "Playlist importada" else "Nenhuma faixa correspondente na biblioteca",
-                    Toast.LENGTH_SHORT
-                ).show()
+                val bytes = stream.readBytes()
+                var text = String(bytes, Charsets.UTF_8)
+                // Listas antigas (Windows) vêm em ISO-8859-1: se o UTF-8 deu caracteres inválidos, relê assim
+                if (text.contains('\uFFFD')) text = String(bytes, Charsets.ISO_8859_1)
+                val r = viewModel.importPlaylistM3u(name, text)
+                val msg = when {
+                    r.id != null && r.matched < r.total -> "Playlist importada: ${r.matched} de ${r.total} faixas encontradas"
+                    r.id != null -> "Playlist importada (${r.matched} faixas)"
+                    r.total == 0 -> "O arquivo não tem faixas"
+                    else -> "Nenhuma das ${r.total} faixas foi encontrada na biblioteca"
+                }
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Toast.makeText(this, "Falha ao importar", Toast.LENGTH_SHORT).show()
@@ -377,6 +414,7 @@ class MainActivity : ComponentActivity() {
                     TolereApp(
                         vm = viewModel,
                         onPickFolder = { pickFolder.launch(null) },
+                        onPickIgnoredFolder = { pickIgnoredFolder.launch(null) },
                         onExportM3u = { name, content ->
                             pendingExportName = name
                             pendingExportContent = content
@@ -402,6 +440,11 @@ class MainActivity : ComponentActivity() {
                             importBackup.launch(arrayOf("application/zip", "application/json", "*/*"))
                         }
                     )
+                }
+
+                if (!showSplash) {
+                    ChangelogOnUpdateDialog()
+                    UpdateHost()
                 }
 
                 if (externalAudioUri != null && !showSplash) {

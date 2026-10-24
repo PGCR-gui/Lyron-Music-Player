@@ -58,6 +58,7 @@ class LibraryCache(context: Context) {
         put("folder", folder)
         year?.let { put("year", it) }
         trackNumber?.let { put("trackNumber", it) }
+        discNumber?.let { put("discNumber", it) }
         artPath?.let { put("artPath", it) }
         put("sourceTree", sourceTree)
         codec?.let { put("codec", it) }
@@ -81,6 +82,7 @@ class LibraryCache(context: Context) {
         folder = getString("folder"),
         year = if (has("year")) getInt("year") else null,
         trackNumber = if (has("trackNumber")) getInt("trackNumber") else null,
+        discNumber = if (has("discNumber")) getInt("discNumber") else null,
         artPath = if (has("artPath")) getString("artPath") else null,
         sourceTree = optString("sourceTree", ""),
         codec = if (has("codec")) getString("codec") else null,

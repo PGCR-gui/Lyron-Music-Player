@@ -54,7 +54,10 @@ internal fun LibraryPage(
     onSplitGenresChange: (Boolean) -> Unit,
     onGenreSeparatorsChange: (String) -> Unit,
     onAllFilesModeChange: (Boolean) -> Unit,
-    onRequestAllFilesPermission: () -> Unit
+    onRequestAllFilesPermission: () -> Unit,
+    onIgnoredFoldersChange: (String) -> Unit = {},
+    onPickIgnoredFolder: () -> Unit = {},
+    onMinDurationSecChange: (Int) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -143,6 +146,87 @@ internal fun LibraryPage(
             onEnabledChange = onSplitGenresChange,
             onSeparatorsChange = onGenreSeparatorsChange
         )
+
+        Text(
+            "Filtros de biblioteca",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp)
+        )
+
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            Text("Pastas a ignorar (blacklist)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Escolha pastas pelo seletor do sistema. Faixas cujo caminho contenha o nome da pasta serão excluídas da biblioteca.",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.5f),
+                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+            )
+            val ignoredList = settings.ignoredFolders
+                .split("\n")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            ignoredList.forEach { folder ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White.copy(0.08f))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.Folder, contentDescription = null, tint = Color.White.copy(0.7f), modifier = Modifier.size(20.dp))
+                    Text(folder, Modifier.weight(1f).padding(horizontal = 10.dp), fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    IconButton(onClick = {
+                        val next = ignoredList.filter { it != folder }.joinToString("\n")
+                        onIgnoredFoldersChange(next)
+                    }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Remover", tint = Color(0xFFE57373), modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+            OutlinedButton(
+                onClick = onPickIgnoredFolder,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+            ) {
+                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Adicionar pasta (SAF)")
+            }
+
+            Spacer(Modifier.height(16.dp))
+            val minSec = settings.minDurationSec
+            Text(
+                if (minSec <= 0) "Duração mínima: desligada"
+                else "Duração mínima: $minSec s (faixas menores são ignoradas)",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                "Arraste para 2–50 segundos. Em 0 (extrema esquerda) o filtro fica desligado.",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.5f),
+                modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+            )
+            Slider(
+                value = minSec.toFloat(),
+                onValueChange = { onMinDurationSecChange(it.toInt()) },
+                valueRange = 0f..50f,
+                steps = 49,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White.copy(0.85f),
+                    inactiveTrackColor = Color.White.copy(0.25f)
+                )
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("0 (off)", fontSize = 11.sp, color = Color.White.copy(0.45f))
+                Text("2 s", fontSize = 11.sp, color = Color.White.copy(0.45f))
+                Text("50 s", fontSize = 11.sp, color = Color.White.copy(0.45f))
+            }
+        }
         Spacer(Modifier.height(24.dp))
     }
 }

@@ -88,7 +88,9 @@ data class TagEdits(
     val encoder: String = "",
     val publisher: String = "",
     val originalArtist: String = "",
-    val originalYear: String = ""
+    val originalYear: String = "",
+    /** Nova capa (JPEG já reduzido) escolhida no editor; null = manter a atual. */
+    val cover: ByteArray? = null
 )
 
 fun TagEdits.toWriterFields() = TagWriter.Fields(
@@ -112,7 +114,8 @@ fun TagEdits.toWriterFields() = TagWriter.Fields(
     encoder = encoder,
     publisher = publisher,
     originalArtist = originalArtist,
-    originalYear = originalYear
+    originalYear = originalYear,
+    cover = cover
 )
 
 @Composable
@@ -158,27 +161,59 @@ fun TagEditorScreen(
     var localArtPath by remember(track.id) { mutableStateOf(track.artPath) }
     var savingArt by remember { mutableStateOf(false) }
 
+    // A capa só é gravada no arquivo ao tocar em "Salvar", junto com as tags.
+    var pendingCover by remember(track.id) { mutableStateOf<ByteArray?>(null) }
+
     val pickCoverLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
             savingArt = true
-            val result = withContext(Dispatchers.IO) {
+            // Decodifica, reduz (máx. 1400 px) e converte p/ JPEG: aceita PNG/WebP/HEIC e evita arquivos enormes.
+            val prepared: Pair<ByteArray, String>? = withContext(Dispatchers.IO) {
                 try {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: return@withContext TagWriter.Result(false, "Não foi possível ler a imagem") to null
-                    val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
-                    TagWriter.writeArtwork(context, track, bytes, mime)
-                } catch (e: Exception) {
-                    TagWriter.Result(false, e.message?.take(120) ?: "Erro ao ler imagem") to null
+                    val cr = context.contentResolver
+                    val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    cr.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
+                    var sample = 1
+                    val maxSide = maxOf(opts.outWidth, opts.outHeight)
+                    while (maxSide / sample > 2800) sample *= 2
+                    val decodeOpts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                    var bmp = cr.openInputStream(uri)?.use {
+                        android.graphics.BitmapFactory.decodeStream(it, null, decodeOpts)
+                    } ?: return@withContext null
+                    val side = maxOf(bmp.width, bmp.height)
+                    if (side > 1400) {
+                        val k = 1400f / side
+                        val scaled = android.graphics.Bitmap.createScaledBitmap(
+                            bmp, (bmp.width * k).toInt().coerceAtLeast(1), (bmp.height * k).toInt().coerceAtLeast(1), true
+                        )
+                        if (scaled !== bmp) bmp.recycle()
+                        bmp = scaled
+                    }
+                    val out = java.io.ByteArrayOutputStream()
+                    // Fundo branco para PNGs com transparência
+                    val flat = android.graphics.Bitmap.createBitmap(bmp.width, bmp.height, android.graphics.Bitmap.Config.ARGB_8888)
+                    android.graphics.Canvas(flat).apply {
+                        drawColor(android.graphics.Color.WHITE)
+                        drawBitmap(bmp, 0f, 0f, null)
+                    }
+                    flat.compress(android.graphics.Bitmap.CompressFormat.JPEG, 93, out)
+                    bmp.recycle(); flat.recycle()
+                    val bytes = out.toByteArray()
+                    bytes to TagWriter.saveCoverPreview(context, bytes, "image/jpeg")
+                } catch (e: Throwable) {
+                    null
                 }
             }
             savingArt = false
-            val (res, path) = result
-            Toast.makeText(context, res.message, Toast.LENGTH_SHORT).show()
-            if (res.ok && path != null) {
-                localArtPath = path
+            if (prepared == null) {
+                Toast.makeText(context, "Não foi possível ler a imagem", Toast.LENGTH_SHORT).show()
+            } else {
+                pendingCover = prepared.first
+                localArtPath = prepared.second
+                Toast.makeText(context, "Capa selecionada. Toque em Salvar para gravar.", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -188,7 +223,8 @@ fun TagEditorScreen(
         trackNumber, trackTotal, disc, discTotal,
         composer, lyricist, comment, lyrics,
         bpm, isrc, copyright, encoder, publisher,
-        originalArtist, originalYear
+        originalArtist, originalYear,
+        pendingCover
     )
 
     fun applyTags(t: TagReader.Tags) {
@@ -423,7 +459,7 @@ fun TagEditorScreen(
                 Column(Modifier.weight(1f)) {
                     Text("Trocar foto / capa", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Color.White)
                     Text(
-                        "Escolha uma imagem da galeria. A capa é gravada no arquivo de áudio.",
+                        "Escolha uma imagem da galeria. A nova capa é gravada no arquivo ao tocar em Salvar.",
                         fontSize = 12.sp,
                         color = Color.White.copy(0.5f)
                     )

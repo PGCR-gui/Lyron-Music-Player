@@ -39,6 +39,8 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
     @Volatile var paused: Boolean = false
     @Volatile var forcedPresetPath: String? = null
     @Volatile var onFailure: (() -> Unit)? = null
+    /** Chamado na thread principal quando o preset ativo muda (auto ou manual). */
+    @Volatile var onPresetChanged: ((String?) -> Unit)? = null
     @Volatile var currentPresetPath: String? = null
 
     private var handle = 0L
@@ -97,6 +99,7 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
                 lastSwitch = SystemClock.uptimeMillis()
                 ProjectMNative.nativeLoadPreset(handle, forced, false)
                 currentPresetPath = forced
+                notifyPresetChanged(forced)
             }
         }
 
@@ -125,6 +128,12 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
         lastSwitch = SystemClock.uptimeMillis()
         currentPresetPath = path
         if (File(path).exists()) ProjectMNative.nativeLoadPreset(handle, path, smooth)
+        notifyPresetChanged(path)
+    }
+
+    private fun notifyPresetChanged(path: String?) {
+        val cb = onPresetChanged ?: return
+        Handler(Looper.getMainLooper()).post { cb(path) }
     }
 
     /** Chamar via GLSurfaceView.queueEvent (precisa do contexto GL ativo). */
@@ -190,6 +199,7 @@ fun MilkVisualizer(
         renderer.paused = !isPlaying
         if (forcePresetPath != null) renderer.forcedPresetPath = forcePresetPath
         renderer.onFailure = onFailure
+        renderer.onPresetChanged = onCurrentPreset
         onCurrentPreset(renderer.currentPresetPath)
     }
 

@@ -122,6 +122,9 @@ fun SettingsScreen(
     onArtistExceptionsChange: (String) -> Unit,
     onSplitGenresChange: (Boolean) -> Unit,
     onGenreSeparatorsChange: (String) -> Unit,
+    onIgnoredFoldersChange: (String) -> Unit = {},
+    onPickIgnoredFolder: () -> Unit = {},
+    onMinDurationSecChange: (Int) -> Unit = {},
     allFilesMode: Boolean = false,
     onAllFilesModeChange: (Boolean) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
@@ -151,6 +154,10 @@ fun SettingsScreen(
     onSplashEnabledChange: (Boolean) -> Unit = {},
     splashSoundEnabled: Boolean = true,
     onSplashSoundChange: (Boolean) -> Unit = {},
+    floatingIconsEnabled: Boolean = true,
+    onFloatingIconsChange: (Boolean) -> Unit = {},
+    menuBgColor: Int = 0xE8F2F2F7.toInt(),
+    onMenuBgColorChange: (Int) -> Unit = {},
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
@@ -180,14 +187,24 @@ fun SettingsScreen(
         else -> "Configurações"
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(rememberFloatingGradient(appColors))
-            .pointerBlock()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-    ) {
+    Box(Modifier.fillMaxSize()) {
+        // Fundo com gradiente + ícones flutuantes (mesma lógica das abas principais)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(rememberFloatingGradient(appColors))
+        ) {
+            if (floatingIconsEnabled) {
+                FloatingIconsBackground(kind = "settings")
+            }
+        }
+        Column(
+            Modifier
+                .fillMaxSize()
+                .pointerBlock()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -225,6 +242,9 @@ fun SettingsScreen(
                 onArtistExceptionsChange = onArtistExceptionsChange,
                 onSplitGenresChange = onSplitGenresChange,
                 onGenreSeparatorsChange = onGenreSeparatorsChange,
+                onIgnoredFoldersChange = onIgnoredFoldersChange,
+                onPickIgnoredFolder = onPickIgnoredFolder,
+                onMinDurationSecChange = onMinDurationSecChange,
                 onAllFilesModeChange = onAllFilesModeChange,
                 onRequestAllFilesPermission = onRequestAllFilesPermission
             )
@@ -263,7 +283,11 @@ fun SettingsScreen(
                 splashEnabled = splashEnabled,
                 onSplashEnabledChange = onSplashEnabledChange,
                 splashSoundEnabled = splashSoundEnabled,
-                onSplashSoundChange = onSplashSoundChange
+                onSplashSoundChange = onSplashSoundChange,
+                floatingIconsEnabled = floatingIconsEnabled,
+                onFloatingIconsChange = onFloatingIconsChange,
+                menuBgColor = menuBgColor,
+                onMenuBgColorChange = onMenuBgColorChange
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,
@@ -341,7 +365,8 @@ fun SettingsScreen(
             }
         }
         } // AnimatedContent
-    }
+        } // Column
+    } // outer Box
 }
 
 

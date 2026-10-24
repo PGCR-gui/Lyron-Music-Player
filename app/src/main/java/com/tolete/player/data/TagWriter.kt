@@ -40,7 +40,9 @@ object TagWriter {
         val encoder: String = "",
         val publisher: String = "",
         val originalArtist: String = "",
-        val originalYear: String = ""
+        val originalYear: String = "",
+        /** Nova capa (JPEG) a gravar junto com as tags; null = não alterar. */
+        val cover: ByteArray? = null
     )
 
     init {
@@ -59,9 +61,13 @@ object TagWriter {
         track: Track,
         artist: String? = null,
         album: String? = null,
-        albumArtist: String? = null
+        albumArtist: String? = null,
+        genre: String? = null,
+        year: String? = null,
+        trackTotal: String? = null,
+        discTotal: String? = null
     ): Result {
-        if (artist == null && album == null && albumArtist == null) {
+        if (artist == null && album == null && albumArtist == null && genre == null && year == null && trackTotal == null && discTotal == null) {
             return Result(true, "Nada a alterar")
         }
         val file = resolveWritableFile(context, track)
@@ -81,6 +87,10 @@ object TagWriter {
             artist?.let { set(FieldKey.ARTIST, it) }
             album?.let { set(FieldKey.ALBUM, it) }
             albumArtist?.let { set(FieldKey.ALBUM_ARTIST, it) }
+            genre?.let { set(FieldKey.GENRE, it) }
+            year?.let { set(FieldKey.YEAR, it) }
+            trackTotal?.let { set(FieldKey.TRACK_TOTAL, it) }
+            discTotal?.let { set(FieldKey.DISC_TOTAL, it) }
             audio.commit()
             Result(true, "Tags gravadas em ${file.name}")
         } catch (e: Exception) {
@@ -88,15 +98,8 @@ object TagWriter {
         }
     }
 
-    fun write(context: Context, track: Track, fields: Fields): Result {
-        val file = resolveWritableFile(context, track)
-            ?: return Result(
-                false,
-                "Sem acesso de escrita ao arquivo. Ative “Acesso a todos os arquivos” nas definições do sistema."
-            )
-
-        return try {
-            val audio = AudioFileIO.read(file)
+    fun write(context: Context, track: Track, fields: Fields): Result =
+        editFile(context, track, { name -> "Tags gravadas em $name" }) { audio ->
             val tag = audio.tagOrCreateAndSetDefault
 
             fun set(key: FieldKey, value: String) {
@@ -149,12 +152,8 @@ object TagWriter {
             set(FieldKey.ORIGINAL_ARTIST, fields.originalArtist)
             set(FieldKey.ORIGINAL_YEAR, fields.originalYear)
 
-            audio.commit()
-            Result(true, "Tags gravadas em ${file.name}")
-        } catch (e: Exception) {
-            Result(false, e.message?.take(160) ?: "Falha ao gravar tags")
+            fields.cover?.let { setCover(tag, it, "image/jpeg") }
         }
-    }
 
     fun write(
         context: Context,
@@ -189,33 +188,97 @@ object TagWriter {
         imageBytes: ByteArray,
         mimeType: String = "image/jpeg"
     ): Pair<Result, String?> {
-        val file = resolveWritableFile(context, track)
-            ?: return Result(
-                false,
-                "Sem acesso de escrita ao arquivo. Ative “Acesso a todos os arquivos” nas definições do sistema."
-            ) to null
-        return try {
-            val audio = AudioFileIO.read(file)
-            val tag = audio.tagOrCreateAndSetDefault
-            try {
-                tag.deleteArtworkField()
-            } catch (_: Exception) {}
-            val artwork = org.jaudiotagger.tag.images.ArtworkFactory.getNew()
-            artwork.binaryData = imageBytes
-            artwork.mimeType = mimeType
-            artwork.pictureType = 3 // front cover
-            tag.setField(artwork)
-            audio.commit()
-
-            // Cache local para a UI
-            val cacheDir = File(context.cacheDir, "covers").apply { mkdirs() }
-            val ext = if (mimeType.contains("png")) "png" else "jpg"
-            val out = File(cacheDir, "${track.id.hashCode()}.$ext")
-            out.writeBytes(imageBytes)
-            Result(true, "Capa atualizada em ${file.name}") to out.absolutePath
-        } catch (e: Exception) {
-            Result(false, e.message?.take(160) ?: "Falha ao gravar capa") to null
+        val res = editFile(context, track, { name -> "Capa atualizada em $name" }) { audio ->
+            setCover(audio.tagOrCreateAndSetDefault, imageBytes, mimeType)
         }
+        if (!res.ok) return res to null
+        return res to saveCoverPreview(context, imageBytes, mimeType)
+    }
+
+    /** Salva uma cópia da capa em filesDir/art (mesma pasta das capas da biblioteca; nome único, para o Coil não reutilizar a imagem antiga). */
+    fun saveCoverPreview(context: Context, imageBytes: ByteArray, mimeType: String = "image/jpeg"): String {
+        val cacheDir = File(context.filesDir, "art").apply { mkdirs() }
+        val ext = if (mimeType.contains("png")) "png" else "jpg"
+        val out = File(cacheDir, "cover_${System.currentTimeMillis()}.$ext")
+        out.writeBytes(imageBytes)
+        return out.absolutePath
+    }
+
+    private fun setCover(tag: org.jaudiotagger.tag.Tag, bytes: ByteArray, mime: String) {
+        try { tag.deleteArtworkField() } catch (_: Exception) {}
+        val artwork = org.jaudiotagger.tag.images.ArtworkFactory.getNew()
+        artwork.binaryData = bytes
+        artwork.mimeType = mime
+        artwork.pictureType = 3 // front cover
+        tag.setField(artwork)
+    }
+
+    /**
+     * Edita o arquivo de áudio: primeiro direto pelo caminho real; se não houver acesso,
+     * copia via ContentResolver (SAF/MediaStore) para um temporário, edita e grava de volta.
+     */
+    private fun editFile(
+        context: Context,
+        track: Track,
+        okMsg: (String) -> String,
+        edit: (org.jaudiotagger.audio.AudioFile) -> Unit
+    ): Result {
+        val direct = resolveWritableFile(context, track)
+        var directError: String? = null
+        if (direct != null) {
+            try {
+                val audio = AudioFileIO.read(direct)
+                edit(audio)
+                audio.commit()
+                return Result(true, okMsg(direct.name))
+            } catch (e: Exception) {
+                directError = e.message?.take(160) ?: "Falha ao gravar"
+            }
+        }
+        if (track.uri.scheme == "content") {
+            var tmp: File? = null
+            try {
+                val cr = context.contentResolver
+                val name = displayName(context, track)
+                val ext = name.substringAfterLast('.', "").ifBlank { "mp3" }
+                val dir = File(context.cacheDir, "tagedit").apply { mkdirs() }
+                tmp = File(dir, "edit_${System.nanoTime()}.$ext")
+                val input = cr.openInputStream(track.uri)
+                    ?: return Result(false, directError ?: "Não foi possível abrir o arquivo")
+                input.use { i -> tmp.outputStream().use { o -> i.copyTo(o) } }
+                val audio = AudioFileIO.read(tmp)
+                edit(audio)
+                audio.commit()
+                val out = cr.openOutputStream(track.uri, "wt")
+                    ?: return Result(false, "Sem permissão de escrita neste arquivo")
+                out.use { o -> tmp.inputStream().use { i -> i.copyTo(o) } }
+                return Result(true, okMsg(name))
+            } catch (e: SecurityException) {
+                return Result(
+                    false,
+                    "Sem permissão de escrita. Ative “Acesso a todos os arquivos” nas definições do sistema."
+                )
+            } catch (e: Exception) {
+                return Result(false, e.message?.take(160) ?: directError ?: "Falha ao gravar")
+            } finally {
+                try { tmp?.delete() } catch (_: Exception) {}
+            }
+        }
+        return Result(
+            false,
+            directError
+                ?: "Sem acesso de escrita ao arquivo. Ative “Acesso a todos os arquivos” nas definições do sistema."
+        )
+    }
+
+    private fun displayName(context: Context, track: Track): String {
+        val fromPath = track.path.substringAfterLast('/')
+        if (fromPath.contains('.')) return fromPath
+        return try {
+            context.contentResolver.query(
+                track.uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        } catch (_: Exception) { null } ?: fromPath
     }
 
     private fun resolveWritableFile(context: Context, track: Track): File? {
