@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- APKs baixados pelo atualizador interno ficam em cache/updates/ -->
     <cache-path name="updates" path="updates/" />
-    <!-- Cards de letra compartilhados (LyricsShareHelper) -->
     <cache-path name="share" path="share/" />
+    <cache-path name="cache_root" path="." />
 </paths>

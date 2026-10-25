@@ -503,6 +503,11 @@ fun NowPlayingScreen(
                                         android.widget.Toast.LENGTH_SHORT
                                     ).show()
                                 } else {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Gerando foto…",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
                                     LyricsShareHelper.shareSnippet(context, track, linesToShare)
                                 }
                             }
@@ -2061,6 +2066,7 @@ internal fun FullscreenLyrics(
                     if (selectMode) {
                         if (selectedLines.isNotEmpty()) {
                             val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(5)
+                            android.widget.Toast.makeText(context, "Gerando foto…", android.widget.Toast.LENGTH_SHORT).show()
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
                             selectedLines = emptySet()
