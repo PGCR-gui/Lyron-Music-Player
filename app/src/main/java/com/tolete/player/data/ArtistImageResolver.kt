@@ -8,20 +8,17 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * Resolve foto (e opcionalmente bio) de artista com fallback em cadeia:
- * 1. MusicBrainz → MBID
- * 2. Fanart.tv (thumb / logo) via MBID
- * 3. TheAudioDB (por nome)
- * 4. Deezer (por nome, picture_xl)
- * 5. Last.fm
- * 6. Wikidata / Commons
+ * Resolve foto e bio de artista.
+ *
+ * Texto/bio: Wikidata primeiro; depois TheAudioDB / Last.fm.
+ * Imagem: Fanart → TheAudioDB → Deezer → Last.fm → Wikidata (último recurso).
  *
  * Fanart.tv exige API key gratuita: https://fanart.tv/get-an-api-key/
  * Se [FANART_API_KEY] estiver em branco, esse passo é ignorado.
  */
 object ArtistImageResolver {
 
-    private const val USER_AGENT = "LyronMusicPlayer/0.45 (https://linktr.ee/pgcrgui)"
+    private const val USER_AGENT = "LyronMusicPlayer/0.50 (https://linktr.ee/pgcrgui)"
     /** Chave gratuita do Fanart.tv — substitua pela sua se quiser priorizar Fanart. */
     private const val FANART_API_KEY = ""
     /** Chave de demonstração pública do TheAudioDB (uso leve). */
@@ -39,71 +36,84 @@ object ArtistImageResolver {
 
         val mbid = musicBrainzArtistId(artistName)
 
-        // 1–2) Fanart.tv via MBID
-        if (!mbid.isNullOrBlank() && FANART_API_KEY.isNotBlank()) {
-            fanartImage(mbid)?.let {
-                return@withContext Result(imageUrl = it, source = "fanart.tv", mbid = mbid)
-            }
-        }
-
-        // 3) TheAudioDB
-        audioDbArtist(artistName)?.let { (img, bio) ->
-            if (!img.isNullOrBlank()) {
-                return@withContext Result(imageUrl = img, bio = bio, source = "theaudiodb", mbid = mbid)
-            }
-        }
-
-        // 4) Deezer
-        deezerArtistImage(artistName)?.let {
-            return@withContext Result(imageUrl = it, source = "deezer", mbid = mbid)
-        }
-
-        // 5) Last.fm
-        try {
-            val lfm = LastFmClient.getArtistInfo(artistName)
-            if (!lfm?.imageUrl.isNullOrBlank()) {
-                return@withContext Result(
-                    imageUrl = lfm?.imageUrl,
-                    bio = lfm?.bio,
-                    source = "lastfm",
-                    mbid = mbid
-                )
-            }
-            // guarda bio mesmo sem imagem para enriquecer o card
-            if (!lfm?.bio.isNullOrBlank()) {
-                // continua para tentar imagem no Wikidata, mas devolve bio do Last.fm no fim
-                val wiki = WikidataClient.searchArtist(artistName)
-                if (!wiki?.imageUrl.isNullOrBlank()) {
-                    return@withContext Result(
-                        imageUrl = wiki?.imageUrl,
-                        bio = lfm?.bio ?: wiki?.extract ?: wiki?.description,
-                        source = "wikidata+lastfm",
-                        mbid = mbid
-                    )
-                }
-                return@withContext Result(
-                    imageUrl = null,
-                    bio = lfm?.bio,
-                    source = "lastfm",
-                    mbid = mbid
-                )
-            }
-        } catch (_: Exception) { }
-
-        // 6) Wikidata
+        // --- Informações (bio): Wikidata primeiro ---
+        var bio: String? = null
+        var bioSource = "unknown"
+        var wikiImage: String? = null
         try {
             val wiki = WikidataClient.searchArtist(artistName)
             if (wiki != null) {
-                return@withContext Result(
-                    imageUrl = wiki.imageUrl,
-                    bio = wiki.extract ?: wiki.description,
-                    source = "wikidata",
-                    mbid = mbid
-                )
+                bio = wiki.extract?.takeIf { it.isNotBlank() } ?: wiki.description?.takeIf { it.isNotBlank() }
+                if (!bio.isNullOrBlank()) bioSource = "wikidata"
+                wikiImage = wiki.imageUrl
             }
         } catch (_: Exception) { }
 
-        Result(imageUrl = null, mbid = mbid)
+        // --- Imagem: fontes especializadas (Wikidata só como último recurso visual) ---
+        var imageUrl: String? = null
+        var imageSource = "unknown"
+
+        // 1) Fanart.tv via MBID
+        if (!mbid.isNullOrBlank() && FANART_API_KEY.isNotBlank()) {
+            fanartImage(mbid)?.let {
+                imageUrl = it
+                imageSource = "fanart.tv"
+            }
+        }
+
+        // 2) TheAudioDB
+        if (imageUrl == null) {
+            audioDbArtist(artistName)?.let { (img, adbBio) ->
+                if (!img.isNullOrBlank()) {
+                    imageUrl = img
+                    imageSource = "theaudiodb"
+                }
+                // bio do AudioDB só se Wikidata não trouxe texto
+                if (bio.isNullOrBlank() && !adbBio.isNullOrBlank()) {
+                    bio = adbBio
+                    bioSource = "theaudiodb"
+                }
+            }
+        }
+
+        // 3) Deezer
+        if (imageUrl == null) {
+            deezerArtistImage(artistName)?.let {
+                imageUrl = it
+                imageSource = "deezer"
+            }
+        }
+
+        // 4) Last.fm
+        if (imageUrl == null || bio.isNullOrBlank()) {
+            try {
+                val lfm = LastFmClient.getArtistInfo(artistName)
+                if (imageUrl == null && !lfm?.imageUrl.isNullOrBlank()) {
+                    imageUrl = lfm?.imageUrl
+                    imageSource = "lastfm"
+                }
+                if (bio.isNullOrBlank() && !lfm?.bio.isNullOrBlank()) {
+                    bio = lfm?.bio
+                    bioSource = "lastfm"
+                }
+            } catch (_: Exception) { }
+        }
+
+        // 5) Wikidata image só se nada mais deu foto
+        if (imageUrl == null && !wikiImage.isNullOrBlank()) {
+            imageUrl = wikiImage
+            imageSource = "wikidata"
+        }
+
+        val source = when {
+            imageUrl != null && bio != null && imageSource != bioSource ->
+                "$imageSource+$bioSource"
+            imageUrl != null -> imageSource
+            bio != null -> bioSource
+            else -> "none"
+        }
+
+        Result(imageUrl = imageUrl, bio = bio, source = source, mbid = mbid)
     }
 
     // ---------- MusicBrainz ----------

@@ -40,7 +40,7 @@ object LyricsShareHelper {
             val uri = try {
                 FileProvider.getUriForFile(
                     context,
-                    context.packageName + ".fileprovider",
+                    context.packageName + ".updates",
                     outFile
                 )
             } catch (_: Exception) {

@@ -486,24 +486,25 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Compartilhar trecho", color = MenuDarkText)
+                                Text("Gerar foto do trecho", color = MenuDarkText)
                             },
                             onClick = {
                                 showMenu = false
-                                val pos = shownPosition
-                                val timeStr = formatDuration(pos)
                                 val lyric = activeLine?.text?.takeIf { it.isNotBlank() }
-                                val text = buildString {
-                                    append("🎶 ${track.title} — ${track.artist}\n")
-                                    append("⏱ $timeStr")
-                                    if (lyric != null) append("\n💬 $lyric")
-                                    append("\n\n— via Lyron Music Player")
+                                val linesToShare = if (lyric != null) {
+                                    listOf(lyric)
+                                } else {
+                                    lyrics.filter { it.text.isNotBlank() }.take(5).map { it.text }
                                 }
-                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(android.content.Intent.EXTRA_TEXT, text)
+                                if (linesToShare.isEmpty()) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Nenhuma letra disponível para gerar foto",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    LyricsShareHelper.shareSnippet(context, track, linesToShare)
                                 }
-                                context.startActivity(android.content.Intent.createChooser(intent, "Compartilhar trecho"))
                             }
                         )
                         DropdownMenuItem(
@@ -2049,7 +2050,7 @@ internal fun FullscreenLyrics(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        if (selectMode) "Toque nas linhas para selecionar" else track.artist,
+                        if (selectMode) "Selecione linhas → compartilhar = foto" else track.artist,
                         fontSize = 12.sp,
                         color = Color.White.copy(0.7f),
                         maxLines = 1,
@@ -2063,14 +2064,25 @@ internal fun FullscreenLyrics(
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
                             selectedLines = emptySet()
+                        } else {
+                            android.widget.Toast.makeText(
+                                context,
+                                "Selecione até 5 linhas para gerar a foto",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
                         }
                     } else {
                         selectMode = true
+                        android.widget.Toast.makeText(
+                            context,
+                            "Toque nas linhas e depois no compartilhar para gerar a foto",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }) {
                     Icon(
-                        imageVector = if (selectMode) Icons.Rounded.Share else Icons.Rounded.Share,
-                        contentDescription = "Compartilhar trecho",
+                        imageVector = Icons.Rounded.Share,
+                        contentDescription = "Gerar foto do trecho",
                         tint = if (selectMode && selectedLines.isNotEmpty()) Color(0xFF69F0AE) else Color.White
                     )
                 }
