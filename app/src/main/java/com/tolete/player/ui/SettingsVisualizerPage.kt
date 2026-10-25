@@ -51,7 +51,9 @@ internal fun VisualizerPage(
     changeSongWithInterval: Boolean = false,
     onChangeSongWithIntervalChange: (Boolean) -> Unit = {},
     changePresetOnSongChange: Boolean = true,
-    onChangePresetOnSongChange: (Boolean) -> Unit = {}
+    onChangePresetOnSongChange: (Boolean) -> Unit = {},
+    onManagePresets: () -> Unit = {},
+    onOpenRecommendedPresets: () -> Unit = {}
 ) {
     Column(
         Modifier
@@ -99,6 +101,56 @@ internal fun VisualizerPage(
                     .padding(vertical = 8.dp),
                 fontSize = 14.sp,
                 color = Color(0xFFFF8A80)
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable(onClick = onManagePresets)
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Gerenciar presets", fontSize = 16.sp)
+                Text(
+                    "Buscar, favoritar ou excluir presets individuais",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.5f)
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.45f)
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable(onClick = onOpenRecommendedPresets)
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Presets recomendados", fontSize = 16.sp)
+                Text(
+                    "Cream of the Crop no GitHub — coleção de alta qualidade",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.5f)
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.45f)
             )
         }
 

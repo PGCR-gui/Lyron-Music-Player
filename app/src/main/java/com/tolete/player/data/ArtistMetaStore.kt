@@ -45,7 +45,16 @@ object ArtistMetaStore {
         }
     }
 
-    fun save(context: Context, key: String, meta: Meta) {
+        fun clear(context: Context, key: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().remove(key).apply()
+        try {
+            val dir = File(context.filesDir, PHOTO_DIR)
+            dir.listFiles()?.filter { it.name.startsWith(key) }?.forEach { it.delete() }
+        } catch (_: Exception) {}
+    }
+
+fun save(context: Context, key: String, meta: Meta) {
         val o = JSONObject()
         meta.text?.let { o.put("text", it) }
         meta.imageUrl?.let { o.put("imageUrl", it) }

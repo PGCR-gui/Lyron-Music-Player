@@ -61,6 +61,16 @@ object MilkPresetStore {
         assetsCopied = false // permite recopiar embutidos na próxima listagem
     }
 
+    /** Remove um preset .milk pelo caminho absoluto. Retorna true se apagou. */
+    fun delete(path: String): Boolean {
+        return try {
+            val f = File(path)
+            f.isFile && f.extension.equals("milk", true) && f.delete()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** Retorna quantos presets (.milk) foram adicionados. Rodar fora da thread principal. */
     fun import(context: Context, uris: List<Uri>): Int {
         ensureBuiltIn(context)

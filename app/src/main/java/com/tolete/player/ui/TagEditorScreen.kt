@@ -567,7 +567,7 @@ fun TagEditorScreen(
                 getPosition = getPosition,
                 onSeek = onSeek,
                 onToggle = onToggle,
-                onSave = { lines ->
+                onSave = { lines, _ ->
                     lyrics = lyricLinesToTagText(lines)
                     showLyricsSync = false
                 },

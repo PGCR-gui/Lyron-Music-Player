@@ -51,7 +51,9 @@ internal fun UpdateHost() {
     LaunchedEffect(state) {
         when (val s = state) {
             is State.UpToDate -> {
-                Toast.makeText(currentContext, "Você já está na versão mais recente", Toast.LENGTH_SHORT).show()
+                if (s.manual) {
+                    Toast.makeText(currentContext, "Você já está na versão mais recente", Toast.LENGTH_SHORT).show()
+                }
                 UpdateManager.dismiss()
             }
             is State.Failed -> {

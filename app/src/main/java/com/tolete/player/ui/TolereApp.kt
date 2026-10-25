@@ -1,5 +1,8 @@
 package com.tolete.player.ui
 
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.RadioButton
 
 import androidx.activity.compose.BackHandler
@@ -172,6 +175,8 @@ import com.tolete.player.data.LastFmClient
 import com.tolete.player.data.Genre
 import com.tolete.player.data.Playlist
 import com.tolete.player.data.Track
+import com.tolete.player.data.LyricLine
+import com.tolete.player.data.LyricsEmbedder
 import java.io.File
 
 /** Fonte padrão da interface (não afeta letras). Null = sistema. */
@@ -262,6 +267,7 @@ fun TolereApp(
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
+    val rootContext = LocalContext.current
     val milkIntervalSec by vm.milkIntervalSec.collectAsStateWithLifecycle()
     val changeSongWithMilkInterval by vm.changeSongWithMilkInterval.collectAsStateWithLifecycle()
     val changePresetOnSongChange by vm.changePresetOnSongChange.collectAsStateWithLifecycle()
@@ -297,6 +303,7 @@ fun TolereApp(
     var showSelectionActions by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var lyricsEditTrack by remember { mutableStateOf<Track?>(null) }
+    var showManageMilkPresets by remember { mutableStateOf(false) }
     var tagEditTrack by remember { mutableStateOf<Track?>(null) }
     var showBatchTagEdit by remember { mutableStateOf(false) }
     var batchTagTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
@@ -608,10 +615,31 @@ fun TolereApp(
                                         bottomPadding = bottomPadding,
                                         nowPlayingId = nowPlaying?.id,
                                         accent = appColors.accent,
+                                        selectedIds = selectedTrackIds,
+                                        selectionMode = selectionMode,
                                         onOpenAlbum = { vm.openAlbum(it) },
                                         onPlayAll = { vm.playTracks(artistTracks, 0) },
                                         onShuffle = { vm.playTracks(artistTracks.shuffled(), 0) },
-                                        onTrackClick = { index, _ -> vm.playTracks(artistTracks, index) }
+                                        onTrackClick = { index, track ->
+                                            if (selectionMode) {
+                                                selectedTrackIds = if (track.id in selectedTrackIds)
+                                                    selectedTrackIds - track.id else selectedTrackIds + track.id
+                                            } else {
+                                                vm.playTracks(artistTracks, index)
+                                            }
+                                        },
+                                        onTrackLongClick = { track ->
+                                            selectedTrackIds = selectedTrackIds + track.id
+                                        },
+                                        onRefreshTags = {
+                                            vm.forceReloadArtist(artistName) {
+                                                android.widget.Toast.makeText(
+                                                    rootContext,
+                                                    "Tags do artista atualizadas",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
                                     )
                                 }
 
@@ -648,6 +676,15 @@ fun TolereApp(
                                         },
                                         onTrackLongClick = { track ->
                                             selectedTrackIds = selectedTrackIds + track.id
+                                        },
+                                        onRefreshTags = {
+                                            vm.forceReloadAlbum(albumName) {
+                                                android.widget.Toast.makeText(
+                                                    rootContext,
+                                                    "Tags do álbum atualizadas",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     )
                                 }
@@ -763,7 +800,20 @@ fun TolereApp(
                                         onDeletePlaylist = { pl -> vm.deletePlaylist(pl.id) },
                                         onReorderPlaylists = { ids -> vm.reorderPlaylists(ids) },
                                         playCountOf = vm::playCountOf,
-                                        appColors = appColors
+                                        appColors = appColors,
+                                        selectedIds = selectedTrackIds,
+                                        selectionMode = selectionMode,
+                                        onTrackClick = { list, index, track ->
+                                            if (selectionMode) {
+                                                selectedTrackIds = if (track.id in selectedTrackIds)
+                                                    selectedTrackIds - track.id else selectedTrackIds + track.id
+                                            } else {
+                                                vm.playTracks(list, index)
+                                            }
+                                        },
+                                        onTrackLongClick = { track ->
+                                            selectedTrackIds = selectedTrackIds + track.id
+                                        }
                                     )
                                 }
 
@@ -903,6 +953,14 @@ fun TolereApp(
                     onChangeSongWithIntervalChange = vm::setChangeSongWithMilkInterval,
                     changePresetOnSongChange = changePresetOnSongChange,
                     onChangePresetOnSongChange = vm::setChangePresetOnSongChange,
+                    onManageMilkPresets = { showManageMilkPresets = true },
+                    onOpenRecommendedPresets = {
+                        val intent = android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://github.com/projectM-visualizer/presets-cream-of-the-crop")
+                        )
+                        rootContext.startActivity(intent)
+                    },
                     audioOutput = audioOutput,
                     onAudioOutputChange = vm::setAudioOutput,
                     forceMaxSampleRate = forceMaxSampleRate,
@@ -962,7 +1020,57 @@ fun TolereApp(
                 HelpDialog(onDismiss = { showHelp = false })
             }
 
+            AnimatedVisibility(
+                visible = lyricsEditTrack != null,
+                enter = slideInVertically(tween(300)) { it } + fadeIn(tween(220)),
+                exit = slideOutVertically(tween(260)) { it } + fadeOut(tween(180))
+            ) {
+                lyricsEditTrack?.let { track ->
+                    val editCtx = LocalContext.current
+                    var initialLines by remember(track.id) { mutableStateOf<List<LyricLine>>(emptyList()) }
+                    LaunchedEffect(track.id) {
+                        initialLines = vm.loadLyrics(track)
+                    }
+                    LyricsEditorScreen(
+                        track = track,
+                        initialLines = initialLines,
+                        isPlaying = isPlaying,
+                        getPosition = vm::currentPosition,
+                        onSeek = vm::seekTo,
+                        onToggle = vm::togglePlayPause,
+                        onSave = { lines, target ->
+                            val ok = vm.saveSyncedLyrics(track, lines, target)
+                            val msg = when {
+                                ok && target == LyricsEmbedder.Target.LRC_FILE -> "Letra salva no arquivo .lrc"
+                                ok && target == LyricsEmbedder.Target.EMBEDDED -> "Letra salva nas tags do arquivo"
+                                else -> "Falha ao salvar letra"
+                            }
+                            android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
+                            if (ok) lyricsEditTrack = null
+                        },
+                        onClose = { lyricsEditTrack = null },
+                        appColors = appColors,
+                        initialTarget = if (LyricsEmbedder.hasExternalLrc(track))
+                            LyricsEmbedder.Target.LRC_FILE
+                        else
+                            LyricsEmbedder.Target.EMBEDDED,
+                        canWriteLrc = LyricsEmbedder.canWriteExternalLrc(track)
+                    )
+                }
+            }
+
             // ---------- Tocando agora ----------
+            if (showManageMilkPresets) {
+                MilkPresetPickerDialog(
+                    presets = milkPresets,
+                    currentPath = null,
+                    onDismiss = { showManageMilkPresets = false },
+                    onSelect = { },
+                    onDelete = { path -> vm.deleteMilkPreset(path) },
+                    manageMode = true
+                )
+            }
+
             AnimatedVisibility(
                 visible = showNowPlaying && nowPlaying != null,
                 enter = slideInVertically(tween(320)) { it } + fadeIn(tween(240)),
@@ -1001,6 +1109,10 @@ fun TolereApp(
                             tagEditTrack = current
                             showNowPlaying = false
                         },
+                        onEditLyrics = {
+                            lyricsEditTrack = current
+                            showNowPlaying = false
+                        },
                         artistNames = remember(current.artist, librarySettings) { vm.artistNamesOf(current) },
                         onOpenArtist = { name ->
                             showNowPlaying = false
@@ -1015,6 +1127,7 @@ fun TolereApp(
                         embedLyricsResult = { r -> vm.embedLyricsResult(current, r) },
                         appColors = appColors,
                         milkPresets = milkPresets,
+                        onDeletePreset = { path -> vm.deleteMilkPreset(path) },
                         milkIntervalSec = milkIntervalSec,
                         changeSongWithMilkInterval = changeSongWithMilkInterval,
                         changePresetOnSongChange = changePresetOnSongChange,
@@ -1034,7 +1147,9 @@ fun TolereApp(
                         lyricsSecondaryColor = lyricsSecondaryColor,
                         lyricsBorderColor = lyricsBorderColor,
                         lyricsBorderWidth = lyricsBorderWidth,
-                        menuBgColor = menuBgColor
+                        menuBgColor = menuBgColor,
+                        playCount = vm.playCountOf(current.id),
+                        lastPlayedAt = vm.lastPlayedAt(current.id)
                     )
                 }
             }
@@ -2475,7 +2590,7 @@ private fun formatTotalDuration(ms: Long): String {
 }
 
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 private fun ArtistDetailScreen(
     artistName: String,
     trackCount: Int,
@@ -2485,10 +2600,14 @@ private fun ArtistDetailScreen(
     bottomPadding: Dp,
     nowPlayingId: String? = null,
     accent: Color = Color.White,
+    selectedIds: Set<String> = emptySet(),
+    selectionMode: Boolean = false,
     onOpenAlbum: (String) -> Unit,
     onPlayAll: () -> Unit = {},
     onShuffle: () -> Unit = {},
-    onTrackClick: (Int, Track) -> Unit = { _, _ -> }
+    onTrackClick: (Int, Track) -> Unit = { _, _ -> },
+    onTrackLongClick: (Track) -> Unit = {},
+    onRefreshTags: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val metaKey = remember(artistName) { ArtistMetaStore.artistKey(artistName) }
@@ -2531,27 +2650,19 @@ private fun ArtistDetailScreen(
         loading = true
         val needImage = savedMeta?.displayImage == null
         val needText = savedMeta?.text.isNullOrBlank()
-        val wiki = withContext(Dispatchers.IO) {
-            com.tolete.player.data.WikidataClient.searchArtist(artistName)
-        }
-        var img = wiki?.imageUrl
-        var txt = wiki?.extract ?: wiki?.description
-        var source = "wikidata"
-        if ((img == null && needImage) || (txt.isNullOrBlank() && needText)) {
-            val lfm = withContext(Dispatchers.IO) { LastFmClient.getArtistInfo(artistName) }
-            if (img == null && lfm?.imageUrl != null) {
-                img = lfm.imageUrl
-                source = "lastfm"
+        if (needImage || needText) {
+            val resolved = withContext(Dispatchers.IO) {
+                com.tolete.player.data.ArtistImageResolver.resolve(artistName)
             }
-            if (txt.isNullOrBlank() && !lfm?.bio.isNullOrBlank()) {
-                txt = lfm?.bio
-                source = "lastfm"
+            if (needImage && !resolved.imageUrl.isNullOrBlank()) {
+                remoteImage = resolved.imageUrl
+                ArtistMetaStore.saveRemoteImage(context, metaKey, resolved.imageUrl, resolved.source)
+            }
+            if (needText && !resolved.bio.isNullOrBlank()) {
+                remoteText = resolved.bio
+                ArtistMetaStore.saveText(context, metaKey, resolved.bio, resolved.source)
             }
         }
-        remoteImage = img
-        remoteText = txt
-        if (needImage && img != null) ArtistMetaStore.saveRemoteImage(context, metaKey, img, source)
-        if (needText && !txt.isNullOrBlank()) ArtistMetaStore.saveText(context, metaKey, txt, source)
         savedMeta = ArtistMetaStore.load(context, metaKey)
         loading = false
     }
@@ -2561,6 +2672,27 @@ private fun ArtistDetailScreen(
         ?: savedMeta?.imageUrl
         ?: remoteImage
 
+    var refreshing by remember { mutableStateOf(false) }
+    val pullState = rememberPullToRefreshState()
+
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = {
+            if (onRefreshTags == null || refreshing) return@PullToRefreshBox
+            refreshing = true
+            try { ArtistMetaStore.clear(context, metaKey) } catch (_: Exception) {}
+            try {
+                context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
+                    .edit().remove("artist_info_$artistName").apply()
+            } catch (_: Exception) {}
+            savedMeta = null
+            remoteImage = null
+            remoteText = null
+            onRefreshTags.invoke()
+        },
+        state = pullState,
+        modifier = Modifier.fillMaxSize()
+    ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         contentPadding = PaddingValues(bottom = bottomPadding),
@@ -2789,13 +2921,32 @@ private fun ArtistDetailScreen(
             items(tracks.size, key = { tracks[it].id }, span = { GridItemSpan(maxLineSpan) }) { index ->
                 val track = tracks[index]
                 val active = track.id == nowPlayingId
+                val selected = track.id in selectedIds
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { onTrackClick(index, track) }
+                        .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+                        .combinedClickable(
+                            onClick = { onTrackClick(index, track) },
+                            onLongClick = { onTrackLongClick(track) }
+                        )
                         .padding(horizontal = 6.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (selectionMode) {
+                        Box(
+                            Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (selected) {
+                                Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                    }
                     Column(Modifier.weight(1f)) {
                         Text(
                             track.title,
@@ -2825,6 +2976,26 @@ private fun ArtistDetailScreen(
                 )
             }
         }
+    }
+    } // PullToRefreshBox
+
+    LaunchedEffect(refreshing) {
+        if (!refreshing) return@LaunchedEffect
+        loading = true
+        val resolved = withContext(Dispatchers.IO) {
+            com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+        }
+        remoteImage = resolved.imageUrl
+        remoteText = resolved.bio
+        if (!resolved.imageUrl.isNullOrBlank()) {
+            ArtistMetaStore.saveRemoteImage(context, metaKey, resolved.imageUrl, resolved.source)
+        }
+        if (!resolved.bio.isNullOrBlank()) {
+            ArtistMetaStore.saveText(context, metaKey, resolved.bio, resolved.source)
+        }
+        savedMeta = ArtistMetaStore.load(context, metaKey)
+        loading = false
+        refreshing = false
     }
 }
 
@@ -3083,7 +3254,7 @@ private fun PlaylistTracksScreen(
 
 
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 private fun AlbumDetailScreen(
     albumName: String,
     artPath: String?,
@@ -3099,8 +3270,17 @@ private fun AlbumDetailScreen(
     onShuffle: () -> Unit,
     onOpenArtist: (String) -> Unit,
     onTrackClick: (Int, Track) -> Unit,
-    onTrackLongClick: (Track) -> Unit
+    onTrackLongClick: (Track) -> Unit,
+    onRefreshTags: (() -> Unit)? = null
 ) {
+    var refreshing by remember { mutableStateOf(false) }
+    val pullState = rememberPullToRefreshState()
+    LaunchedEffect(refreshing) {
+        if (refreshing) {
+            kotlinx.coroutines.delay(1200)
+            refreshing = false
+        }
+    }
     val discGroups = remember(tracks) {
         val hasDiscs = tracks.any { (it.discNumber ?: 0) > 1 } ||
             tracks.map { it.discNumber ?: 1 }.distinct().size > 1
@@ -3118,6 +3298,16 @@ private fun AlbumDetailScreen(
                 }
         }
     }
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = {
+            if (onRefreshTags == null || refreshing) return@PullToRefreshBox
+            refreshing = true
+            onRefreshTags.invoke()
+        },
+        state = pullState,
+        modifier = Modifier.fillMaxSize()
+    ) {
     LazyColumn(
         contentPadding = PaddingValues(bottom = bottomPadding),
         modifier = Modifier.fillMaxSize()
@@ -3294,6 +3484,7 @@ private fun AlbumDetailScreen(
             }
         }
     }
+    } // PullToRefreshBox
 }
 
 @Composable
@@ -3498,6 +3689,7 @@ private fun BatchRenameDialog(
 
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun LysPlaceHome(
     mostPlayed: List<Track>,
     history: List<Track>,
@@ -3513,7 +3705,11 @@ private fun LysPlaceHome(
     onDeletePlaylist: (Playlist) -> Unit = {},
     onReorderPlaylists: (List<String>) -> Unit = {},
     playCountOf: (String) -> Int = { 0 },
-    appColors: AppColors
+    appColors: AppColors,
+    selectedIds: Set<String> = emptySet(),
+    selectionMode: Boolean = false,
+    onTrackClick: (List<Track>, Int, Track) -> Unit = { list, idx, _ -> onPlayTracks(list, idx) },
+    onTrackLongClick: (Track) -> Unit = {}
 ) {
     var section by remember { mutableStateOf<String?>(null) }
     Box(
@@ -3635,19 +3831,39 @@ private fun LysPlaceHome(
                                 items(mostPlayed.size) { index ->
                                     val track = mostPlayed[index]
                                     val count = playCountOf(track.id)
+                                    val selected = track.id in selectedIds
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
-                                            .clickable { onPlayTracks(mostPlayed, index) }
+                                            .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+                                            .combinedClickable(
+                                                onClick = { onTrackClick(mostPlayed, index, track) },
+                                                onLongClick = { onTrackLongClick(track) }
+                                            )
                                             .padding(vertical = 10.dp, horizontal = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            "${index + 1}",
-                                            color = Color.White.copy(0.45f),
-                                            fontSize = 13.sp,
-                                            modifier = Modifier.width(28.dp)
-                                        )
+                                        if (selectionMode) {
+                                            Box(
+                                                Modifier
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (selected) {
+                                                    Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                                }
+                                            }
+                                            Spacer(Modifier.width(10.dp))
+                                        } else {
+                                            Text(
+                                                "${index + 1}",
+                                                color = Color.White.copy(0.45f),
+                                                fontSize = 13.sp,
+                                                modifier = Modifier.width(28.dp)
+                                            )
+                                        }
                                         Column(Modifier.weight(1f)) {
                                             Text(track.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             Text(
@@ -3678,10 +3894,10 @@ private fun LysPlaceHome(
                                 nowPlayingId = null,
                                 bottomPadding = 0.dp,
                                 showTrackNumbers = false,
-                                selectedIds = emptySet(),
-                                selectionMode = false,
-                                onClick = { index, _ -> onPlayTracks(history, index) },
-                                onLongClick = {}
+                                selectedIds = selectedIds,
+                                selectionMode = selectionMode,
+                                onClick = { index, track -> onTrackClick(history, index, track) },
+                                onLongClick = onTrackLongClick
                             )
                         }
                     }

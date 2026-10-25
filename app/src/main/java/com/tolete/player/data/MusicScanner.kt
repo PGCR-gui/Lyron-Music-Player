@@ -290,6 +290,31 @@ class MusicScanner(private val context: Context) {
         else -> ext.uppercase().ifEmpty { "?" }
     }
 
+    /** Re-lê tags e propriedades de uma faixa já conhecida (ignora cache de lastModified). */
+    fun reextract(track: Track): Track? {
+        val path = track.path
+        val file = if (path.startsWith("/")) File(path).takeIf { it.isFile } else null
+        val fileName = file?.name ?: path.substringAfterLast('/').ifBlank { "audio" }
+        val extension = fileName.substringAfterLast('.', "").lowercase()
+        val size = when {
+            track.fileSize > 0L -> track.fileSize
+            file != null -> file.length()
+            else -> 0L
+        }
+        val modified = file?.lastModified() ?: track.lastModified
+        val extracted = extractMetadata(
+            uri = track.uri,
+            docId = track.id,
+            fileName = if (file != null) file.absolutePath else fileName,
+            extension = extension,
+            size = size,
+            sourceTree = track.sourceTree,
+            lastModified = modified
+        ) ?: return null
+        // Mantém o id original para não quebrar playlists / favoritos / contagens
+        return extracted.copy(id = track.id)
+    }
+
     private fun extractMetadata(
         uri: Uri,
         docId: String,
@@ -373,6 +398,7 @@ class MusicScanner(private val context: Context) {
                 year = year,
                 trackNumber = trackNumber,
                 discNumber = discNumber,
+                composer = jt?.composer?.trim().orEmpty(),
                 artPath = artPath,
                 sourceTree = sourceTree,
                 codec = jt?.format?.uppercase() ?: codecLabel(props.mime, extension),

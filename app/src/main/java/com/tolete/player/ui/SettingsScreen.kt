@@ -170,7 +170,9 @@ fun SettingsScreen(
     changeSongWithInterval: Boolean = false,
     onChangeSongWithIntervalChange: (Boolean) -> Unit = {},
     changePresetOnSongChange: Boolean = true,
-    onChangePresetOnSongChange: (Boolean) -> Unit = {}
+    onChangePresetOnSongChange: (Boolean) -> Unit = {},
+    onManageMilkPresets: () -> Unit = {},
+    onOpenRecommendedPresets: () -> Unit = {}
 ) {
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
@@ -314,7 +316,9 @@ fun SettingsScreen(
                 changeSongWithInterval = changeSongWithInterval,
                 onChangeSongWithIntervalChange = onChangeSongWithIntervalChange,
                 changePresetOnSongChange = changePresetOnSongChange,
-                onChangePresetOnSongChange = onChangePresetOnSongChange
+                onChangePresetOnSongChange = onChangePresetOnSongChange,
+                onManagePresets = onManageMilkPresets,
+                onOpenRecommendedPresets = onOpenRecommendedPresets
             )
             SettingsPage.BACKUP -> BackupPage(
                 onExport = onExportBackup,

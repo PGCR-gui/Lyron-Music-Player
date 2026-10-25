@@ -98,6 +98,19 @@ object TagWriter {
         }
     }
 
+    /** Grava apenas o campo de letras (LYRICS), sem alterar outras tags. */
+    fun writeLyricsOnly(context: Context, track: Track, lyrics: String): Result =
+        editFile(context, track, { name -> "Letras gravadas em $name" }) { audio ->
+            val tag = audio.tagOrCreateAndSetDefault
+            val v = lyrics.trim()
+            try {
+                if (v.isEmpty()) tag.deleteField(FieldKey.LYRICS)
+                else tag.setField(FieldKey.LYRICS, v)
+            } catch (_: Exception) {
+                // formato sem suporte a LYRICS
+            }
+        }
+
     fun write(context: Context, track: Track, fields: Fields): Result =
         editFile(context, track, { name -> "Tags gravadas em $name" }) { audio ->
             val tag = audio.tagOrCreateAndSetDefault

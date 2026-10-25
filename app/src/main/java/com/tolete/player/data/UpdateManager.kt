@@ -43,7 +43,7 @@ object UpdateManager {
         data object Idle : State
         data class Checking(val manual: Boolean) : State
         data class Available(val info: ReleaseInfo) : State
-        data object UpToDate : State
+        data class UpToDate(val manual: Boolean) : State
         data class Failed(val message: String, val manual: Boolean) : State
         data class Downloading(val info: ReleaseInfo, val progress: Float) : State
         data class ReadyToInstall(val info: ReleaseInfo, val file: File) : State
@@ -93,8 +93,8 @@ object UpdateManager {
                 val skipped = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .getString(KEY_SKIPPED_TAG, null)
                 _state.value = when {
-                    info == null -> State.UpToDate
-                    compareVersions(info.version, installedVersion(app)) <= 0 -> State.UpToDate
+                    info == null -> State.UpToDate(manual)
+                    compareVersions(info.version, installedVersion(app)) <= 0 -> State.UpToDate(manual)
                     !manual && info.tag == skipped -> State.Idle
                     else -> State.Available(info)
                 }

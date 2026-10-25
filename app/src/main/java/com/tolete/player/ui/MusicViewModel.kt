@@ -765,6 +765,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun deleteMilkPreset(path: String) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                com.tolete.player.visualizer.MilkPresetStore.delete(path)
+            }
+            if (ok) {
+                val ctx = getApplication<android.app.Application>()
+                _milkPresets.value = withContext(Dispatchers.IO) {
+                    com.tolete.player.visualizer.MilkPresetStore.list(ctx)
+                }
+            }
+        }
+    }
+
+
     /** Saída de áudio preferida (UI + preferência; aplicação plena exige reinício da sessão). */
     enum class AudioOutputBackend { DEFAULT, AUDIOTRACK, AAUDIO, OPENSLES }
 
@@ -962,6 +977,46 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Relê todas as pastas (reaproveita metadados de arquivos não alterados). */
+    /**
+     * Limpa o aproveitamento de cache dessas faixas, re-lê tags no disco e atualiza a biblioteca.
+     */
+    fun forceReloadTracks(ids: Collection<String>, onDone: (() -> Unit)? = null) {
+        if (ids.isEmpty()) {
+            onDone?.invoke()
+            return
+        }
+        val idSet = ids.toSet()
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                val lib = _library.value
+                val next = lib.map { t ->
+                    if (t.id in idSet) scanner.reextract(t) ?: t else t
+                }
+                try {
+                    LibraryCache(getApplication()).save(filterLibrary(next))
+                } catch (_: Exception) { }
+                filterLibrary(next)
+            }
+            _library.value = updated
+            onDone?.invoke()
+        }
+    }
+
+    fun forceReloadArtist(artistName: String, onDone: (() -> Unit)? = null) {
+        val ids = _library.value
+            .filter { artistNamesOf(it).any { n -> n.equals(artistName, ignoreCase = true) } ||
+                it.artist.equals(artistName, ignoreCase = true) }
+            .map { it.id }
+        forceReloadTracks(ids, onDone)
+    }
+
+    fun forceReloadAlbum(albumName: String, onDone: (() -> Unit)? = null) {
+        val ids = _library.value
+            .filter { it.album.equals(albumName, ignoreCase = true) }
+            .map { it.id }
+        forceReloadTracks(ids, onDone)
+    }
+
     fun refreshLibrary() {
         val folders = _treeUris.value
         val allFiles = _allFilesMode.value
@@ -1536,21 +1591,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Salva linhas LRC (sidecar ou cache) e devolve sucesso. */
-    fun saveSyncedLyrics(track: Track, lines: List<LyricLine>): Boolean {
-        val text = buildString {
-            lines.forEach { line ->
-                if (line.timeMs < 0) {
-                    appendLine(line.text)
-                } else {
-                    val m = line.timeMs / 60_000
-                    val s = (line.timeMs % 60_000) / 1000
-                    val cs = (line.timeMs % 1000) / 10
-                    appendLine("[%02d:%02d.%02d]%s".format(m, s, cs, line.text))
-                }
-            }
-        }
-        return LyricsEmbedder.embedLrc(getApplication(), track, text)
+    /** Salva linhas LRC (arquivo .lrc ou tags embutidas). */
+    fun saveSyncedLyrics(
+        track: Track,
+        lines: List<LyricLine>,
+        target: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE
+    ): Boolean {
+        return LyricsEmbedder.save(getApplication(), track, lines, target)
     }
 
     // ---------- Letras (LRC + tags embutidas) ----------
@@ -1632,6 +1679,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?: emptyMap()
     )
 
+    /** Timestamp (epoch ms) da última reprodução contada por faixa. */
+    private val _lastPlayedAt = MutableStateFlow(
+        prefs.getString(KEY_LAST_PLAYED, null)
+            ?.lineSequence()
+            ?.mapNotNull { line ->
+                val parts = line.split('=', limit = 2)
+                if (parts.size == 2) parts[0] to (parts[1].toLongOrNull() ?: 0L) else null
+            }
+            ?.toMap()
+            ?: emptyMap()
+    )
+
     /** Últimas faixas tocadas (mais recente primeiro), já resolvidas na biblioteca. */
     val history: StateFlow<List<Track>> = combine(_historyIds, tracks) { ids, lib ->
         val byId = lib.associateBy { it.id }
@@ -1648,6 +1707,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun playCountOf(trackId: String): Int = _playCounts.value[trackId] ?: 0
+
+    fun lastPlayedAt(trackId: String): Long = _lastPlayedAt.value[trackId] ?: 0L
 
     /** Percentual mínimo da faixa (70–100) para contar como "tocada". */
     private val _playCountThreshold = MutableStateFlow(
@@ -1673,10 +1734,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val counts = _playCounts.value.toMutableMap()
         counts[id] = (counts[id] ?: 0) + 1
         _playCounts.value = counts
-        prefs.edit().putString(
-            KEY_PLAY_COUNTS,
-            counts.entries.joinToString("\n") { "${it.key}=${it.value}" }
-        ).apply()
+        val lasts = _lastPlayedAt.value.toMutableMap()
+        lasts[id] = System.currentTimeMillis()
+        _lastPlayedAt.value = lasts
+        prefs.edit()
+            .putString(KEY_PLAY_COUNTS, counts.entries.joinToString("\n") { "${it.key}=${it.value}" })
+            .putString(KEY_LAST_PLAYED, lasts.entries.joinToString("\n") { "${it.key}=${it.value}" })
+            .apply()
     }
 
     init {
@@ -2161,6 +2225,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_DYNAMIC_DEFAULT_COLOR = "dynamic_default_color"
         const val KEY_HISTORY = "play_history"
         const val KEY_PLAY_COUNTS = "play_counts"
+        const val KEY_LAST_PLAYED = "last_played_at"
         const val KEY_PLAY_COUNT_THRESHOLD = "play_count_threshold"
         const val HISTORY_MAX = 50
         const val KEY_LYRICS_FONT = "lyrics_font_path"

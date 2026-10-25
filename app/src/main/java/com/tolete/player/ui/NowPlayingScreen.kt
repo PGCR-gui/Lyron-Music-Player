@@ -28,7 +28,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -238,6 +240,7 @@ fun NowPlayingScreen(
     onToggleFavorite: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onEditTags: () -> Unit = {},
+    onEditLyrics: () -> Unit = {},
     artistNames: List<String>,
     onOpenArtist: (String) -> Unit,
     onOpenAlbum: () -> Unit,
@@ -246,6 +249,7 @@ fun NowPlayingScreen(
     embedLyricsResult: suspend (LrcLibClient.SearchResult) -> List<LyricLine> = { emptyList() },
     appColors: AppColors = DefaultAppColors,
     milkPresets: List<String> = emptyList(),
+    onDeletePreset: (String) -> Unit = {},
     milkIntervalSec: Int = 30,
     changeSongWithMilkInterval: Boolean = false,
     changePresetOnSongChange: Boolean = true,
@@ -255,7 +259,9 @@ fun NowPlayingScreen(
     lyricsSecondaryColor: Int = 0x66FFFFFF,
     lyricsBorderColor: Int = 0xFF000000.toInt(),
     lyricsBorderWidth: Float = 0f,
-    menuBgColor: Int = 0xE8F2F2F7.toInt()
+    menuBgColor: Int = 0xE8F2F2F7.toInt(),
+    playCount: Int = 0,
+    lastPlayedAt: Long = 0L
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
@@ -459,6 +465,15 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
+                                Text("Editar / sincronizar letra", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                onEditLyrics()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
                                 Text(
                                     if (sleepMinutes > 0) "Timer de sono (${sleepMinutes} min)" else "Timer de sono",
                                     color = MenuDarkText
@@ -489,6 +504,18 @@ fun NowPlayingScreen(
                                     putExtra(android.content.Intent.EXTRA_TEXT, text)
                                 }
                                 context.startActivity(android.content.Intent.createChooser(intent, "Compartilhar trecho"))
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Excluir arquivo", color = Color(0xFFC62828))
+                            },
+                            onClick = {
+                                showMenu = false
+                                pendingDeleteTrack = track
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.Delete, contentDescription = null, tint = Color(0xFFC62828))
                             }
                         )
                     }
@@ -757,12 +784,12 @@ fun NowPlayingScreen(
                         )
                     }
 
-                    // Letra sincronizada (até 2 linhas) — toque abre tela cheia
+                    // Letra (sincronizada ou não) — toque abre tela cheia
                     Box(
                         Modifier
                             .fillMaxWidth()
                             .weight(1f)
-                            .clickable(enabled = synced.isNotEmpty()) { showFullLyrics = true },
+                            .clickable(enabled = lyrics.isNotEmpty()) { showFullLyrics = true },
                         contentAlignment = Alignment.Center
                     ) {
                         if (synced.isNotEmpty()) {
@@ -797,6 +824,20 @@ fun NowPlayingScreen(
                                     )
                                 }
                             }
+                        } else if (lyrics.isNotEmpty()) {
+                            // Letras sem timestamps: mostra as primeiras linhas
+                            Text(
+                                lyrics.take(2).joinToString("\n") { it.text },
+                                textAlign = TextAlign.Center,
+                                fontSize = 17.sp,
+                                lineHeight = 24.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color.White.copy(alpha = 0.95f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                fontFamily = lyricsFont,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                            )
                         }
                     }
                 }
@@ -911,18 +952,21 @@ fun NowPlayingScreen(
                 Modifier.fillMaxWidth().height(80.dp).padding(bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.width(88.dp), horizontalAlignment = Alignment.Start) {
+                Column(Modifier.width(96.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(formatDuration(shownPosition), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
-                    Row {
-                        IconButton(onClick = onToggleShuffle, modifier = Modifier.size(40.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onToggleShuffle, modifier = Modifier.size(48.dp)) {
                             Icon(
                                 painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
                                 contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
                                 tint = Color.Unspecified,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(28.dp)
                             )
                         }
-                        IconButton(onClick = onCycleRepeat, modifier = Modifier.size(40.dp)) {
+                        IconButton(onClick = onCycleRepeat, modifier = Modifier.size(48.dp)) {
                             val repeatIcon = when (repeatMode) {
                                 Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
                                 Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
@@ -936,7 +980,7 @@ fun NowPlayingScreen(
                                     else -> "Repetição desligada"
                                 },
                                 tint = Color.Unspecified,
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(28.dp)
                             )
                         }
                     }
@@ -981,23 +1025,26 @@ fun NowPlayingScreen(
                     }
                 }
 
-                Column(Modifier.width(88.dp), horizontalAlignment = Alignment.End) {
+                Column(Modifier.width(96.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(formatDuration(duration), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(40.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(48.dp)) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_equalizer),
                                 contentDescription = "Equalizador",
-                                modifier = Modifier.size(24.dp),
+                                modifier = Modifier.size(28.dp),
                                 tint = Color.White.copy(alpha = 0.9f)
                             )
                         }
-                        IconButton(onClick = { showQueue = true }, modifier = Modifier.size(40.dp)) {
+                        IconButton(onClick = { showQueue = true }, modifier = Modifier.size(48.dp)) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_queue),
                                 contentDescription = "Fila",
                                 tint = Color.White.copy(alpha = 0.9f),
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(28.dp)
                             )
                         }
                     }
@@ -1073,13 +1120,19 @@ fun NowPlayingScreen(
         }
 
         if (showTechDetails) {
-            TechDetailsDialog(track = track, onDismiss = { showTechDetails = false }, menuBgColor = menuBgColor)
+            TechDetailsDialog(
+                track = track,
+                onDismiss = { showTechDetails = false },
+                menuBgColor = menuBgColor,
+                playCount = playCount,
+                lastPlayedAt = lastPlayedAt
+            )
         }
 
-        if (showFullLyrics && synced.isNotEmpty()) {
+        if (showFullLyrics && lyrics.isNotEmpty()) {
             FullscreenLyrics(
                 track = track,
-                lyrics = synced,
+                lyrics = if (synced.isNotEmpty()) synced else lyrics,
                 position = position,
                 lyricsFont = lyricsFont,
                 fontSizeSp = lyricsFontSize,
@@ -1120,14 +1173,21 @@ fun NowPlayingScreen(
                     presetLocked = true
                     showPresetPicker = false
                     showVisualizer = true
-                }
+                },
+                onDelete = onDeletePreset
             )
         }
     }
 }
 
 @Composable
-internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit, menuBgColor: Int = 0xE8F2F2F7.toInt()) {
+internal fun TechDetailsDialog(
+    track: Track,
+    onDismiss: () -> Unit,
+    menuBgColor: Int = 0xE8F2F2F7.toInt(),
+    playCount: Int = 0,
+    lastPlayedAt: Long = 0L
+) {
     val context = LocalContext.current
     val audioLines = remember {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -1195,6 +1255,24 @@ internal fun TechDetailsDialog(track: Track, onDismiss: () -> Unit, menuBgColor:
                 TechRow("BitDepth", if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—")
                 TechRow("Canais", formatChannels(track.channels))
                 TechRow("Duração", formatDuration(track.duration))
+                TechRow(
+                    "Tamanho",
+                    if (track.fileSize > 0) {
+                        val mb = track.fileSize / (1024.0 * 1024.0)
+                        if (mb >= 1.0) "%.2f MB".format(mb) else "%.0f KB".format(track.fileSize / 1024.0)
+                    } else "—"
+                )
+                TechRow("Nº da faixa", track.trackNumber?.toString() ?: "—")
+                TechRow("Nº do disco", track.discNumber?.toString() ?: "—")
+                TechRow("Compositores", track.composer.ifBlank { "—" })
+                TechRow(
+                    "Última reprodução",
+                    if (lastPlayedAt > 0L) {
+                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
+                            .format(java.util.Date(lastPlayedAt))
+                    } else "—"
+                )
+                TechRow("Vezes reproduzida", if (playCount > 0) playCount.toString() else "—")
                 TechRow("Arquivo", track.path)
                 Spacer(Modifier.height(12.dp))
                 audioLines.forEachIndexed { i, line ->
@@ -1764,7 +1842,7 @@ internal fun LyricsSearchDialog(
                                     .padding(horizontal = 8.dp, vertical = 10.dp)
                             ) {
                                 Text(
-                                    if (expanded) "Letra correta" else r.trackName,
+                                    if (expanded) "Letra" else r.trackName,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = if (expanded) Color(0xFFB8F5C8) else dialogDark,
@@ -1777,7 +1855,7 @@ internal fun LyricsSearchDialog(
                                             append(r.artistName)
                                             if (r.albumName.isNotBlank()) append(" · ${r.albumName}")
                                             if (r.durationSec > 0) append(" · ${r.durationSec}s")
-                                            append(if (r.hasSynced) " · sincronizada" else " · texto")
+                                            append(if (r.hasSynced) " · sincronizada" else " · simples")
                                         },
                                         fontSize = 12.sp,
                                         color = dialogMuted,
@@ -1803,7 +1881,11 @@ internal fun LyricsSearchDialog(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Spacer(Modifier.height(6.dp))
-                                    Text("Linha sincronizada", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                    Text(
+                                        if (r.hasSynced) "Linha sincronizada" else "Linha simples",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF8BC9A0)
+                                    )
                                     val previewLines = remember(r.id) {
                                         r.toLyricLines().take(12)
                                     }
@@ -1882,18 +1964,22 @@ internal fun FullscreenLyrics(
     KeepScreenOn()
     val context = LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    val activeIndex = remember(lyrics, position) {
-        var idx = 0
-        for (i in lyrics.indices) {
-            if (lyrics[i].timeMs <= position) idx = i else break
+    val hasTimestamps = remember(lyrics) { lyrics.any { it.timeMs >= 0 } }
+    val activeIndex = remember(lyrics, position, hasTimestamps) {
+        if (!hasTimestamps) -1
+        else {
+            var idx = 0
+            for (i in lyrics.indices) {
+                if (lyrics[i].timeMs <= position) idx = i else break
+            }
+            idx
         }
-        idx
     }
     var selectMode by remember { mutableStateOf(false) }
     var selectedLines by remember { mutableStateOf(setOf<Int>()) }
 
     LaunchedEffect(activeIndex) {
-        if (!selectMode && activeIndex in lyrics.indices) {
+        if (hasTimestamps && !selectMode && activeIndex in lyrics.indices) {
             listState.animateScrollToItem(
                 index = activeIndex,
                 scrollOffset = -200
@@ -1973,7 +2059,7 @@ internal fun FullscreenLyrics(
                 IconButton(onClick = {
                     if (selectMode) {
                         if (selectedLines.isNotEmpty()) {
-                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }
+                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(5)
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
                             selectedLines = emptySet()
@@ -2008,6 +2094,7 @@ internal fun FullscreenLyrics(
                     )
                     val alpha by androidx.compose.animation.core.animateFloatAsState(
                         targetValue = when {
+                            !hasTimestamps -> 0.85f
                             isActive -> 1f
                             kotlin.math.abs(index - activeIndex) <= 1 -> 0.55f
                             else -> 0.32f
@@ -2032,8 +2119,8 @@ internal fun FullscreenLyrics(
                             .clickable {
                                 if (selectMode) {
                                     selectedLines = if (isSelected) selectedLines - index else selectedLines + index
-                                } else {
-                                    onSeek(line.timeMs.coerceAtLeast(0L))
+                                } else if (line.timeMs >= 0) {
+                                    onSeek(line.timeMs)
                                 }
                             }
                             .padding(vertical = 12.dp),
@@ -2181,21 +2268,27 @@ private fun PresetGlassBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun MilkPresetPickerDialog(
     presets: List<String>,
     currentPath: String?,
     onDismiss: () -> Unit,
-    onSelect: (String) -> Unit
+    onSelect: (String) -> Unit,
+    onDelete: ((String) -> Unit)? = null,
+    manageMode: Boolean = false
 ) {
     val context = LocalContext.current
-    // Mesma SharedPreferences / chave do chip do Now Playing
     val prefs = remember {
         context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
     }
     var favorites by remember {
         mutableStateOf(prefs.getStringSet("milk_preset_favs", emptySet())?.toSet() ?: emptySet())
     }
+    var query by remember { mutableStateOf("") }
+    var showSearch by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<String?>(null) }
+
     fun toggleFav(path: String) {
         val name = java.io.File(path).name
         val next = favorites.toMutableSet()
@@ -2203,10 +2296,17 @@ internal fun MilkPresetPickerDialog(
         favorites = next
         prefs.edit().putStringSet("milk_preset_favs", next).apply()
     }
-    val sorted = remember(presets, favorites) {
+    val sorted = remember(presets, favorites, query) {
         val fav = presets.filter { java.io.File(it).name in favorites }
         val rest = presets.filter { java.io.File(it).name !in favorites }
-        fav + rest
+        val base = fav + rest
+        if (query.isBlank()) base
+        else {
+            val q = query.trim().lowercase()
+            base.filter {
+                java.io.File(it).name.removeSuffix(".milk").removeSuffix(".MILK").lowercase().contains(q)
+            }
+        }
     }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val currentIndex = remember(sorted, currentPath) {
@@ -2215,53 +2315,111 @@ internal fun MilkPresetPickerDialog(
             it == currentPath || java.io.File(it).name == java.io.File(currentPath).name
         }.coerceAtLeast(0)
     }
-    LaunchedEffect(currentIndex, sorted.size) {
-        if (sorted.isNotEmpty()) listState.scrollToItem(currentIndex)
+    LaunchedEffect(currentIndex, sorted.size, query) {
+        if (sorted.isNotEmpty() && query.isBlank()) listState.scrollToItem(currentIndex)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Visualizer — presets", color = Color(0xFF1A1A1A)) },
-        text = {
-            LazyColumn(state = listState, modifier = Modifier.height(320.dp)) {
-                items(sorted.size) { i ->
-                    val path = sorted[i]
-                    val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
-                    val isFav = java.io.File(path).name in favorites
-                    val isCurrent = currentPath != null && (
-                        path == currentPath || java.io.File(path).name == java.io.File(currentPath).name
+        title = {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (manageMode) "Gerenciar presets" else "Visualizer — presets",
+                    color = Color(0xFF1A1A1A),
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Rounded.Search,
+                        contentDescription = "Buscar",
+                        tint = Color(0xFF5C6BC0)
                     )
-                    Row(
-                        Modifier
+                }
+            }
+        },
+        text = {
+            Column {
+                if (showSearch) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = { Text("Buscar preset…") },
+                        singleLine = true,
+                        modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelect(path) }
-                            .background(if (isCurrent) Color(0xFF5C6BC0).copy(0.15f) else Color.Transparent)
-                            .padding(vertical = 10.dp, horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            name,
-                            color = Color(0xFF1A1A1A),
-                            fontSize = 14.sp,
-                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(onClick = { toggleFav(path) }, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                contentDescription = "Favoritar",
-                                tint = if (isFav) Color(0xFFE53935) else Color(0xFF888888),
-                                modifier = Modifier.size(20.dp)
+                            .padding(bottom = 8.dp)
+                    )
+                }
+                if (sorted.isEmpty()) {
+                    Text(
+                        if (query.isNotBlank()) "Nenhum preset encontrado." else "Nenhum preset disponível.",
+                        color = Color(0xFF666666),
+                        fontSize = 14.sp
+                    )
+                } else {
+                    LazyColumn(state = listState, modifier = Modifier.height(320.dp)) {
+                        items(sorted.size) { i ->
+                            val path = sorted[i]
+                            val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
+                            val isFav = java.io.File(path).name in favorites
+                            val isCurrent = currentPath != null && (
+                                path == currentPath || java.io.File(path).name == java.io.File(currentPath).name
                             )
-                        }
-                        if (isCurrent) {
-                            Icon(
-                                Icons.Rounded.Check,
-                                contentDescription = "Atual",
-                                tint = Color(0xFF5C6BC0),
-                                modifier = Modifier.size(20.dp)
-                            )
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (!manageMode) onSelect(path)
+                                        },
+                                        onLongClick = {
+                                            if (onDelete != null) pendingDelete = path
+                                        }
+                                    )
+                                    .background(if (isCurrent) Color(0xFF5C6BC0).copy(0.15f) else Color.Transparent)
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    name,
+                                    color = Color(0xFF1A1A1A),
+                                    fontSize = 14.sp,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { toggleFav(path) }, modifier = Modifier.size(36.dp)) {
+                                    Icon(
+                                        imageVector = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                        contentDescription = "Favoritar",
+                                        tint = if (isFav) Color(0xFFE53935) else Color(0xFF888888),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                if (manageMode && onDelete != null) {
+                                    IconButton(
+                                        onClick = { pendingDelete = path },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.Delete,
+                                            contentDescription = "Excluir",
+                                            tint = Color(0xFFC62828),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                } else if (isCurrent) {
+                                    Icon(
+                                        Icons.Rounded.Check,
+                                        contentDescription = "Atual",
+                                        tint = Color(0xFF5C6BC0),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -2271,6 +2429,26 @@ internal fun MilkPresetPickerDialog(
             TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
         }
     )
+
+    pendingDelete?.let { path ->
+        val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Excluir preset?") },
+            text = {
+                Text("Remover \"$name\"? Esta ação não pode ser desfeita.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete?.invoke(path)
+                    pendingDelete = null
+                }) { Text("Excluir", color = Color(0xFFE53935)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancelar") }
+            }
+        )
+    }
 }
 
 

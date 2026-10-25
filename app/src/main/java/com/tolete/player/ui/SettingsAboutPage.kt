@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tolete.player.data.LibrarySettings
 import com.tolete.player.data.SourceFolder
+import com.tolete.player.ui.ChangelogEntry
 import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
@@ -251,6 +252,23 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 internal val changelogEntries = listOf(
         ChangelogEntry(
             "0.50",
+            "210",
+            listOf(
+                "(Tentativa de) mudança no layout do Now Playing",
+                "Removido notificações desnecessárias",
+                "Músicas em Artista, Histórico e Mais Tocadas agora selecionáveis",
+                "Mais informações sobre arquivos de música",
+                "Letras simples agora exibidas em Tela Cheia (sim isso não tava antes lkkkkkkkkk)",
+                "Suporte à edição e sincronização de .lrc",
+                "Botão de exclusão no menu do now playing",
+                "Melhoria no menu de escolha de presets",
+                "Correções gramáticas no campo de busca de letras",
+                "Opção de gerar fotos ao compartilhar trechos de letra de Música (experimental)",
+                "Novos métodos de pesquisa automática de imagem de artista"
+            )
+        ),
+       ChangelogEntry(
+            "0.45",
             "200",
             listOf(
                 "Tela não apaga mais no Now Playing e na letra em tela cheia",

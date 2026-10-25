@@ -34,11 +34,13 @@ import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.tolete.player.data.LyricLine
+import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.Track
 import java.io.File
 import kotlinx.coroutines.delay
@@ -81,9 +84,11 @@ fun LyricsEditorScreen(
     getPosition: () -> Long,
     onSeek: (Long) -> Unit,
     onToggle: () -> Unit,
-    onSave: (List<LyricLine>) -> Unit,
+    onSave: (List<LyricLine>, LyricsEmbedder.Target) -> Unit,
     onClose: () -> Unit,
-    appColors: AppColors
+    appColors: AppColors,
+    initialTarget: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE,
+    canWriteLrc: Boolean = true
 ) {
     val lines = remember {
         mutableStateListOf<EditableLine>().apply {
@@ -105,6 +110,9 @@ fun LyricsEditorScreen(
             else initialLines.joinToString("\n") { it.text }
         )
     }
+    var showSaveTarget by remember { mutableStateOf(false) }
+    var pendingSaveLines by remember { mutableStateOf<List<LyricLine>?>(null) }
+    var preferredTarget by remember { mutableStateOf(initialTarget) }
     val duration = track.duration.coerceAtLeast(1L)
 
     LaunchedEffect(isPlaying) {
@@ -239,7 +247,8 @@ fun LyricsEditorScreen(
                                 .filter { it.text.isNotBlank() }
                                 .map { LyricLine(it.timeMs, it.text.trim()) }
                         }
-                        onSave(out)
+                        pendingSaveLines = out
+                        showSaveTarget = true
                     },
                     modifier = Modifier
                         .size(40.dp)
@@ -496,6 +505,69 @@ fun LyricsEditorScreen(
             }
         }
     }
+
+    if (showSaveTarget && pendingSaveLines != null) {
+        AlertDialog(
+            onDismissRequest = {
+                showSaveTarget = false
+                pendingSaveLines = null
+            },
+            title = { Text("Salvar letra") },
+            text = {
+                Column {
+                    Text(
+                        "Escolha onde gravar a letra:",
+                        fontSize = 14.sp,
+                        color = Color.White.copy(0.85f)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "• Arquivo .lrc — ao lado da música (recomendado para letras sincronizadas)",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.7f)
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "• Tags embutidas — dentro do arquivo de áudio",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.7f)
+                    )
+                    if (!canWriteLrc) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "A pasta da música pode não permitir gravar .lrc; nesse caso use tags embutidas ou o cache do app.",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFFAB91)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val out = pendingSaveLines ?: return@TextButton
+                    preferredTarget = LyricsEmbedder.Target.LRC_FILE
+                    showSaveTarget = false
+                    pendingSaveLines = null
+                    onSave(out, LyricsEmbedder.Target.LRC_FILE)
+                }) { Text("Arquivo .lrc") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        val out = pendingSaveLines ?: return@TextButton
+                        preferredTarget = LyricsEmbedder.Target.EMBEDDED
+                        showSaveTarget = false
+                        pendingSaveLines = null
+                        onSave(out, LyricsEmbedder.Target.EMBEDDED)
+                    }) { Text("Tags embutidas") }
+                    TextButton(onClick = {
+                        showSaveTarget = false
+                        pendingSaveLines = null
+                    }) { Text("Cancelar") }
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -609,6 +681,7 @@ private fun LineBox(
         }
     }
 }
+
 
 private data class EditableLine(
     val timeMs: Long,
