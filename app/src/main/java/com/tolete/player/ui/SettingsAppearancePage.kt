@@ -76,7 +76,19 @@ internal fun AppearancePage(
     floatingIconsEnabled: Boolean = true,
     onFloatingIconsChange: (Boolean) -> Unit = {},
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
-    onMenuBgColorChange: (Int) -> Unit = {}
+    onMenuBgColorChange: (Int) -> Unit = {},
+    homeButtonFontPath: String? = null,
+    onHomeButtonFontSelect: (String?) -> Unit = {},
+    onPickHomeButtonFont: () -> Unit = {},
+    homeButtonColor: Int = 0xFFFFFFFF.toInt(),
+    onHomeButtonColorChange: (Int) -> Unit = {},
+    shareFontPath: String? = null,
+    onShareFontSelect: (String?) -> Unit = {},
+    onPickShareFont: () -> Unit = {},
+    shareTextColor: Int = 0xFFF5F5FA.toInt(),
+    onShareTextColorChange: (Int) -> Unit = {},
+    shareBrandColor: Int = 0xFFFFFFFF.toInt(),
+    onShareBrandColorChange: (Int) -> Unit = {}
 ) {
     var fontsExpanded by remember { mutableStateOf(false) }
 
@@ -233,17 +245,19 @@ internal fun AppearancePage(
                 )
             }
             if (fontsExpanded) {
+                val ctx = LocalContext.current
+                val userFonts = remember { BuiltInFonts.listUserFonts(ctx) }
                 Spacer(Modifier.height(8.dp))
                 FontOptionRow(
                     label = "Padrão do sistema",
-                    selected = uiFontPath.isNullOrBlank() || uiFontPath == "system",
+                    selected = uiFontPath.isNullOrBlank() || uiFontPath == "system" || uiFontPath?.startsWith("builtin:") == true,
                     onClick = onClearUiFont
                 )
-                BuiltInFonts.ALL.forEach { font ->
+                userFonts.forEach { file ->
                     FontOptionRow(
-                        label = font.displayName,
-                        selected = uiFontPath == font.storageKey,
-                        onClick = { onSelectUiFont(font.storageKey) }
+                        label = file.name,
+                        selected = uiFontPath == file.absolutePath,
+                        onClick = { onSelectUiFont(file.absolutePath) }
                     )
                 }
                 Row(
@@ -279,8 +293,37 @@ internal fun AppearancePage(
                         color = Color(0xFFFF8A80)
                     )
                 }
+                // Recomendação DaFont
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF1A73E8).copy(0.22f))
+                        .clickable {
+                            try {
+                                ctx.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://www.dafont.com"))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            } catch (_: Exception) {}
+                        }
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.FontDownload, contentDescription = null, tint = Color(0xFF8AB4F8))
+                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                        Text("Baixar fontes no DaFont", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            "dafont.com — muitas fontes gratuitas para uso pessoal",
+                            fontSize = 12.sp,
+                            color = Color.White.copy(0.55f)
+                        )
+                    }
+                }
                 Text(
-                    "Afeta títulos, listas e interface — não altera a fonte das letras.",
+                    "Afeta títulos, listas e interface — não altera a fonte das letras.\n" +
+                        "A rotação de fontes no splash usa as fontes que você carregar aqui.",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.4f),
                     modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
@@ -377,6 +420,159 @@ internal fun AppearancePage(
             )
             TextButton(onClick = { onMenuBgColorChange(0xE8F2F2F7.toInt()) }) {
                 Text("Restaurar padrão", color = Color(0xFF82B1FF))
+            }
+
+            // --- Botões da tela Início ---
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Botões da tela Início",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Text(
+                "Fonte e cor dos textos (Mais Tocadas, Favoritas, Playlists, Histórico)",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.5f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            val homeFontsCtx = LocalContext.current
+            val homeUserFonts = remember { BuiltInFonts.listUserFonts(homeFontsCtx) }
+            FontOptionRow(
+                label = "Padrão do sistema",
+                selected = homeButtonFontPath.isNullOrBlank() || homeButtonFontPath == "system",
+                onClick = { onHomeButtonFontSelect(null) }
+            )
+            homeUserFonts.forEach { file ->
+                FontOptionRow(
+                    label = file.name,
+                    selected = homeButtonFontPath == file.absolutePath,
+                    onClick = { onHomeButtonFontSelect(file.absolutePath) }
+                )
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(0.08f))
+                    .clickable(onClick = onPickHomeButtonFont)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.FontDownload, contentDescription = null)
+                Text(
+                    "Carregar fonte para os botões",
+                    fontSize = 15.sp,
+                    modifier = Modifier.padding(start = 12.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text("Cor do texto", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
+            val homeColorPresets = listOf(
+                0xFFFFFFFF.toInt(), 0xFFBB86FC.toInt(), 0xFF00D2FF.toInt(),
+                0xFFFF6B4A.toInt(), 0xFF4ADE80.toInt(), 0xFFFBBF24.toInt(),
+                0xFFF472B6.toInt(), 0xFF60A5FA.toInt()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                homeColorPresets.forEach { c ->
+                    val selected = homeButtonColor == c
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(c))
+                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
+                            .clickable { onHomeButtonColorChange(c) }
+                    )
+                }
+            }
+
+            // --- Foto gerada (trecho de letra) ---
+            Spacer(Modifier.height(24.dp))
+            Text(
+                "Foto gerada (trecho de letra)",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Text(
+                "Fonte da letra e cor do texto / logo na imagem compartilhada",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.5f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            val shareFontsCtx = LocalContext.current
+            val shareUserFonts = remember { BuiltInFonts.listUserFonts(shareFontsCtx) }
+            FontOptionRow(
+                label = "Padrão do sistema",
+                selected = shareFontPath.isNullOrBlank() || shareFontPath == "system",
+                onClick = { onShareFontSelect(null) }
+            )
+            shareUserFonts.forEach { file ->
+                FontOptionRow(
+                    label = file.name,
+                    selected = shareFontPath == file.absolutePath,
+                    onClick = { onShareFontSelect(file.absolutePath) }
+                )
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.White.copy(0.08f))
+                    .clickable(onClick = onPickShareFont)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.FontDownload, contentDescription = null)
+                Text(
+                    "Carregar fonte para a foto",
+                    fontSize = 15.sp,
+                    modifier = Modifier.padding(start = 12.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            // Cores mais escuras / saturadas para legibilidade na foto
+            val shareColorPresets = listOf(
+                0xFFE8E8F0.toInt(), // off-white suave
+                0xFFC2D1CB.toInt(), // sage
+                0xFF9BB8D4.toInt(), // azul acinzentado
+                0xFFB8A9C9.toInt(), // lavanda escura
+                0xFFD4A574.toInt(), // ocre
+                0xFF8FBC8F.toInt(), // verde musgo
+                0xFFCD8B8B.toInt(), // rosa terroso
+                0xFF7A9E9F.toInt()  // teal escuro
+            )
+            Text("Cor do texto (letra)", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                shareColorPresets.forEach { c ->
+                    val selected = shareTextColor == c
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(c))
+                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
+                            .clickable { onShareTextColorChange(c) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text("Cor do logo / marca", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                shareColorPresets.forEach { c ->
+                    val selected = shareBrandColor == c
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(c))
+                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
+                            .clickable { onShareBrandColorChange(c) }
+                    )
+                }
             }
 
             Spacer(Modifier.height(20.dp))
@@ -532,16 +728,18 @@ internal fun LyricsViewerPage(
             color = Color.White.copy(0.5f),
             modifier = Modifier.padding(bottom = 8.dp)
         )
+        val lyricsCtx = LocalContext.current
+        val lyricsUserFonts = remember { BuiltInFonts.listUserFonts(lyricsCtx) }
         FontOptionRow(
             label = "Padrão do sistema",
-            selected = lyricsFontPath.isNullOrBlank() || lyricsFontPath == "system",
+            selected = lyricsFontPath.isNullOrBlank() || lyricsFontPath == "system" || lyricsFontPath?.startsWith("builtin:") == true,
             onClick = onClearFont
         )
-        BuiltInFonts.ALL.forEach { font ->
+        lyricsUserFonts.forEach { file ->
             FontOptionRow(
-                label = font.displayName,
-                selected = lyricsFontPath == font.storageKey,
-                onClick = { onSelectFont(font.storageKey) }
+                label = file.name,
+                selected = lyricsFontPath == file.absolutePath,
+                onClick = { onSelectFont(file.absolutePath) }
             )
         }
         Row(

@@ -158,8 +158,20 @@ fun SettingsScreen(
     onFloatingIconsChange: (Boolean) -> Unit = {},
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
     onMenuBgColorChange: (Int) -> Unit = {},
+    homeButtonFontPath: String? = null,
+    onHomeButtonFontSelect: (String?) -> Unit = {},
+    homeButtonColor: Int = 0xFFFFFFFF.toInt(),
+    onHomeButtonColorChange: (Int) -> Unit = {},
+    shareFontPath: String? = null,
+    onShareFontSelect: (String?) -> Unit = {},
+    shareTextColor: Int = 0xFFF5F5FA.toInt(),
+    onShareTextColorChange: (Int) -> Unit = {},
+    shareBrandColor: Int = 0xFFFFFFFF.toInt(),
+    onShareBrandColorChange: (Int) -> Unit = {},
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
+    seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
+    onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
     milkPresetCount: Int = 0,
@@ -261,7 +273,9 @@ fun SettingsScreen(
                 onFadeMsChange = onFadeMsChange,
                 playCountThreshold = playCountThreshold,
                 onPlayCountThresholdChange = onPlayCountThresholdChange,
-                onOpenAudioOutput = { onNavigate(SettingsPage.AUDIO_OUTPUT) }
+                onOpenAudioOutput = { onNavigate(SettingsPage.AUDIO_OUTPUT) },
+                seekBarStyle = seekBarStyle,
+                onSeekBarStyleChange = onSeekBarStyleChange
             )
             SettingsPage.AUDIO_OUTPUT -> AudioOutputPage(
                 audioOutput = audioOutput,
@@ -289,7 +303,19 @@ fun SettingsScreen(
                 floatingIconsEnabled = floatingIconsEnabled,
                 onFloatingIconsChange = onFloatingIconsChange,
                 menuBgColor = menuBgColor,
-                onMenuBgColorChange = onMenuBgColorChange
+                onMenuBgColorChange = onMenuBgColorChange,
+                homeButtonFontPath = homeButtonFontPath,
+                onHomeButtonFontSelect = onHomeButtonFontSelect,
+                onPickHomeButtonFont = onPickUiFont,
+                homeButtonColor = homeButtonColor,
+                onHomeButtonColorChange = onHomeButtonColorChange,
+                shareFontPath = shareFontPath,
+                onShareFontSelect = onShareFontSelect,
+                onPickShareFont = onPickUiFont,
+                shareTextColor = shareTextColor,
+                onShareTextColorChange = onShareTextColorChange,
+                shareBrandColor = shareBrandColor,
+                onShareBrandColorChange = onShareBrandColorChange
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,
@@ -331,6 +357,7 @@ fun SettingsScreen(
             SettingsPage.CHANGELOG -> ChangelogPage()
             SettingsPage.LICENSES -> LicensesPage()
             else -> {
+                val settingsCtx = LocalContext.current
                 val entries = listOf(
                     SettingsEntry(
                         Icons.Rounded.LibraryMusic,
@@ -361,7 +388,21 @@ fun SettingsScreen(
                         Icons.Rounded.Info,
                         "Sobre",
                         "Créditos e informações"
-                    ) { onNavigate(SettingsPage.ABOUT) }
+                    ) { onNavigate(SettingsPage.ABOUT) },
+                    SettingsEntry(
+                        Icons.Rounded.Description,
+                        "Reportar bugs e sugerir melhorias",
+                        "Abre o formulário de feedback"
+                    ) {
+                        try {
+                            settingsCtx.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://forms.gle/FTCnrL7DhofQwEV26")
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: Exception) {}
+                    }
                 )
                 LazyColumn {
                     items(entries) { e -> EntryRow(e) }

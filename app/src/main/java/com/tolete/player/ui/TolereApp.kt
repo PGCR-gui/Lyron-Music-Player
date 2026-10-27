@@ -265,6 +265,7 @@ fun TolereApp(
     val shuffleType by vm.shuffleType.collectAsStateWithLifecycle()
     val bitPerfect by vm.bitPerfect.collectAsStateWithLifecycle()
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
+    val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
     val rootContext = LocalContext.current
@@ -282,6 +283,11 @@ fun TolereApp(
     val splashSoundEnabled by vm.splashSoundEnabled.collectAsStateWithLifecycle()
     val floatingIconsEnabled by vm.floatingIconsEnabled.collectAsStateWithLifecycle()
     val menuBgColor by vm.menuBgColor.collectAsStateWithLifecycle()
+    val homeButtonFontPath by vm.homeButtonFontPath.collectAsStateWithLifecycle()
+    val homeButtonColor by vm.homeButtonColor.collectAsStateWithLifecycle()
+    val shareFontPath by vm.shareFontPath.collectAsStateWithLifecycle()
+    val shareTextColor by vm.shareTextColor.collectAsStateWithLifecycle()
+    val shareBrandColor by vm.shareBrandColor.collectAsStateWithLifecycle()
     val groupSort by vm.groupSort.collectAsStateWithLifecycle()
     val groupOrder by vm.groupOrder.collectAsStateWithLifecycle()
     val trackSort by vm.trackSort.collectAsStateWithLifecycle()
@@ -301,6 +307,7 @@ fun TolereApp(
     // Multi-seleção / add-to-playlist state
     var selectedTrackIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showSelectionActions by remember { mutableStateOf(false) }
+    var selectionInfoTrack by remember { mutableStateOf<Track?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var lyricsEditTrack by remember { mutableStateOf<Track?>(null) }
     var showManageMilkPresets by remember { mutableStateOf(false) }
@@ -801,6 +808,8 @@ fun TolereApp(
                                         onReorderPlaylists = { ids -> vm.reorderPlaylists(ids) },
                                         playCountOf = vm::playCountOf,
                                         appColors = appColors,
+                                        homeButtonFontPath = homeButtonFontPath,
+                                        homeButtonColor = homeButtonColor,
                                         selectedIds = selectedTrackIds,
                                         selectionMode = selectionMode,
                                         onTrackClick = { list, index, track ->
@@ -819,8 +828,11 @@ fun TolereApp(
 
                                 else -> {
                                     val groups = when (tab) {
-                                        MusicViewModel.Tab.ARTISTS -> vm.sortedArtists(artists).map {
-                                            GroupItem(it.name, faixas(it.trackCount), it.name, it.artPath, round = true)
+                                        MusicViewModel.Tab.ARTISTS -> vm.sortedArtists(artists).map { artist ->
+                                            val metaKey = ArtistMetaStore.artistKey(artist.name)
+                                            val metaImg = ArtistMetaStore.load(rootContext, metaKey)?.displayImage
+                                            val art = metaImg ?: artist.artPath
+                                            GroupItem(artist.name, faixas(artist.trackCount), artist.name, art, round = true)
                                         }
                                         MusicViewModel.Tab.ALBUMS -> vm.sortedAlbums(albums).map {
                                             GroupItem(it.name, "${it.artist} · ${faixas(it.trackCount)}", it.name, it.artPath)
@@ -942,6 +954,8 @@ fun TolereApp(
                     onBitPerfectChange = vm::setBitPerfect,
                     fadeMs = fadeMs,
                     onFadeMsChange = vm::setFadeMs,
+                    seekBarStyle = seekBarStyle,
+                    onSeekBarStyleChange = vm::setSeekBarStyle,
                     playCountThreshold = playCountThreshold,
                     onPlayCountThresholdChange = vm::setPlayCountThreshold,
                     milkPresetCount = milkPresets.size,
@@ -984,7 +998,17 @@ fun TolereApp(
                     floatingIconsEnabled = floatingIconsEnabled,
                     onFloatingIconsChange = vm::setFloatingIconsEnabled,
                     menuBgColor = menuBgColor,
-                    onMenuBgColorChange = vm::setMenuBgColor
+                    onMenuBgColorChange = vm::setMenuBgColor,
+                    homeButtonFontPath = homeButtonFontPath,
+                    onHomeButtonFontSelect = vm::setHomeButtonFontPath,
+                    homeButtonColor = homeButtonColor,
+                    onHomeButtonColorChange = vm::setHomeButtonColor,
+                    shareFontPath = shareFontPath,
+                    onShareFontSelect = vm::setShareFontPath,
+                    shareTextColor = shareTextColor,
+                    onShareTextColorChange = vm::setShareTextColor,
+                    shareBrandColor = shareBrandColor,
+                    onShareBrandColorChange = vm::setShareBrandColor
                 )
             }
 
@@ -1103,6 +1127,8 @@ fun TolereApp(
                         onRemoveFromQueue = vm::removeFromQueue,
                         onToggleFavoriteTrack = { t -> vm.toggleFavorite(t.id) },
                         onDeleteTrack = { t -> onDeleteTracks(listOf(t)) },
+                        onPlayNextFromQueue = { t -> vm.playNext(t) },
+                        isFavoriteCheck = { id -> vm.isFavorite(id) },
                         onToggleFavorite = { vm.toggleFavorite(current.id) },
                         onAddToPlaylist = { openAddToPlaylist(listOf(current)) },
                         onEditTags = {
@@ -1124,7 +1150,7 @@ fun TolereApp(
                         },
                         loadLyrics = { vm.loadLyrics(current) },
                         searchLyrics = { t, a -> vm.searchLyrics(t, a) },
-                        embedLyricsResult = { r -> vm.embedLyricsResult(current, r) },
+                        embedLyricsResult = { r, target -> vm.embedLyricsResult(current, r, target) },
                         appColors = appColors,
                         milkPresets = milkPresets,
                         onDeletePreset = { path -> vm.deleteMilkPreset(path) },
@@ -1149,7 +1175,8 @@ fun TolereApp(
                         lyricsBorderWidth = lyricsBorderWidth,
                         menuBgColor = menuBgColor,
                         playCount = vm.playCountOf(current.id),
-                        lastPlayedAt = vm.lastPlayedAt(current.id)
+                        lastPlayedAt = vm.lastPlayedAt(current.id),
+                        seekBarStyle = seekBarStyle
                     )
                 }
             }
@@ -1182,7 +1209,11 @@ fun TolereApp(
             }
 
             if (showSelectionActions && selectionMode) {
-                val pool = if (isSearching) searchResults else visible
+                // Inclui listas da Home (favoritas, histórico, mais tocadas) além da lista visível
+                val pool = remember(isSearching, searchResults, visible, favoriteTracks, history, mostPlayed, tracks) {
+                    if (isSearching) searchResults
+                    else (visible + favoriteTracks + history + mostPlayed + tracks).distinctBy { it.id }
+                }
                 // Na ordem em que foram selecionadas (selectedTrackIds preserva a ordem de inserção)
                 val selectedTracks = remember(selectedTrackIds, pool) {
                     val byId = pool.associateBy { it.id }
@@ -1196,6 +1227,19 @@ fun TolereApp(
                     onClearSelection = {
                         showSelectionActions = false
                         selectedTrackIds = emptySet()
+                    },
+                    onSelectAll = {
+                        val favIds = favoriteTracks.map { it.id }.toSet()
+                        val histIds = history.map { it.id }.toSet()
+                        val mostIds = mostPlayed.map { it.id }.toSet()
+                        val candidates = when {
+                            isSearching -> searchResults
+                            selectedTrackIds.isNotEmpty() && selectedTrackIds.all { it in favIds } -> favoriteTracks
+                            selectedTrackIds.isNotEmpty() && selectedTrackIds.all { it in histIds } -> history
+                            selectedTrackIds.isNotEmpty() && selectedTrackIds.all { it in mostIds } -> mostPlayed
+                            else -> visible
+                        }
+                        selectedTrackIds = candidates.map { it.id }.toSet()
                     },
                     onPlayNext = {
                         vm.playNextAll(selectedTracks)
@@ -1229,6 +1273,12 @@ fun TolereApp(
                         } catch (_: Exception) {}
                         showSelectionActions = false
                     },
+                    onShowInfo = if (selectedTracks.size == 1) {
+                        {
+                            showSelectionActions = false
+                            selectionInfoTrack = selectedTracks.first()
+                        }
+                    } else null,
                     onEditTags = {
                         showSelectionActions = false
                         if (selectedTracks.size == 1) {
@@ -1301,9 +1351,13 @@ fun TolereApp(
 
 
             if (showDeleteConfirm && selectedTrackIds.isNotEmpty()) {
-                val pool = if (isSearching) searchResults else visible
+                val pool = remember(isSearching, searchResults, visible, favoriteTracks, history, mostPlayed, tracks) {
+                    if (isSearching) searchResults
+                    else (visible + favoriteTracks + history + mostPlayed + tracks).distinctBy { it.id }
+                }
                 val tracksToDelete = remember(selectedTrackIds, pool) {
-                    pool.filter { it.id in selectedTrackIds }
+                    val byId = pool.associateBy { it.id }
+                    selectedTrackIds.mapNotNull { byId[it] }
                 }
                 val count = selectedTrackIds.size
                 AlertDialog(
@@ -1329,6 +1383,16 @@ fun TolereApp(
                             Text("Cancelar")
                         }
                     }
+                )
+            }
+
+            // Informações técnicas da faixa selecionada (menu de multi-seleção)
+            selectionInfoTrack?.let { infoTrack ->
+                TechDetailsDialog(
+                    track = infoTrack,
+                    onDismiss = { selectionInfoTrack = null },
+                    menuBgColor = menuBgColor,
+                    playCount = vm.playCountOf(infoTrack.id)
                 )
             }
 
@@ -1397,6 +1461,11 @@ internal fun ArtImage(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(10.dp)
 ) {
+    val model: Any? = when {
+        path.isNullOrBlank() -> null
+        path.startsWith("http://") || path.startsWith("https://") -> path
+        else -> File(path).takeIf { it.exists() }
+    }
     Box(
         modifier = modifier
             .size(size)
@@ -1404,9 +1473,9 @@ internal fun ArtImage(
             .background(Color.White.copy(alpha = 0.08f)),
         contentAlignment = Alignment.Center
     ) {
-        if (path != null) {
+        if (model != null) {
             AsyncImage(
-                model = File(path),
+                model = model,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -1529,6 +1598,7 @@ private fun SearchResultsPanel(
     onOpenAlbum: (String) -> Unit,
     onOpenGenre: (String) -> Unit
 ) {
+    val searchCtx = LocalContext.current
     val hasGroups = artists.isNotEmpty() || albums.isNotEmpty() || genres.isNotEmpty()
     if (!hasGroups) {
         TrackList(
@@ -1556,6 +1626,9 @@ private fun SearchResultsPanel(
                 )
             }
             items(artists.take(20)) { a ->
+                val metaKey = ArtistMetaStore.artistKey(a.name)
+                val metaImg = ArtistMetaStore.load(searchCtx, metaKey)?.displayImage
+                val art = metaImg ?: a.artPath
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -1563,7 +1636,7 @@ private fun SearchResultsPanel(
                         .padding(horizontal = 20.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    ArtImage(path = a.artPath, size = 48.dp, shape = CircleShape)
+                    ArtImage(path = art, size = 48.dp, shape = CircleShape)
                     Column(Modifier.weight(1f).padding(start = 14.dp)) {
                         Text(a.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
@@ -2250,11 +2323,13 @@ private fun SelectionActionsMenu(
     backdrop: GraphicsLayer,
     onDismiss: () -> Unit,
     onClearSelection: () -> Unit,
+    onSelectAll: () -> Unit = {},
     onPlayNext: () -> Unit,
     onPlayLast: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onFavorite: () -> Unit,
     onShare: () -> Unit = {},
+    onShowInfo: (() -> Unit)? = null,
     onEditTags: (() -> Unit)? = null,
     onRenameBatch: (() -> Unit)? = null,
     onDelete: () -> Unit
@@ -2284,7 +2359,7 @@ private fun SelectionActionsMenu(
                     shape = RoundedCornerShape(28.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 420.dp)
+                        .heightIn(max = 460.dp)
                 ) {
                     Column(
                         Modifier
@@ -2300,11 +2375,15 @@ private fun SelectionActionsMenu(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        MenuRow("Marcar todas", onSelectAll)
                         MenuRow("Reproduzir a seguir", onPlayNext)
                         MenuRow("Reproduzir no final", onPlayLast)
                         MenuRow("Adicionar a uma Playlist", onAddToPlaylist)
                         MenuRow("Favoritar", onFavorite)
                         MenuRow("Compartilhar", onShare)
+                        if (count == 1 && onShowInfo != null) {
+                            MenuRow("Informações", onShowInfo)
+                        }
                         if (onEditTags != null) {
                             MenuRow(
                                 if (count == 1) "Editar tags" else "Editar tags em lote",
@@ -2705,7 +2784,7 @@ private fun ArtistDetailScreen(
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(220.dp)
+                        .aspectRatio(1f)
                         .background(Color.White.copy(0.06f))
                         .combinedClickable(
                             onClick = { },
@@ -3706,11 +3785,15 @@ private fun LysPlaceHome(
     onReorderPlaylists: (List<String>) -> Unit = {},
     playCountOf: (String) -> Int = { 0 },
     appColors: AppColors,
+    homeButtonFontPath: String? = null,
+    homeButtonColor: Int = 0xFFFFFFFF.toInt(),
     selectedIds: Set<String> = emptySet(),
     selectionMode: Boolean = false,
     onTrackClick: (List<Track>, Int, Track) -> Unit = { list, idx, _ -> onPlayTracks(list, idx) },
     onTrackLongClick: (Track) -> Unit = {}
 ) {
+    val homeFontFamily = rememberFontFamily(homeButtonFontPath)
+    val homeTextColor = Color(homeButtonColor)
     var section by remember { mutableStateOf<String?>(null) }
     Box(
         Modifier
@@ -3751,6 +3834,8 @@ private fun LysPlaceHome(
                             labelAlignment = androidx.compose.ui.BiasAlignment(-0.32f, -0.30f),
                             labelRotation = -30f,
                             fontSize = 20.sp,
+                            textColor = homeTextColor,
+                            fontFamily = homeFontFamily,
                             modifier = Modifier.fillMaxSize()
                         )
                         HomeLiquidGlassButton(
@@ -3763,6 +3848,8 @@ private fun LysPlaceHome(
                             labelAlignment = androidx.compose.ui.BiasAlignment(0.28f, 0.42f),
                             labelRotation = -26f,
                             fontSize = 20.sp,
+                            textColor = homeTextColor,
+                            fontFamily = homeFontFamily,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -3781,6 +3868,8 @@ private fun LysPlaceHome(
                             iconAlignment = Alignment.TopEnd,
                             labelAlignment = androidx.compose.ui.BiasAlignment(0f, -0.64f),
                             fontSize = 20.sp,
+                            textColor = homeTextColor,
+                            fontFamily = homeFontFamily,
                             modifier = Modifier.fillMaxSize()
                         )
                         HomeLiquidGlassButton(
@@ -3792,6 +3881,8 @@ private fun LysPlaceHome(
                             iconAlignment = Alignment.BottomStart,
                             labelAlignment = androidx.compose.ui.BiasAlignment(0f, 0.10f),
                             fontSize = 20.sp,
+                            textColor = homeTextColor,
+                            fontFamily = homeFontFamily,
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .fillMaxWidth(0.92f)
@@ -3905,15 +3996,17 @@ private fun LysPlaceHome(
                         if (favorites.isEmpty()) {
                             Text("Nenhuma favorita ainda.", color = Color.White.copy(0.6f))
                         } else {
+                            // Lista selecionável (toque longo inicia seleção; toque alterna)
                             TrackList(
                                 tracks = favorites,
                                 nowPlayingId = null,
                                 bottomPadding = 0.dp,
                                 showTrackNumbers = false,
-                                selectedIds = emptySet(),
-                                selectionMode = false,
-                                onClick = { index, _ -> onPlayTracks(favorites, index) },
-                                onLongClick = {}
+                                selectedIds = selectedIds,
+                                selectionMode = selectionMode,
+                                onClick = { index, track -> onTrackClick(favorites, index, track) },
+                                onLongClick = onTrackLongClick,
+                                showAlphabetScroller = false
                             )
                         }
                     }
@@ -3949,7 +4042,9 @@ private fun HomeLiquidGlassButton(
     iconAlignment: Alignment = Alignment.Center,
     labelAlignment: Alignment = Alignment.Center,
     labelRotation: Float = 0f,
-    fontSize: androidx.compose.ui.unit.TextUnit = 16.sp
+    fontSize: androidx.compose.ui.unit.TextUnit = 16.sp,
+    textColor: Color = Color.White,
+    fontFamily: androidx.compose.ui.text.font.FontFamily? = null
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -4006,9 +4101,10 @@ private fun HomeLiquidGlassButton(
         // Rótulo central
         Text(
             label,
-            color = Color.White,
+            color = textColor,
             fontWeight = FontWeight.Bold,
             fontSize = fontSize,
+            fontFamily = fontFamily,
             textAlign = TextAlign.Center,
             lineHeight = fontSize * 1.2f,
             modifier = Modifier

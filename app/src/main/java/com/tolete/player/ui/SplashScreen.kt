@@ -6,6 +6,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +20,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -58,6 +62,7 @@ private val SplashTextColors = listOf(
  * Splash ~5s com som opcional.
  * Ícone e texto ocultos no início; revelação aos 2,10s até o fim.
  * Cor e fonte do título são escolhidas aleatoriamente a cada abertura.
+ * Toque na tela pula a animação.
  */
 @Composable
 fun SplashScreen(
@@ -67,11 +72,25 @@ fun SplashScreen(
     val alpha = remember { Animatable(0f) }
     val scale = remember { Animatable(0.72f) }
     val context = LocalContext.current
+    var finished by remember { mutableStateOf(false) }
 
+    fun finishSplash() {
+        if (finished) return
+        finished = true
+        onFinished()
+    }
+
+    // Rotação entre fontes carregadas pelo usuário (filesDir/fonts); fallback sistema
     val splashFont = remember {
-        val pool = BuiltInFonts.SPLASH_POOL
-        val chosen = pool[Random.nextInt(pool.size)]
-        FontFamily(Font(chosen.resId))
+        val pool = BuiltInFonts.splashPool(context)
+        if (pool.isNotEmpty()) {
+            val chosen = pool[Random.nextInt(pool.size)]
+            try {
+                FontFamily(Font(chosen))
+            } catch (_: Exception) {
+                null
+            }
+        } else null
     }
     val splashColor = remember {
         SplashTextColors[Random.nextInt(SplashTextColors.size)]
@@ -97,17 +116,22 @@ fun SplashScreen(
 
     LaunchedEffect(Unit) {
         delay(2100)
+        if (finished) return@LaunchedEffect
         alpha.animateTo(1f, tween(700, easing = FastOutSlowInEasing))
+        if (finished) return@LaunchedEffect
         scale.animateTo(1f, tween(700, easing = FastOutSlowInEasing))
+        if (finished) return@LaunchedEffect
         delay(2200)
+        if (finished) return@LaunchedEffect
         alpha.animateTo(0f, tween(350))
-        onFinished()
+        finishSplash()
     }
 
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .clickable { finishSplash() },
         contentAlignment = Alignment.Center
     ) {
         Image(

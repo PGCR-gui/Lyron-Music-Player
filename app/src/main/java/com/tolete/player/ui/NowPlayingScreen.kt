@@ -13,6 +13,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -129,6 +135,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -138,6 +145,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.Font
+import androidx.compose.runtime.DisposableEffect
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import android.app.Activity
 import coil.compose.AsyncImage
 import coil.ImageLoader
 import coil.decode.GifDecoder
@@ -153,6 +165,75 @@ import java.util.Locale
 
 /** Cor de texto em menus com fundo claro (glass). */
 private val MenuDarkText = Color(0xFF1A1A1A)
+
+/**
+ * Até 2 linhas de letra; reduz a fonte automaticamente até o texto caber
+ * na largura disponível (quebra suave na 2ª linha se necessário).
+ */
+@Composable
+private fun AutoSizeSingleLineLyric(
+    text: String,
+    baseFontSize: androidx.compose.ui.unit.TextUnit,
+    fontFamily: androidx.compose.ui.text.font.FontFamily?,
+    color: Color,
+    modifier: Modifier = Modifier,
+    minFontSizeSp: Float = 11f,
+    maxLines: Int = 2
+) {
+    val textMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
+    BoxWithConstraints(modifier = modifier) {
+        val maxWidthPx = constraints.maxWidth
+        // Busca binária: maior fonte em que o texto cabe em até [maxLines] linhas.
+        val fontSizeSp = remember(text, baseFontSize, maxWidthPx, fontFamily, maxLines) {
+            if (text.isEmpty() || maxWidthPx <= 0) {
+                baseFontSize.value.coerceAtLeast(minFontSizeSp)
+            } else {
+                var lo = minFontSizeSp
+                var hi = baseFontSize.value.coerceAtLeast(minFontSizeSp)
+                var best = lo
+                repeat(14) {
+                    val mid = (lo + hi) / 2f
+                    val layout = textMeasurer.measure(
+                        text = androidx.compose.ui.text.AnnotatedString(text),
+                        style = androidx.compose.ui.text.TextStyle(
+                            fontSize = mid.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontFamily = fontFamily,
+                            textAlign = TextAlign.Center
+                        ),
+                        constraints = androidx.compose.ui.unit.Constraints(
+                            maxWidth = maxWidthPx
+                        ),
+                        maxLines = maxLines,
+                        softWrap = true,
+                        overflow = TextOverflow.Clip
+                    )
+                    val fits = !layout.hasVisualOverflow && layout.lineCount <= maxLines
+                    if (fits) {
+                        best = mid
+                        lo = mid
+                    } else {
+                        hi = mid
+                    }
+                }
+                best
+            }
+        }
+        Text(
+            text = text,
+            textAlign = TextAlign.Center,
+            fontSize = fontSizeSp.sp,
+            fontWeight = FontWeight.Medium,
+            color = color,
+            maxLines = maxLines,
+            softWrap = true,
+            overflow = TextOverflow.Ellipsis,
+            fontFamily = fontFamily,
+            lineHeight = (fontSizeSp * 1.25f).sp,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
 
 private fun formatSampleRate(hz: Int): String =
     if (hz <= 0) "—"
@@ -237,6 +318,8 @@ fun NowPlayingScreen(
     onRemoveFromQueue: (Int) -> Unit = {},
     onToggleFavoriteTrack: (Track) -> Unit = {},
     onDeleteTrack: (Track) -> Unit = {},
+    onPlayNextFromQueue: (Track) -> Unit = {},
+    isFavoriteCheck: (String) -> Boolean = { false },
     onToggleFavorite: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onEditTags: () -> Unit = {},
@@ -246,7 +329,7 @@ fun NowPlayingScreen(
     onOpenAlbum: () -> Unit,
     loadLyrics: suspend () -> List<LyricLine>,
     searchLyrics: suspend (String, String) -> List<LrcLibClient.SearchResult> = { _, _ -> emptyList() },
-    embedLyricsResult: suspend (LrcLibClient.SearchResult) -> List<LyricLine> = { emptyList() },
+    embedLyricsResult: suspend (LrcLibClient.SearchResult, com.tolete.player.data.LyricsEmbedder.Target) -> List<LyricLine> = { _, _ -> emptyList() },
     appColors: AppColors = DefaultAppColors,
     milkPresets: List<String> = emptyList(),
     onDeletePreset: (String) -> Unit = {},
@@ -261,10 +344,26 @@ fun NowPlayingScreen(
     lyricsBorderWidth: Float = 0f,
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
     playCount: Int = 0,
-    lastPlayedAt: Long = 0L
+    lastPlayedAt: Long = 0L,
+    seekBarStyle: SeekBarStyle = SeekBarStyle.Standard
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
+
+    // Modo imersivo: esconde barra de status e de navegação enquanto o Now Playing estiver aberto
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = (view.context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        val prevBehavior = controller?.systemBarsBehavior
+        controller?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            if (prevBehavior != null) controller.systemBarsBehavior = prevBehavior
+        }
+    }
 
     // Visualizador .milk: liga ao tocar na capa, desliga ao tocar no visualizador
     var showVisualizer by remember { mutableStateOf(false) }
@@ -494,7 +593,7 @@ fun NowPlayingScreen(
                                 val linesToShare = if (lyric != null) {
                                     listOf(lyric)
                                 } else {
-                                    lyrics.filter { it.text.isNotBlank() }.take(5).map { it.text }
+                                    lyrics.filter { it.text.isNotBlank() }.take(8).map { it.text }
                                 }
                                 if (linesToShare.isEmpty()) {
                                     android.widget.Toast.makeText(
@@ -790,7 +889,7 @@ fun NowPlayingScreen(
                         )
                     }
 
-                    // Letra (sincronizada ou não) — toque abre tela cheia
+                    // Letra — até 2 linhas; fonte reduz automaticamente se não couber
                     Box(
                         Modifier
                             .fillMaxWidth()
@@ -816,34 +915,27 @@ fun NowPlayingScreen(
                                 label = "lyricLine"
                             ) { line ->
                                 if (line.isNotEmpty()) {
-                                    Text(
-                                        line,
-                                        textAlign = TextAlign.Center,
-                                        fontSize = 17.sp,
-                                        lineHeight = 24.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = Color.White.copy(alpha = 0.95f),
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
+                                    AutoSizeSingleLineLyric(
+                                        text = line,
+                                        baseFontSize = lyricsFontSize.sp,
                                         fontFamily = lyricsFont,
+                                        color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
                                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                     )
                                 }
                             }
                         } else if (lyrics.isNotEmpty()) {
-                            // Letras sem timestamps: mostra as primeiras linhas
-                            Text(
-                                lyrics.take(2).joinToString("\n") { it.text },
-                                textAlign = TextAlign.Center,
-                                fontSize = 17.sp,
-                                lineHeight = 24.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = Color.White.copy(alpha = 0.95f),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                fontFamily = lyricsFont,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                            )
+                            // Sem timestamps: trecho atual (até 2 linhas na tela)
+                            val plain = lyrics.firstOrNull { it.text.isNotBlank() }?.text.orEmpty()
+                            if (plain.isNotEmpty()) {
+                                AutoSizeSingleLineLyric(
+                                    text = plain,
+                                    baseFontSize = lyricsFontSize.sp,
+                                    fontFamily = lyricsFont,
+                                    color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -944,6 +1036,8 @@ fun NowPlayingScreen(
             SeekBar(
                 fraction = fraction,
                 accentColor = appColors.accent,
+                style = seekBarStyle,
+                isPlaying = isPlaying,
                 onDrag = { dragFraction = it },
                 onDragEnd = { f ->
                     val target = (f * duration).toLong()
@@ -954,106 +1048,101 @@ fun NowPlayingScreen(
                 onDragCancel = { dragFraction = null }
             )
 
+            // Tempos
             Row(
-                Modifier.fillMaxWidth().height(80.dp).padding(bottom = 8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(formatDuration(shownPosition), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
+                Text(formatDuration(duration), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
+            }
+            // Linha 1: previous / play / next
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.width(96.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(formatDuration(shownPosition), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
-                    Row(
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = onToggleShuffle, modifier = Modifier.size(48.dp)) {
-                            Icon(
-                                painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
-                                contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
-                                tint = Color.Unspecified,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                        IconButton(onClick = onCycleRepeat, modifier = Modifier.size(48.dp)) {
-                            val repeatIcon = when (repeatMode) {
-                                Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
-                                Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
-                                else -> R.drawable.ic_repeat_off
-                            }
-                            Icon(
-                                painter = painterResource(repeatIcon),
-                                contentDescription = when (repeatMode) {
-                                    Player.REPEAT_MODE_ONE -> "Repetir música atual"
-                                    Player.REPEAT_MODE_ALL -> "Repetir fila"
-                                    else -> "Repetição desligada"
-                                },
-                                tint = Color.Unspecified,
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
-                    }
+                IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(56.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_previous),
+                        contentDescription = "Anterior",
+                        tint = Color.White,
+                        modifier = Modifier.size(38.dp)
+                    )
                 }
-
-                Row(
-                    Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
+                Box(
+                    Modifier
+                        .padding(horizontal = 10.dp)
+                        .size(68.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable(onClick = onToggle),
+                    contentAlignment = Alignment.Center
                 ) {
-                    IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(52.dp)) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_previous),
-                            contentDescription = "Anterior",
-                            tint = Color.White,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                    Box(
-                        Modifier
-                            .padding(horizontal = 6.dp)
-                            .size(64.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                            .clickable(onClick = onToggle),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
-                            contentDescription = if (isPlaying) "Pausar" else "Tocar",
-                            tint = Color.Unspecified,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                    IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(52.dp)) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_next),
-                            contentDescription = "Próxima",
-                            tint = Color.White,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
+                    Icon(
+                        painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                        contentDescription = if (isPlaying) "Pausar" else "Tocar",
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(38.dp)
+                    )
                 }
-
-                Column(Modifier.width(96.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(formatDuration(duration), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
-                    Row(
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(48.dp)) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_equalizer),
-                                contentDescription = "Equalizador",
-                                modifier = Modifier.size(28.dp),
-                                tint = Color.White.copy(alpha = 0.9f)
-                            )
-                        }
-                        IconButton(onClick = { showQueue = true }, modifier = Modifier.size(48.dp)) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_queue),
-                                contentDescription = "Fila",
-                                tint = Color.White.copy(alpha = 0.9f),
-                                modifier = Modifier.size(28.dp)
-                            )
-                        }
+                IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(56.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_next),
+                        contentDescription = "Próxima",
+                        tint = Color.White,
+                        modifier = Modifier.size(38.dp)
+                    )
+                }
+            }
+            // Linha 2: shuffle, repeat | equalizer, queue
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp, top = 2.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
+                        contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                IconButton(onClick = onCycleRepeat, modifier = Modifier.size(48.dp)) {
+                    val repeatIcon = when (repeatMode) {
+                        Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
+                        Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
+                        else -> R.drawable.ic_repeat_off
                     }
+                    Icon(
+                        painter = painterResource(repeatIcon),
+                        contentDescription = when (repeatMode) {
+                            Player.REPEAT_MODE_ONE -> "Repetir música atual"
+                            Player.REPEAT_MODE_ALL -> "Repetir fila"
+                            else -> "Repetição desligada"
+                        },
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_equalizer),
+                        contentDescription = "Equalizador",
+                        modifier = Modifier.size(28.dp),
+                        tint = Color.White.copy(alpha = 0.9f)
+                    )
+                }
+                IconButton(onClick = { showQueue = true }, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_queue),
+                        contentDescription = "Fila",
+                        tint = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }
@@ -1096,6 +1185,8 @@ fun NowPlayingScreen(
                 onRemoveFromQueue = onRemoveFromQueue,
                 onToggleFavorite = onToggleFavoriteTrack,
                 onDelete = { t -> pendingDeleteTrack = t },
+                onPlayNext = onPlayNextFromQueue,
+                isFavorite = isFavoriteCheck,
                 menuBgColor = menuBgColor
             )
         }
@@ -1155,19 +1246,79 @@ fun NowPlayingScreen(
         }
 
         if (showLyricsSearch) {
+            var pendingLyricResult by remember { mutableStateOf<LrcLibClient.SearchResult?>(null) }
             LyricsSearchDialog(
                 initialTitle = track.title,
                 initialArtist = track.artist,
-                onDismiss = { showLyricsSearch = false },
+                onDismiss = {
+                    showLyricsSearch = false
+                    pendingLyricResult = null
+                },
                 onSearch = { t, a -> searchLyrics(t, a) },
                 onPick = { result ->
-                    scope.launch {
-                        val lines = embedLyricsResult(result)
-                        if (lines.isNotEmpty()) lyrics = lines
-                        showLyricsSearch = false
-                    }
+                    pendingLyricResult = result
                 }
             )
+            pendingLyricResult?.let { result ->
+                AlertDialog(
+                    onDismissRequest = { pendingLyricResult = null },
+                    title = { Text("Salvar letra") },
+                    text = {
+                        Text(
+                            "Como deseja salvar a letra encontrada?\n\n" +
+                                "• Arquivo .lrc — ao lado do áudio (recomendado)\n" +
+                                "• Embutir no arquivo — grava nas tags do áudio"
+                        )
+                    },
+                    confirmButton = {
+                        Column {
+                            TextButton(
+                                onClick = {
+                                    val r = result
+                                    pendingLyricResult = null
+                                    scope.launch {
+                                        val lines = embedLyricsResult(
+                                            r,
+                                            com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE
+                                        )
+                                        if (lines.isNotEmpty()) lyrics = lines
+                                        showLyricsSearch = false
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Letra salva em .lrc",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            ) { Text("Salvar em .lrc") }
+                            TextButton(
+                                onClick = {
+                                    val r = result
+                                    pendingLyricResult = null
+                                    scope.launch {
+                                        val lines = embedLyricsResult(
+                                            r,
+                                            com.tolete.player.data.LyricsEmbedder.Target.EMBEDDED
+                                        )
+                                        if (lines.isNotEmpty()) lyrics = lines
+                                        showLyricsSearch = false
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Letra embutida no arquivo",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            ) { Text("Embutir no arquivo") }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingLyricResult = null }) {
+                            Text("Cancelar")
+                        }
+                    }
+                )
+            }
         }
         if (showPresetPicker) {
             MilkPresetPickerDialog(
@@ -1343,30 +1494,84 @@ internal fun HdBadge(modifier: Modifier = Modifier) {
     )
 }
 
+/** Estilos da barra de progresso (seekbar) do Now Playing. */
+enum class SeekBarStyle {
+    Normal,    // barra fina, thumb discreto
+    Standard,  // padrão atual (gradiente + thumb circular)
+    Wavy,      // onda senoidal no progresso
+    Thick,     // trilha mais grossa, thumb maior
+    Slim,      // trilha bem fina
+    Liquid     // bolha/elipse no ponto de progresso (efeito “líquido”)
+}
+
 @Composable
 private fun SeekBar(
     fraction: Float,
     accentColor: Color = Color.White,
+    style: SeekBarStyle = SeekBarStyle.Standard,
+    isPlaying: Boolean = true,
     onDrag: (Float) -> Unit,
     onDragEnd: (Float) -> Unit,
     onDragCancel: () -> Unit
 ) {
     var barWidth by remember { mutableFloatStateOf(1f) }
-    // Mantém o último valor arrastado localmente para não depender de recomposição
-    // (o parâmetro `fraction` pode estar defasado no momento do onDragEnd).
     var lastDragFraction by remember { mutableFloatStateOf(fraction) }
+    var dragging by remember { mutableStateOf(false) }
     val density = LocalDensity.current.density
-    // Sem animateFloatAsState: anima a cada tick de posição e custa GPU/CPU à toa.
+    val trackHeight = when (style) {
+        SeekBarStyle.Thick -> 10.dp
+        SeekBarStyle.Slim, SeekBarStyle.Normal -> 3.dp
+        SeekBarStyle.Wavy -> 8.dp
+        SeekBarStyle.Liquid -> 6.dp
+        SeekBarStyle.Standard -> 5.dp
+    }
+    val thumbSize = when (style) {
+        SeekBarStyle.Thick -> 18.dp
+        SeekBarStyle.Slim, SeekBarStyle.Normal -> 10.dp
+        SeekBarStyle.Liquid -> 16.dp
+        SeekBarStyle.Wavy -> 12.dp
+        SeekBarStyle.Standard -> 14.dp
+    }
+    val boxHeight = when (style) {
+        SeekBarStyle.Thick, SeekBarStyle.Liquid, SeekBarStyle.Wavy -> 32.dp
+        else -> 28.dp
+    }
+
+    // ── Animações ────────────────────────────────────────────────────────────
+    // “Toque”: mola com leve overshoot → o thumb Liquid estica/encolhe como gota.
+    val press by animateFloatAsState(
+        targetValue = if (dragging) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow),
+        label = "seekPress"
+    )
+    // Wavy: a onda achata ao arrastar (ou pausar) e volta a crescer ao soltar.
+    val waveAmp by animateFloatAsState(
+        targetValue = if (dragging || !isPlaying) 0f else 1f,
+        animationSpec = tween(durationMillis = 350, easing = FastOutSlowInEasing),
+        label = "waveAmp"
+    )
+    // Wavy: a fase da onda corre continuamente (a onda “flui” para a direita).
+    val wavePhase: androidx.compose.runtime.State<Float>? =
+        if (style == SeekBarStyle.Wavy) {
+            rememberInfiniteTransition(label = "wave").animateFloat(
+                initialValue = 0f,
+                targetValue = (2.0 * Math.PI).toFloat(),
+                animationSpec = infiniteRepeatable(tween(durationMillis = 1400, easing = LinearEasing)),
+                label = "wavePhase"
+            )
+        } else null
+
     Box(
         Modifier
             .fillMaxWidth()
-            .height(28.dp)
+            .height(boxHeight)
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { o ->
                         barWidth = size.width.toFloat().coerceAtLeast(1f)
                         val f = (o.x / barWidth).coerceIn(0f, 1f)
                         lastDragFraction = f
+                        dragging = true
                         onDrag(f)
                     },
                     onDrag = { change, _ ->
@@ -1375,8 +1580,14 @@ private fun SeekBar(
                         lastDragFraction = f
                         onDrag(f)
                     },
-                    onDragEnd = { onDragEnd(lastDragFraction) },
-                    onDragCancel = onDragCancel
+                    onDragEnd = {
+                        dragging = false
+                        onDragEnd(lastDragFraction)
+                    },
+                    onDragCancel = {
+                        dragging = false
+                        onDragCancel()
+                    }
                 )
             }
             .pointerInput(Unit) {
@@ -1389,36 +1600,170 @@ private fun SeekBar(
             },
         contentAlignment = Alignment.Center
     ) {
-        Canvas(Modifier.fillMaxWidth().height(5.dp)) {
+        Canvas(Modifier.fillMaxWidth().height(trackHeight)) {
             barWidth = size.width
-            val r = CornerRadius(2.5.dp.toPx())
-            drawRoundRect(Color.White.copy(0.22f), cornerRadius = r)
-            val progW = size.width * fraction
-            if (progW > 0f) {
-                drawRoundRect(
-                    brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                        listOf(accentColor.copy(alpha = 0.7f), accentColor)
-                    ),
-                    size = Size(progW, size.height),
-                    cornerRadius = r
-                )
+            val h = size.height
+            val frac = fraction.coerceIn(0f, 1f)
+            val progW = size.width * frac
+
+            when (style) {
+                SeekBarStyle.Wavy -> {
+                    val strokeW = 3.dp.toPx()
+                    val amp = 2.5.dp.toPx() * waveAmp
+                    val wavelength = 16.dp.toPx()
+                    val k = (2.0 * Math.PI).toFloat() / wavelength
+                    val phase = wavePhase?.value ?: 0f
+                    val mid = h / 2f
+
+                    // Trilha restante: linha reta e fina (como no vídeo)
+                    drawLine(
+                        color = Color.White.copy(0.22f),
+                        start = androidx.compose.ui.geometry.Offset(progW, mid),
+                        end = androidx.compose.ui.geometry.Offset(size.width, mid),
+                        strokeWidth = strokeW,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                    // Progresso: onda que corre
+                    if (progW > 1f) {
+                        val path = androidx.compose.ui.graphics.Path()
+                        path.moveTo(0f, mid + amp * kotlin.math.sin(-phase))
+                        var x = 3f
+                        while (x < progW) {
+                            path.lineTo(x, mid + amp * kotlin.math.sin(k * x - phase))
+                            x += 3f
+                        }
+                        path.lineTo(progW, mid + amp * kotlin.math.sin(k * progW - phase))
+                        drawPath(
+                            path = path,
+                            color = accentColor,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = strokeW,
+                                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                                join = androidx.compose.ui.graphics.StrokeJoin.Round
+                            )
+                        )
+                    }
+                }
+                SeekBarStyle.Liquid -> {
+                    val r = CornerRadius(h / 2f, h / 2f)
+                    val restW = thumbSize.toPx() * 1.75f
+                    val cx = restW / 2f + frac * (size.width - restW)
+                    drawRoundRect(Color.White.copy(0.18f), cornerRadius = r)
+                    if (cx > 0f) {
+                        drawRoundRect(
+                            brush = Brush.horizontalGradient(
+                                listOf(accentColor.copy(0.55f), accentColor)
+                            ),
+                            size = Size(cx, h),
+                            cornerRadius = r
+                        )
+                    }
+                }
+                else -> {
+                    val r = CornerRadius(h / 2f, h / 2f)
+                    drawRoundRect(Color.White.copy(0.22f), cornerRadius = r)
+                    if (progW > 0f) {
+                        drawRoundRect(
+                            brush = Brush.horizontalGradient(
+                                listOf(accentColor.copy(alpha = 0.7f), accentColor)
+                            ),
+                            size = Size(progW, h),
+                            cornerRadius = r
+                        )
+                    }
+                }
             }
         }
-        Box(
-            Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.CenterStart
-        ) {
-            Box(
-                Modifier
-                    .offset(x = ((fraction * (barWidth - 14f * density)) / density).dp)
-                    .size(14.dp)
-                    .clip(CircleShape)
-                    .background(accentColor)
-            )
+
+        when (style) {
+            SeekBarStyle.Liquid -> {
+                // Thumb: pílula branca em repouso → “lente de vidro” maior ao arrastar.
+                Canvas(Modifier.fillMaxSize()) {
+                    val frac = fraction.coerceIn(0f, 1f)
+                    val restH = thumbSize.toPx()
+                    val restW = restH * 1.75f
+                    val p = press
+                    val w = (restW + (restW * 2.6f - restW) * p).coerceAtLeast(restH)
+                    val hh = (restH + (restH * 1.7f - restH) * p).coerceAtLeast(restH * 0.6f)
+                    val bw = size.width
+                    val cxRest = restW / 2f + frac * (bw - restW)
+                    val cx = cxRest.coerceIn(w / 2f, bw - w / 2f)
+                    val cy = size.height / 2f
+                    val topLeft = androidx.compose.ui.geometry.Offset(cx - w / 2f, cy - hh / 2f)
+                    val sz = Size(w, hh)
+                    val cr = CornerRadius(hh / 2f, hh / 2f)
+                    val glass = p.coerceIn(0f, 1f)
+
+                    // Preenchimento: branco sólido → quase transparente
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 1f - 0.88f * glass),
+                        topLeft = topLeft, size = sz, cornerRadius = cr
+                    )
+                    if (glass > 0.01f) {
+                        // Borda com franja laranja/azul (refração)
+                        drawRoundRect(
+                            brush = Brush.linearGradient(
+                                colors = listOf(Color(0xFFFFB27A), Color(0xFF7FA6FF)),
+                                start = topLeft,
+                                end = androidx.compose.ui.geometry.Offset(topLeft.x + w, topLeft.y + hh)
+                            ),
+                            topLeft = topLeft, size = sz, cornerRadius = cr,
+                            alpha = 0.75f * glass,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(1.2.dp.toPx())
+                        )
+                        // Brilho interno discreto
+                        val inset = 2.dp.toPx()
+                        drawRoundRect(
+                            color = Color.White.copy(alpha = 0.28f * glass),
+                            topLeft = androidx.compose.ui.geometry.Offset(topLeft.x + inset, topLeft.y + inset),
+                            size = Size((w - inset * 2f).coerceAtLeast(1f), (hh - inset * 2f).coerceAtLeast(1f)),
+                            cornerRadius = CornerRadius((hh - inset * 2f) / 2f, (hh - inset * 2f) / 2f),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(0.8.dp.toPx())
+                        )
+                    }
+                }
+            }
+            SeekBarStyle.Wavy -> {
+                // Thumb em barra vertical; levemente maior ao arrastar.
+                val thumbW = 4.dp
+                val thumbH = 22.dp
+                Box(
+                    Modifier
+                        // Box pai centraliza o thumb; deslocamos do centro até o ponto de progresso
+                        .offset {
+                            androidx.compose.ui.unit.IntOffset(
+                                ((fraction.coerceIn(0f, 1f) - 0.5f) * barWidth).toInt(),
+                                0
+                            )
+                        }
+                        .graphicsLayer {
+                            scaleY = 1f + 0.18f * press.coerceIn(0f, 1f)
+                        }
+                        .size(width = thumbW, height = thumbH)
+                        .clip(CircleShape)
+                        .background(accentColor)
+                )
+            }
+            else -> {
+                val thumbPx = with(LocalDensity.current) { thumbSize.toPx() }
+                Box(
+                    Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Box(
+                        Modifier
+                            .offset(
+                                x = ((fraction.coerceIn(0f, 1f) * (barWidth - thumbPx)) / density).dp
+                            )
+                            .size(thumbSize)
+                            .clip(CircleShape)
+                            .background(accentColor)
+                    )
+                }
+            }
         }
     }
 }
-
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1432,6 +1777,8 @@ internal fun QueueSheet(
     onRemoveFromQueue: (Int) -> Unit = {},
     onToggleFavorite: (Track) -> Unit = {},
     onDelete: (Track) -> Unit = {},
+    onPlayNext: (Track) -> Unit = {},
+    isFavorite: (String) -> Boolean = { false },
     menuBgColor: Int = 0xE8F2F2F7.toInt()
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1447,6 +1794,9 @@ internal fun QueueSheet(
     var dropTargetId by remember { mutableStateOf<String?>(null) }   // linha sobre a qual o item vai ficar
     var dropAfter by remember { mutableStateOf(false) }              // true = indicador abaixo da linha alvo
     var menuForIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val selectionMode = selectedIds.isNotEmpty()
+    var showSelectionMenu by remember { mutableStateOf(false) }
 
     val currentTrack = order.firstOrNull { it.id == currentId } ?: order.firstOrNull()
     var queueSearch by remember { mutableStateOf("") }
@@ -1480,17 +1830,26 @@ internal fun QueueSheet(
                     .background(Color(0xCC0A0A12))
             )
             Column(Modifier.fillMaxSize()) {
-        // Header estilo vídeo: contagem + fechar
+        // Header: contagem + ações de seleção + fechar
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "${order.indexOfFirst { it.id == currentId }.coerceAtLeast(0) + 1} / ${order.size}",
+                if (selectionMode) "${selectedIds.size} selecionada(s)"
+                else "${order.indexOfFirst { it.id == currentId }.coerceAtLeast(0) + 1} / ${order.size}",
                 color = Color.White.copy(0.7f),
                 fontSize = 13.sp,
                 modifier = Modifier.weight(1f)
             )
+            if (selectionMode) {
+                TextButton(onClick = { showSelectionMenu = true }) {
+                    Text("Ações", color = appColors.accent, fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(onClick = { selectedIds = emptySet() }) {
+                    Text("Limpar", color = Color.White.copy(0.75f))
+                }
+            }
             IconButton(onClick = onDismiss) {
                 Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = Color.White)
             }
@@ -1609,6 +1968,7 @@ internal fun QueueSheet(
                 val isDragging = draggingId == track.id
                 val showLineAbove = dropTargetId == track.id && !dropAfter && !isDragging
                 val showLineBelow = dropTargetId == track.id && dropAfter && !isDragging
+                val selected = track.id in selectedIds
                 Box {
                     Row(
                         Modifier
@@ -1624,21 +1984,56 @@ internal fun QueueSheet(
                             }
                             .zIndex(if (isDragging) 1f else 0f)
                             .then(
-                                if (active) Modifier
-                                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                                    .border(1.5.dp, Color(0xFF4ADE80).copy(0.85f), RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF4ADE80).copy(0.12f), RoundedCornerShape(12.dp))
-                                else Modifier
+                                when {
+                                    selected -> Modifier
+                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                        .background(Color.White.copy(0.14f), RoundedCornerShape(12.dp))
+                                    active -> Modifier
+                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                        .border(1.5.dp, Color(0xFF4ADE80).copy(0.85f), RoundedCornerShape(12.dp))
+                                        .background(Color(0xFF4ADE80).copy(0.12f), RoundedCornerShape(12.dp))
+                                    else -> Modifier
+                                }
                             )
-                            .pointerInput(realIndex) {
+                            .pointerInput(realIndex, selectionMode, track.id) {
                                 detectTapGestures(
-                                    onTap = { onSkipTo(realIndex) },
-                                    onLongPress = { menuForIndex = realIndex }
+                                    onTap = {
+                                        if (selectionMode) {
+                                            selectedIds = if (track.id in selectedIds)
+                                                selectedIds - track.id else selectedIds + track.id
+                                        } else {
+                                            onSkipTo(realIndex)
+                                        }
+                                    },
+                                    onLongPress = {
+                                        if (selectionMode) {
+                                            selectedIds = if (track.id in selectedIds)
+                                                selectedIds - track.id else selectedIds + track.id
+                                        } else {
+                                            // inicia seleção + menu individual
+                                            selectedIds = setOf(track.id)
+                                            menuForIndex = realIndex
+                                        }
+                                    }
                                 )
                             }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        if (selectionMode) {
+                            Box(
+                                Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(if (selected) appColors.accent else Color.White.copy(0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (selected) {
+                                    Text("✓", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                }
+                            }
+                            Spacer(Modifier.width(10.dp))
+                        }
                         ArtImage(path = track.artPath, size = 44.dp)
                         Column(Modifier.weight(1f).padding(start = 12.dp)) {
                             Text(
@@ -1657,31 +2052,33 @@ internal fun QueueSheet(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        Icon(
-                            Icons.Rounded.DragHandle,
-                            contentDescription = "Arrastar",
-                            tint = Color.White.copy(0.45f),
-                            modifier = Modifier
-                                .size(28.dp)
-                                .pointerInput(track.id) {
-                                    detectDragGestures(
-                                        onDragStart = {
-                                            draggingId = track.id
-                                            dragOffsetY = 0f
-                                            dropTargetId = null
-                                            updateDropTarget()
-                                            startAutoScroll()
-                                        },
-                                        onDrag = { change, amount ->
-                                            change.consume()
-                                            dragOffsetY += amount.y
-                                            updateDropTarget()
-                                        },
-                                        onDragEnd = { finishDrag() },
-                                        onDragCancel = { stopDrag() }
-                                    )
-                                }
-                        )
+                        if (!selectionMode) {
+                            Icon(
+                                Icons.Rounded.DragHandle,
+                                contentDescription = "Arrastar",
+                                tint = Color.White.copy(0.45f),
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .pointerInput(track.id) {
+                                        detectDragGestures(
+                                            onDragStart = {
+                                                draggingId = track.id
+                                                dragOffsetY = 0f
+                                                dropTargetId = null
+                                                updateDropTarget()
+                                                startAutoScroll()
+                                            },
+                                            onDrag = { change, amount ->
+                                                change.consume()
+                                                dragOffsetY += amount.y
+                                                updateDropTarget()
+                                            },
+                                            onDragEnd = { finishDrag() },
+                                            onDragCancel = { stopDrag() }
+                                        )
+                                    }
+                            )
+                        }
                     }
                     // Indicador de onde a música vai ficar ao soltar
                     if (showLineAbove) {
@@ -1707,7 +2104,7 @@ internal fun QueueSheet(
                         )
                     }
                     DropdownMenu(
-                        expanded = menuForIndex == realIndex,
+                        expanded = menuForIndex == realIndex && !showSelectionMenu,
                         onDismissRequest = { menuForIndex = null },
                         containerColor = Color(menuBgColor),
                         shape = RoundedCornerShape(16.dp),
@@ -1720,27 +2117,35 @@ internal fun QueueSheet(
                                 RoundedCornerShape(16.dp)
                             )
                     ) {
+                        val fav = isFavorite(track.id)
+                        DropdownMenuItem(
+                            text = { Text("Reproduzir a seguir", color = MenuDarkText) },
+                            onClick = {
+                                menuForIndex = null
+                                selectedIds = emptySet()
+                                onPlayNext(track)
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Remover da fila", color = MenuDarkText) },
                             leadingIcon = {
-                                Icon(
-                                    Icons.Rounded.Close,
-                                    contentDescription = null,
-                                    tint = MenuDarkText
-                                )
+                                Icon(Icons.Rounded.Close, contentDescription = null, tint = MenuDarkText)
                             },
                             onClick = {
                                 menuForIndex = null
+                                selectedIds = emptySet()
                                 onRemoveFromQueue(realIndex)
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Favoritos", color = MenuDarkText) },
+                            text = {
+                                Text(if (fav) "Desfavoritar" else "Favoritar", color = MenuDarkText)
+                            },
                             leadingIcon = {
                                 Icon(
-                                    Icons.Rounded.FavoriteBorder,
+                                    if (fav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                     contentDescription = null,
-                                    tint = MenuDarkText
+                                    tint = if (fav) Color(0xFFE53935) else MenuDarkText
                                 )
                             },
                             onClick = {
@@ -1755,12 +2160,73 @@ internal fun QueueSheet(
                             },
                             onClick = {
                                 menuForIndex = null
+                                selectedIds = emptySet()
                                 onDelete(track)
                             }
                         )
                     }
                 }
             }
+        }
+
+        if (showSelectionMenu && selectionMode) {
+            val selectedTracks = order.filter { it.id in selectedIds }
+            AlertDialog(
+                onDismissRequest = { showSelectionMenu = false },
+                containerColor = Color(menuBgColor),
+                title = {
+                    Text(
+                        if (selectedTracks.size == 1) "1 faixa na fila"
+                        else "${selectedTracks.size} faixas na fila",
+                        color = Color(0xFF1A1A1A)
+                    )
+                },
+                text = {
+                    Column {
+                        TextButton(
+                            onClick = {
+                                selectedTracks.forEach { onPlayNext(it) }
+                                showSelectionMenu = false
+                                selectedIds = emptySet()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Reproduzir a seguir", color = Color(0xFF1A1A1A)) }
+                        TextButton(
+                            onClick = {
+                                order.mapIndexedNotNull { i, t -> if (t.id in selectedIds) i else null }
+                                    .sortedDescending()
+                                    .forEach { onRemoveFromQueue(it) }
+                                showSelectionMenu = false
+                                selectedIds = emptySet()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Remover da fila", color = Color(0xFF1A1A1A)) }
+                        TextButton(
+                            onClick = {
+                                selectedTracks.forEach { onToggleFavorite(it) }
+                                showSelectionMenu = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val allFav = selectedTracks.isNotEmpty() && selectedTracks.all { isFavorite(it.id) }
+                            Text(if (allFav) "Desfavoritar" else "Favoritar", color = Color(0xFF1A1A1A))
+                        }
+                        TextButton(
+                            onClick = {
+                                showSelectionMenu = false
+                                selectedTracks.forEach { onDelete(it) }
+                                selectedIds = emptySet()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Excluir permanentemente", color = Color(0xFFC62828)) }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showSelectionMenu = false }) {
+                        Text("Fechar", color = Color(0xFF1A1A1A))
+                    }
+                }
+            )
         }
             } // Column
         } // Box
@@ -2065,7 +2531,7 @@ internal fun FullscreenLyrics(
                 IconButton(onClick = {
                     if (selectMode) {
                         if (selectedLines.isNotEmpty()) {
-                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(5)
+                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(8)
                             android.widget.Toast.makeText(context, "Gerando foto…", android.widget.Toast.LENGTH_SHORT).show()
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
@@ -2073,7 +2539,7 @@ internal fun FullscreenLyrics(
                         } else {
                             android.widget.Toast.makeText(
                                 context,
-                                "Selecione até 5 linhas para gerar a foto",
+                                "Selecione até 8 linhas para gerar a foto",
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -2081,7 +2547,7 @@ internal fun FullscreenLyrics(
                         selectMode = true
                         android.widget.Toast.makeText(
                             context,
-                            "Toque nas linhas e depois no compartilhar para gerar a foto",
+                            "Toque nas linhas (até 8) e depois no compartilhar para gerar a foto",
                             android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -2136,7 +2602,18 @@ internal fun FullscreenLyrics(
                             )
                             .clickable {
                                 if (selectMode) {
-                                    selectedLines = if (isSelected) selectedLines - index else selectedLines + index
+                                    selectedLines = if (isSelected) {
+                                        selectedLines - index
+                                    } else if (selectedLines.size < 8) {
+                                        selectedLines + index
+                                    } else {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Máximo de 8 linhas",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        selectedLines
+                                    }
                                 } else if (line.timeMs >= 0) {
                                     onSeek(line.timeMs)
                                 }

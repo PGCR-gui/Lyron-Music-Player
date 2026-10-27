@@ -139,39 +139,71 @@ class MainActivity : ComponentActivity() {
     }
 
     private val pickFont = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri == null) return@registerForActivityResult
-        try {
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "custom.ttf"
-            val dest = File(filesDir, "fonts").apply { mkdirs() }.let { dir ->
-                File(dir, name.substringAfterLast(':').ifBlank { "custom.ttf" })
-            }
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
-            }
-            viewModel.setLyricsFontPath(dest.absolutePath)
-            Toast.makeText(this, "Fonte das letras carregada", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNullOrEmpty()) return@registerForActivityResult
+        var lastPath: String? = null
+        var ok = 0
+        for (uri in uris) {
+            try {
+                val raw = uri.lastPathSegment?.substringAfterLast('/') ?: "custom.ttf"
+                val name = raw.substringAfterLast(':').ifBlank { "custom.ttf" }
+                val lower = name.lowercase()
+                if (!lower.endsWith(".ttf") && !lower.endsWith(".otf")) continue
+                val dest = File(filesDir, "fonts").apply { mkdirs() }.let { dir ->
+                    File(dir, name)
+                }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(dest).use { output -> input.copyTo(output) }
+                }
+                lastPath = dest.absolutePath
+                ok++
+            } catch (_: Exception) { }
+        }
+        if (lastPath != null) {
+            viewModel.setLyricsFontPath(lastPath)
+            Toast.makeText(
+                this,
+                if (ok == 1) "Fonte das letras carregada" else "$ok fontes carregadas",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
             Toast.makeText(this, "Falha ao carregar fonte", Toast.LENGTH_SHORT).show()
         }
     }
 
     private val pickUiFont = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri == null) return@registerForActivityResult
-        try {
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "ui_font.ttf"
-            val dest = File(filesDir, "fonts").apply { mkdirs() }.let { dir ->
-                File(dir, "ui_" + name.substringAfterLast(':').ifBlank { "ui_font.ttf" })
-            }
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output -> input.copyTo(output) }
-            }
-            viewModel.setUiFontPath(dest.absolutePath)
-            Toast.makeText(this, "Fonte do player carregada", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNullOrEmpty()) return@registerForActivityResult
+        var lastPath: String? = null
+        var ok = 0
+        for (uri in uris) {
+            try {
+                val raw = uri.lastPathSegment?.substringAfterLast('/') ?: "ui_font.ttf"
+                val name = raw.substringAfterLast(':').ifBlank { "ui_font.ttf" }
+                val lower = name.lowercase()
+                if (!lower.endsWith(".ttf") && !lower.endsWith(".otf")) continue
+                val dest = File(filesDir, "fonts").apply { mkdirs() }.let { dir ->
+                    // Mantém o nome original para aparecer na lista de fontes do usuário
+                    File(dir, name)
+                }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(dest).use { output -> input.copyTo(output) }
+                }
+                lastPath = dest.absolutePath
+                ok++
+            } catch (_: Exception) { }
+        }
+        if (lastPath != null) {
+            viewModel.setUiFontPath(lastPath)
+            // Também disponível para a foto (share) e botões — lista usa o mesmo diretório
+            Toast.makeText(
+                this,
+                if (ok == 1) "Fonte carregada" else "$ok fontes carregadas",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
             Toast.makeText(this, "Falha ao carregar fonte", Toast.LENGTH_SHORT).show()
         }
     }

@@ -53,7 +53,9 @@ internal fun PlayerPage(
     onFadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
-    onOpenAudioOutput: () -> Unit = {}
+    onOpenAudioOutput: () -> Unit = {},
+    seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
+    onSeekBarStyleChange: (SeekBarStyle) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -149,6 +151,48 @@ internal fun PlayerPage(
             valueRange = 0f..2000f,
             steps = 39
         )
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Barra de progresso (Now Playing)",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Estilo visual da seekbar na tela Tocando agora",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        val seekStyles = listOf(
+            SeekBarStyle.Normal to "Normal — fina e discreta",
+            SeekBarStyle.Standard to "Standard — gradiente + thumb",
+            SeekBarStyle.Wavy to "Wavy — onda senoidal",
+            SeekBarStyle.Thick to "Thick — trilha grossa",
+            SeekBarStyle.Slim to "Slim — bem fina",
+            SeekBarStyle.Liquid to "Liquid — bolha no progresso"
+        )
+        seekStyles.forEach { (style, label) ->
+            val selected = seekBarStyle == style
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.06f))
+                    .clickable { onSeekBarStyleChange(style) }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(
+                    selected = selected,
+                    onClick = { onSeekBarStyleChange(style) }
+                )
+                Text(label, fontSize = 15.sp, modifier = Modifier.padding(start = 4.dp))
+            }
+        }
 
         Spacer(Modifier.height(24.dp))
         Text(

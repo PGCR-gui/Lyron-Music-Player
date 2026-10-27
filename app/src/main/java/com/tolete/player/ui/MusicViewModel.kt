@@ -1621,12 +1621,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun searchLyrics(trackName: String, artistName: String): List<LrcLibClient.SearchResult> =
         LrcLibClient.search(trackName, artistName)
 
-    suspend fun embedLyricsResult(track: Track, result: LrcLibClient.SearchResult): List<LyricLine> =
+    suspend fun embedLyricsResult(
+        track: Track,
+        result: LrcLibClient.SearchResult,
+        target: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE
+    ): List<LyricLine> =
         withContext(Dispatchers.IO) {
             val lines = result.toLyricLines()
             val raw = result.toLrcText()
             if (lines.isNotEmpty() && !raw.isNullOrBlank()) {
-                LyricsEmbedder.embedLrc(getApplication(), track, raw)
+                when (target) {
+                    LyricsEmbedder.Target.LRC_FILE -> LyricsEmbedder.embedLrc(getApplication(), track, raw)
+                    LyricsEmbedder.Target.EMBEDDED -> LyricsEmbedder.embedInTags(getApplication(), track, raw)
+                }
             }
             lines
         }
@@ -1859,6 +1866,49 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_MENU_BG_COLOR, argb).apply()
     }
 
+    // Fonte e cor dos textos dos botões da tela Início
+    private val _homeButtonFontPath = MutableStateFlow(prefs.getString(KEY_HOME_BUTTON_FONT, null))
+    val homeButtonFontPath: StateFlow<String?> = _homeButtonFontPath.asStateFlow()
+    fun setHomeButtonFontPath(path: String?) {
+        _homeButtonFontPath.value = path
+        prefs.edit().putString(KEY_HOME_BUTTON_FONT, path).apply()
+    }
+
+    private val _homeButtonColor = MutableStateFlow(
+        prefs.getInt(KEY_HOME_BUTTON_COLOR, 0xFFFFFFFF.toInt())
+    )
+    val homeButtonColor: StateFlow<Int> = _homeButtonColor.asStateFlow()
+    fun setHomeButtonColor(argb: Int) {
+        _homeButtonColor.value = argb
+        prefs.edit().putInt(KEY_HOME_BUTTON_COLOR, argb).apply()
+    }
+
+    // Fonte e cores da foto gerada (trecho de letra)
+    private val _shareFontPath = MutableStateFlow(prefs.getString(KEY_SHARE_FONT, null))
+    val shareFontPath: StateFlow<String?> = _shareFontPath.asStateFlow()
+    fun setShareFontPath(path: String?) {
+        _shareFontPath.value = path
+        prefs.edit().putString(KEY_SHARE_FONT, path).apply()
+    }
+
+    private val _shareTextColor = MutableStateFlow(
+        prefs.getInt(KEY_SHARE_TEXT_COLOR, 0xFFF5F5FA.toInt())
+    )
+    val shareTextColor: StateFlow<Int> = _shareTextColor.asStateFlow()
+    fun setShareTextColor(argb: Int) {
+        _shareTextColor.value = argb
+        prefs.edit().putInt(KEY_SHARE_TEXT_COLOR, argb).apply()
+    }
+
+    private val _shareBrandColor = MutableStateFlow(
+        prefs.getInt(KEY_SHARE_BRAND_COLOR, 0xFFFFFFFF.toInt())
+    )
+    val shareBrandColor: StateFlow<Int> = _shareBrandColor.asStateFlow()
+    fun setShareBrandColor(argb: Int) {
+        _shareBrandColor.value = argb
+        prefs.edit().putInt(KEY_SHARE_BRAND_COLOR, argb).apply()
+    }
+
     /** Duração do fade in/out ao play/pause em milissegundos (0 = instantâneo). */
     private val _fadeMs = MutableStateFlow(prefs.getInt(KEY_FADE_MS, 300).coerceIn(0, 3000))
     val fadeMs: StateFlow<Int> = _fadeMs.asStateFlow()
@@ -1866,6 +1916,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val v = ms.coerceIn(0, 3000)
         _fadeMs.value = v
         prefs.edit().putInt(KEY_FADE_MS, v).apply()
+    }
+
+    /** Estilo visual da barra de progresso no Now Playing. */
+    private val _seekBarStyle = MutableStateFlow(
+        try {
+            SeekBarStyle.valueOf(prefs.getString(KEY_SEEK_BAR_STYLE, SeekBarStyle.Standard.name)!!)
+        } catch (_: Exception) {
+            SeekBarStyle.Standard
+        }
+    )
+    val seekBarStyle: StateFlow<SeekBarStyle> = _seekBarStyle.asStateFlow()
+    fun setSeekBarStyle(style: SeekBarStyle) {
+        _seekBarStyle.value = style
+        prefs.edit().putString(KEY_SEEK_BAR_STYLE, style.name).apply()
     }
 
     // ---------- Ordenação ----------
@@ -2007,6 +2071,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         obj.put("lyricsFont", _lyricsFontPath.value)
         obj.put("uiFont", _uiFontPath.value)
         obj.put("lyricsFontSize", _lyricsFontSize.value.toDouble())
+        obj.put("homeButtonFont", _homeButtonFontPath.value)
+        obj.put("homeButtonColor", _homeButtonColor.value)
+        obj.put("shareFont", _shareFontPath.value)
+        obj.put("shareTextColor", _shareTextColor.value)
+        obj.put("shareBrandColor", _shareBrandColor.value)
         obj.put("lyricsPrimary", _lyricsPrimaryColor.value)
         obj.put("lyricsSecondary", _lyricsSecondaryColor.value)
         obj.put("lyricsBorder", _lyricsBorderColor.value)
@@ -2136,6 +2205,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (obj.has("lyricsFont")) setLyricsFontPath(obj.optString("lyricsFont").ifBlank { null })
             if (obj.has("uiFont")) setUiFontPath(obj.optString("uiFont").ifBlank { null })
             if (obj.has("lyricsFontSize")) setLyricsFontSize(obj.getDouble("lyricsFontSize").toFloat())
+            if (obj.has("homeButtonFont")) setHomeButtonFontPath(obj.optString("homeButtonFont").ifBlank { null })
+            if (obj.has("homeButtonColor")) setHomeButtonColor(obj.getInt("homeButtonColor"))
+            if (obj.has("shareFont")) setShareFontPath(obj.optString("shareFont").ifBlank { null })
+            if (obj.has("shareTextColor")) setShareTextColor(obj.getInt("shareTextColor"))
+            if (obj.has("shareBrandColor")) setShareBrandColor(obj.getInt("shareBrandColor"))
             if (obj.has("lyricsPrimary")) setLyricsPrimaryColor(obj.getInt("lyricsPrimary"))
             if (obj.has("lyricsSecondary")) setLyricsSecondaryColor(obj.getInt("lyricsSecondary"))
             if (obj.has("lyricsBorder")) setLyricsBorderColor(obj.getInt("lyricsBorder"))
@@ -2255,7 +2329,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
         const val KEY_FLOATING_ICONS = "floating_icons_enabled"
         const val KEY_MENU_BG_COLOR = "menu_bg_color"
+        const val KEY_HOME_BUTTON_FONT = "home_button_font_path"
+        const val KEY_HOME_BUTTON_COLOR = "home_button_color"
+        const val KEY_SHARE_FONT = "share_font_path"
+        const val KEY_SHARE_TEXT_COLOR = "share_text_color"
+        const val KEY_SHARE_BRAND_COLOR = "share_brand_color"
         const val KEY_FADE_MS = "fade_ms"
+        const val KEY_SEEK_BAR_STYLE = "seek_bar_style"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"
         const val KEY_TRACK_SORT = "track_sort"

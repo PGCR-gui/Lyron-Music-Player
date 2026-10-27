@@ -140,6 +140,37 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF1A73E8).copy(0.22f))
+                .clickable {
+                    try {
+                        context.startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://forms.gle/FTCnrL7DhofQwEV26")
+                            )
+                        )
+                    } catch (_: Exception) {}
+                }
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.Info, contentDescription = null, tint = Color(0xFF8AB4F8))
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Reportar bugs e sugerir melhorias", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text("Abre o formulário de feedback", fontSize = 12.sp, color = Color.White.copy(0.55f))
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.4f)
+            )
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
                 .background(Color.White.copy(0.08f))
                 .clickable { com.tolete.player.data.UpdateManager.check(context, manual = true) }
                 .padding(horizontal = 14.dp, vertical = 14.dp),
@@ -250,6 +281,25 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 
 internal val changelogEntries = listOf(
+        ChangelogEntry(
+            "0.55",
+            "215",
+            listOf(
+                "Mudança no layout da página de Artista",
+                "Mudança em exibição de foto na lista de Artistas",
+                "Aumento de limite de linhas exportáveis em foto",
+                "Remoção de fontes embutidas pra evitar problemas (se 50 dólares é só pra comprar e poder usar no app, imagina se vier processo)",
+                "Mudança no visualizador de letras do Now Playing e no Layout",
+                "Opção de personalizar fontes de início e de foto gerada separadamente",
+                "Mudanças na forma em que as letras buscadas pelo app são salvas",
+                "Adicionado um formulário para relatório de bugs e sugestões de melhorias e funções",
+                "Músicas em Favoritos agora selecionáveis (eu esqueci desse na última Atualização kkkkkkkkkk)",
+                "Opção de marcar todas e acessar informações no menu pop-up de seleção de Músicas",
+                "Melhorias na Fila de reprodução",
+                "Tocar na tela durante o splash screen pula a animação",
+                "animação da seekbar, sei lá, alguém me mata logo",
+            )
+        ),
         ChangelogEntry(
             "0.50",
             "210",
