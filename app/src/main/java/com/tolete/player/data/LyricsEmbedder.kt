@@ -50,7 +50,7 @@ object LyricsEmbedder {
         val f = externalLrcPath(track) ?: return null
         if (!f.exists()) return null
         return try {
-            LyricsExtractor.parseLrcText(f.readText(Charsets.UTF_8))
+            LyricsExtractor.parseLyricsContent(f.readText(Charsets.UTF_8))
         } catch (_: Exception) {
             null
         }
@@ -148,7 +148,7 @@ object LyricsEmbedder {
             val dir = File(context.cacheDir, "lyrics")
             val safeId = track.id.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(80)
             val f = File(dir, "$safeId.lrc")
-            if (f.exists()) LyricsExtractor.parseLrcText(f.readText()) else null
+            if (f.exists()) LyricsExtractor.parseLyricsContent(f.readText()) else null
         } catch (_: Exception) {
             null
         }

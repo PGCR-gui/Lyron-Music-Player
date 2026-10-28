@@ -157,54 +157,17 @@ internal fun AppearancePage(
                     color = Color.White.copy(0.55f),
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                val seedColors = listOf(
-                    0xFFBB86FC.toInt(),
-                    0xFF00D2FF.toInt(),
-                    0xFFFF6B4A.toInt(),
-                    0xFF4ADE80.toInt(),
-                    0xFF60A5FA.toInt(),
-                    0xFFF472B6.toInt(),
-                    0xFFFBBF24.toInt(),
-                    0xFFE53935.toInt(),
-                    0xFF26A69A.toInt(),
-                    0xFFAB47BC.toInt()
-                )
-                Row(
-                    Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    seedColors.forEach { argb ->
-                        val sel = dynamicDefaultColor == argb
-                        Box(
-                            Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(Color(argb))
-                                .border(
-                                    if (sel) 3.dp else 1.dp,
-                                    if (sel) Color.White else Color.White.copy(0.3f),
-                                    CircleShape
-                                )
-                                .clickable { onDynamicDefaultColorChange(argb) }
-                        )
-                    }
-                }
                 Text(
                     "Usada quando o tema dinâmico está ativo e nenhuma faixa está tocando.",
                     fontSize = 12.sp,
-                    color = Color.White.copy(0.45f)
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(bottom = 10.dp)
                 )
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Cor personalizada (hex)",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White.copy(0.55f),
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-                HexColorPicker(
-                    selected = dynamicDefaultColor,
+                ColorPickerButton(
+                    color = dynamicDefaultColor,
                     onColorChange = onDynamicDefaultColorChange,
+                    showAlpha = false,
+                    label = "Cor padrão do tema dinâmico",
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -368,9 +331,8 @@ internal fun AppearancePage(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             val menuColor = Color(menuBgColor)
-            val menuAlpha = ((menuBgColor ushr 24) and 0xFF) / 255f
             Text(
-                "Cor e transparência dos menus brancos (Now Playing, seleção, etc.)",
+                "Cor e transparência dos menus (Now Playing, seleção, etc.)",
                 fontSize = 12.sp,
                 color = Color.White.copy(0.5f),
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -387,36 +349,12 @@ internal fun AppearancePage(
                 Text("Prévia do menu", color = Color(0xFF1A1A1A), fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(10.dp))
-            Text("Transparência: ${(menuAlpha * 100).toInt()}%", fontSize = 14.sp, color = Color.White.copy(0.85f))
-            Slider(
-                value = menuAlpha.coerceIn(0.15f, 1f),
-                onValueChange = { a ->
-                    val rgb = menuBgColor and 0x00FFFFFF
-                    val alphaByte = (a.coerceIn(0.15f, 1f) * 255).toInt().coerceIn(38, 255)
-                    onMenuBgColorChange((alphaByte shl 24) or rgb)
-                },
-                valueRange = 0.15f..1f,
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White.copy(0.85f),
-                    inactiveTrackColor = Color.White.copy(0.25f)
-                )
-            )
-            Text("Tom (claro → acinzentado)", fontSize = 14.sp, color = Color.White.copy(0.85f))
-            val gray = ((menuBgColor shr 16) and 0xFF)
-            Slider(
-                value = gray.toFloat(),
-                onValueChange = { g ->
-                    val gv = g.toInt().coerceIn(180, 255)
-                    val alphaByte = (menuBgColor ushr 24) and 0xFF
-                    onMenuBgColorChange((alphaByte shl 24) or (gv shl 16) or (gv shl 8) or gv)
-                },
-                valueRange = 180f..255f,
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White.copy(0.85f),
-                    inactiveTrackColor = Color.White.copy(0.25f)
-                )
+            ColorPickerButton(
+                color = menuBgColor,
+                onColorChange = onMenuBgColorChange,
+                showAlpha = true,
+                label = "Cor do menu",
+                modifier = Modifier.fillMaxWidth()
             )
             TextButton(onClick = { onMenuBgColorChange(0xE8F2F2F7.toInt()) }) {
                 Text("Restaurar padrão", color = Color(0xFF82B1FF))
@@ -468,25 +406,13 @@ internal fun AppearancePage(
                 )
             }
             Spacer(Modifier.height(10.dp))
-            Text("Cor do texto", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
-            val homeColorPresets = listOf(
-                0xFFFFFFFF.toInt(), 0xFFBB86FC.toInt(), 0xFF00D2FF.toInt(),
-                0xFFFF6B4A.toInt(), 0xFF4ADE80.toInt(), 0xFFFBBF24.toInt(),
-                0xFFF472B6.toInt(), 0xFF60A5FA.toInt()
+            ColorPickerButton(
+                color = homeButtonColor,
+                onColorChange = onHomeButtonColorChange,
+                showAlpha = false,
+                label = "Cor do texto",
+                modifier = Modifier.fillMaxWidth()
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                homeColorPresets.forEach { c ->
-                    val selected = homeButtonColor == c
-                    Box(
-                        Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(c))
-                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                            .clickable { onHomeButtonColorChange(c) }
-                    )
-                }
-            }
 
             // --- Foto gerada (trecho de letra) ---
             Spacer(Modifier.height(24.dp))
@@ -534,46 +460,21 @@ internal fun AppearancePage(
                 )
             }
             Spacer(Modifier.height(10.dp))
-            // Cores mais escuras / saturadas para legibilidade na foto
-            val shareColorPresets = listOf(
-                0xFFE8E8F0.toInt(), // off-white suave
-                0xFFC2D1CB.toInt(), // sage
-                0xFF9BB8D4.toInt(), // azul acinzentado
-                0xFFB8A9C9.toInt(), // lavanda escura
-                0xFFD4A574.toInt(), // ocre
-                0xFF8FBC8F.toInt(), // verde musgo
-                0xFFCD8B8B.toInt(), // rosa terroso
-                0xFF7A9E9F.toInt()  // teal escuro
+            ColorPickerButton(
+                color = shareTextColor,
+                onColorChange = onShareTextColorChange,
+                showAlpha = false,
+                label = "Cor do texto (letra)",
+                modifier = Modifier.fillMaxWidth()
             )
-            Text("Cor do texto (letra)", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                shareColorPresets.forEach { c ->
-                    val selected = shareTextColor == c
-                    Box(
-                        Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(c))
-                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                            .clickable { onShareTextColorChange(c) }
-                    )
-                }
-            }
             Spacer(Modifier.height(10.dp))
-            Text("Cor do logo / marca", fontSize = 13.sp, color = Color.White.copy(0.7f), modifier = Modifier.padding(bottom = 6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                shareColorPresets.forEach { c ->
-                    val selected = shareBrandColor == c
-                    Box(
-                        Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(c))
-                            .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                            .clickable { onShareBrandColorChange(c) }
-                    )
-                }
-            }
+            ColorPickerButton(
+                color = shareBrandColor,
+                onColorChange = onShareBrandColorChange,
+                showAlpha = false,
+                label = "Cor do logo / marca",
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Spacer(Modifier.height(20.dp))
             Text(
@@ -679,36 +580,6 @@ internal fun LyricsViewerPage(
     onBorderColorChange: (Int) -> Unit,
     onBorderWidthChange: (Float) -> Unit
 ) {
-    val primaryPresets = listOf(
-        0xFFFFFFFF.toInt(),
-        0xFFBB86FC.toInt(),
-        0xFF00D2FF.toInt(),
-        0xFFFF6B4A.toInt(),
-        0xFF4ADE80.toInt(),
-        0xFFF472B6.toInt(),
-        0xFFFBBF24.toInt(),
-        0xFF60A5FA.toInt(),
-        0xFFFFEB3B.toInt(),
-        0xFFE91E63.toInt(),
-        0xFF00BCD4.toInt(),
-        0xFFFF9800.toInt()
-    )
-    val secondaryPresets = listOf(
-        0x66FFFFFF.toInt(),
-        0x99FFFFFF.toInt(),
-        0x44FFFFFF.toInt(),
-        0xFF888888.toInt(),
-        0xFFB0BEC5.toInt(),
-        0xFF90CAF9.toInt(),
-        0xFFCE93D8.toInt(),
-        0xFFA5D6A7.toInt()
-    )
-    val borderPresets = listOf(
-        0xFF000000.toInt() to "Preto",
-        0xFFFFFFFF.toInt() to "Branco",
-        0xFF000000.toInt() to "Preto",
-        0x88000000.toInt() to "Preto 50%"
-    )
     Column(
         Modifier
             .fillMaxSize()
@@ -795,70 +666,31 @@ internal fun LyricsViewerPage(
         }
 
         Spacer(Modifier.height(16.dp))
-        Text(
-            "Cor primária (ativa / sílaba atual — eLRC/TTML)",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
+        ColorPickerButton(
+            color = lyricsPrimaryColor,
+            onColorChange = onPrimaryColorChange,
+            showAlpha = true,
+            label = "Cor primária (ativa / sílaba atual — eLRC/TTML)",
+            modifier = Modifier.fillMaxWidth()
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            primaryPresets.forEach { color ->
-                val selected = lyricsPrimaryColor == color
-                Box(
-                    Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Color(color))
-                        .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                        .clickable { onPrimaryColorChange(color) }
-                )
-            }
-        }
 
-        Spacer(Modifier.height(16.dp))
-        Text(
-            "Cor secundária (inativa / sílabas restantes)",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
+        Spacer(Modifier.height(12.dp))
+        ColorPickerButton(
+            color = lyricsSecondaryColor,
+            onColorChange = onSecondaryColorChange,
+            showAlpha = true,
+            label = "Cor secundária (inativa / sílabas restantes)",
+            modifier = Modifier.fillMaxWidth()
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            secondaryPresets.forEach { color ->
-                val selected = lyricsSecondaryColor == color
-                Box(
-                    Modifier
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Color(color))
-                        .border(if (selected) 3.dp else 1.dp, if (selected) Color.White else Color.White.copy(0.3f), CircleShape)
-                        .clickable { onSecondaryColorChange(color) }
-                )
-            }
-        }
 
-        Spacer(Modifier.height(16.dp))
-        Text(
-            "Cor da borda",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
+        Spacer(Modifier.height(12.dp))
+        ColorPickerButton(
+            color = lyricsBorderColor,
+            onColorChange = onBorderColorChange,
+            showAlpha = true,
+            label = "Cor da borda",
+            modifier = Modifier.fillMaxWidth()
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            listOf(0xFF000000.toInt(), 0xFFFFFFFF.toInt(), 0x88000000.toInt(), 0x00000000).forEach { color ->
-                val selected = lyricsBorderColor == color
-                Box(
-                    Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(if (color == 0) Color.Transparent else Color(color))
-                        .border(if (selected) 3.dp else 1.dp, Color.White.copy(0.5f), CircleShape)
-                        .clickable { onBorderColorChange(color) }
-                )
-            }
-        }
 
         Spacer(Modifier.height(16.dp))
         Text(
@@ -912,79 +744,4 @@ internal fun FontOptionRow(label: String, selected: Boolean, onClick: () -> Unit
 }
 
 
-@Composable
-internal fun HexColorPicker(
-    selected: Int,
-    onColorChange: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    fun toHex(argb: Int): String {
-        val r = (argb shr 16) and 0xFF
-        val g = (argb shr 8) and 0xFF
-        val b = argb and 0xFF
-        return String.format("#%02X%02X%02X", r, g, b)
-    }
-    fun parseHex(raw: String): Int? {
-        var s = raw.trim().removePrefix("#")
-        if (s.length == 3) {
-            s = s.map { "$it$it" }.joinToString("")
-        }
-        if (s.length != 6) return null
-        return try {
-            (0xFF shl 24) or s.toInt(16)
-        } catch (_: Exception) {
-            null
-        }
-    }
 
-    var text by remember(selected) { mutableStateOf(toHex(selected)) }
-    var isError by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Box(
-            Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(selected))
-                .border(1.dp, Color.White.copy(0.35f), RoundedCornerShape(12.dp))
-        )
-        OutlinedTextField(
-            value = text,
-            onValueChange = { input ->
-                // permite só # e hex
-                val filtered = input.filter { it in "#0123456789abcdefABCDEF" }.take(7)
-                text = filtered
-                val parsed = parseHex(filtered)
-                isError = parsed == null && filtered.length >= 6
-                if (parsed != null) onColorChange(parsed)
-            },
-            singleLine = true,
-            isError = isError,
-            label = { Text("Hex (#RRGGBB)") },
-            placeholder = { Text("#BB86FC") },
-            modifier = Modifier.weight(1f),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color(0xFF69F0AE),
-                unfocusedBorderColor = Color.White.copy(0.3f),
-                focusedLabelColor = Color.White.copy(0.7f),
-                unfocusedLabelColor = Color.White.copy(0.5f),
-                cursorColor = Color(0xFF69F0AE),
-                errorBorderColor = Color(0xFFFF8A80)
-            )
-        )
-    }
-    if (isError) {
-        Text(
-            "Use o formato #RRGGBB (ex.: #FF5722)",
-            fontSize = 11.sp,
-            color = Color(0xFFFF8A80),
-            modifier = Modifier.padding(top = 4.dp)
-        )
-    }
-}

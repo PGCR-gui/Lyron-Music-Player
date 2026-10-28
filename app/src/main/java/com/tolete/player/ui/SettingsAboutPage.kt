@@ -140,37 +140,6 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFF1A73E8).copy(0.22f))
-                .clickable {
-                    try {
-                        context.startActivity(
-                            Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://forms.gle/FTCnrL7DhofQwEV26")
-                            )
-                        )
-                    } catch (_: Exception) {}
-                }
-                .padding(horizontal = 14.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Rounded.Info, contentDescription = null, tint = Color(0xFF8AB4F8))
-            Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                Text("Reportar bugs e sugerir melhorias", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text("Abre o formulário de feedback", fontSize = 12.sp, color = Color.White.copy(0.55f))
-            }
-            Icon(
-                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                contentDescription = null,
-                tint = Color.White.copy(0.4f)
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
                 .background(Color.White.copy(0.08f))
                 .clickable { com.tolete.player.data.UpdateManager.check(context, manual = true) }
                 .padding(horizontal = 14.dp, vertical = 14.dp),
@@ -281,6 +250,29 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 
 internal val changelogEntries = listOf(
+        ChangelogEntry(
+            "0.60",
+            "220",
+            listOf(
+                "Re-redesign da tela do now playing (espero que seja o último)",
+                "Redesign da notificação (porque não né kkkkkkk)",
+                "Letras word-by-word com animação mais suave",
+                "Botão de troca de velocidade adicionado",
+                "Letras word-by-word no Now Playing",
+                "Sincronizador de letras agora conta com sincronizador word-by-word (apenas .elrc)",
+                "Corrigido parser do ttml",
+                "Seletor de cores HSV (Color Wheel)",
+                "Melhoria de visibilidade nas cores das letras exportadas",
+                "Corrigido layout de Favoritos, Histórico e Mais Tocadas que deixava um vão na parte inferior da página",
+                "Mais opções nas Mais Tocadas (Artistas, Álbuns, Períodos de tempo)",
+                "Opção de exportar top 10 mais tocadas em imagem",
+                "Backup atualizado para guardar novas configurações",
+                "Busca de Tags online pelo Last.fm e Deezer",
+                "Nova opção de exportar presets .milk favoritos em .zip (função pensada para o dev)",
+                "Removidos itens que não funcionavam porque... não funcionavam né kkkkk",
+                "Novas fontes de busca de letras (KuGou, Netease, QQ Music)"
+            )
+        ),
         ChangelogEntry(
             "0.55",
             "215",

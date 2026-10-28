@@ -47,15 +47,14 @@ internal fun PlayerPage(
     onAutoFetchLyricsChange: (Boolean) -> Unit,
     shuffleType: ShuffleType,
     onShuffleTypeChange: (ShuffleType) -> Unit,
-    bitPerfect: Boolean,
-    onBitPerfectChange: (Boolean) -> Unit,
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
-    onOpenAudioOutput: () -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
-    onSeekBarStyleChange: (SeekBarStyle) -> Unit = {}
+    onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
+    immersiveNowPlaying: Boolean = true,
+    onImmersiveNowPlayingChange: (Boolean) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -124,19 +123,6 @@ internal fun PlayerPage(
             color = Color.White.copy(0.55f),
             modifier = Modifier.padding(bottom = 8.dp)
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                Text("Bit-perfect (DAC)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    "Tenta reduzir processamento de áudio para saída mais fiel em DACs USB/externos. Pode exigir reiniciar a reprodução.",
-                    fontSize = 13.sp,
-                    color = Color.White.copy(0.55f)
-                )
-            }
-            Switch(checked = bitPerfect, onCheckedChange = onBitPerfectChange)
-        }
-
-        Spacer(Modifier.height(20.dp))
         Text("Fade play/pause", fontSize = 16.sp, fontWeight = FontWeight.Medium)
         Text(
             if (fadeMs == 0) "Desligado (troca instantânea)"
@@ -151,6 +137,26 @@ internal fun PlayerPage(
             valueRange = 0f..2000f,
             steps = 39
         )
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Tela Tocando agora",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Modo imersivo", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Esconde a barra de status e a de navegação enquanto a tela Tocando agora estiver aberta. Deslize nas bordas para revelá-las temporariamente.",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(0.55f)
+                )
+            }
+            Switch(checked = immersiveNowPlaying, onCheckedChange = onImmersiveNowPlayingChange)
+        }
 
         Spacer(Modifier.height(24.dp))
         Text(
@@ -227,98 +233,6 @@ internal fun PlayerPage(
             modifier = Modifier.padding(bottom = 8.dp)
         )
 
-        Spacer(Modifier.height(24.dp))
-        Spacer(Modifier.height(20.dp))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.White.copy(0.08f))
-                .clickable(onClick = onOpenAudioOutput)
-                .padding(horizontal = 14.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Saída de áudio", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    "Backend (AudioTrack, AAudio…) e taxa de amostragem máxima",
-                    fontSize = 13.sp,
-                    color = Color.White.copy(0.55f)
-                )
-            }
-            Text("›", fontSize = 22.sp, color = Color.White.copy(0.4f))
-        }
-    }
-}
-
-@Composable
-internal fun AudioOutputPage(
-    audioOutput: MusicViewModel.AudioOutputBackend,
-    onAudioOutputChange: (MusicViewModel.AudioOutputBackend) -> Unit,
-    forceMaxSampleRate: Boolean,
-    onForceMaxSampleRateChange: (Boolean) -> Unit
-) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 12.dp)
-    ) {
-        Text(
-            "Backend de saída",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Text(
-            "Escolha o pipeline de áudio. A mudança é salva e aplicada na próxima sessão de reprodução (reinicie a faixa se necessário).",
-            fontSize = 13.sp,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-        val options = listOf(
-            MusicViewModel.AudioOutputBackend.DEFAULT to ("Padrão do sistema" to "Deixa o ExoPlayer/Media3 escolher"),
-            MusicViewModel.AudioOutputBackend.AUDIOTRACK to ("AudioTrack" to "API clássica do Android"),
-            MusicViewModel.AudioOutputBackend.AAUDIO to ("AAudio" to "Baixa latência (API 26+)"),
-            MusicViewModel.AudioOutputBackend.OPENSLES to ("OpenSL ES" to "Legado, ampla compatibilidade")
-        )
-        options.forEach { (id, labels) ->
-            val (title, sub) = labels
-            Spacer(Modifier.height(6.dp))
-            ShuffleTypeOption(
-                title = title,
-                subtitle = sub,
-                selected = audioOutput == id,
-                onClick = { onAudioOutputChange(id) }
-            )
-        }
-
-        Spacer(Modifier.height(28.dp))
-        Text(
-            "Amostragem",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                Text("Forçar maior amostragem", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    "Tenta usar a maior taxa de amostragem permitida pela saída atual (útil em DACs USB). Pode falhar em alguns dispositivos.",
-                    fontSize = 13.sp,
-                    color = Color.White.copy(0.55f)
-                )
-            }
-            Switch(checked = forceMaxSampleRate, onCheckedChange = onForceMaxSampleRateChange)
-        }
-        Text(
-            "Nota: o ExoPlayer aplica o backend na criação do player. Pare e toque de novo após alterar.",
-            fontSize = 12.sp,
-            color = Color.White.copy(0.4f),
-            modifier = Modifier.padding(top = 16.dp)
-        )
     }
 }
 

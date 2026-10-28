@@ -69,9 +69,7 @@ object LyricsExtractor {
             } catch (_: Exception) { null }
             r.release()
             if (!raw.isNullOrBlank()) {
-                val lrc = parseLrcText(raw)
-                if (lrc.isNotEmpty()) return lrc
-                return listOf(LyricLine(-1, raw.trim()))
+                return parseLyricsContent(raw)
             }
         } catch (_: Exception) { }
 
@@ -187,6 +185,34 @@ object LyricsExtractor {
     private fun toPlainLines(text: String): List<LyricLine> =
         text.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { LyricLine(-1, it) }
 
+    /** Detecta TTML (Apple Music, etc.) pelo conteúdo, independente da extensão. */
+    private fun looksLikeTtml(text: String): Boolean {
+        val t = text.trimStart()
+        if (t.startsWith("<?xml", ignoreCase = true) || t.startsWith("<tt", ignoreCase = true)) return true
+        if (t.contains("<tt ", ignoreCase = true) || t.contains("<tt\n", ignoreCase = true)) return true
+        // corpo típico: <p begin="00:00:…"> ou begin="12.5s"
+        return Regex(
+            """<\s*p\s+[^>]*begin\s*=\s*["'][^"']+["']""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(t) && t.contains("</p>", ignoreCase = true)
+    }
+
+    /**
+     * Tenta TTML → LRC/eLRC → texto plano.
+     * Usado para tags embutidas e arquivos externos sem extensão confiável.
+     */
+    fun parseLyricsContent(text: String): List<LyricLine> {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        if (looksLikeTtml(trimmed)) {
+            val ttml = parseTtml(trimmed)
+            if (ttml.isNotEmpty()) return ttml
+        }
+        val lrc = parseLrcText(trimmed)
+        if (lrc.isNotEmpty()) return lrc
+        return toPlainLines(trimmed)
+    }
+
     private fun externalLrc(track: Track): List<LyricLine>? {
         val candidates = mutableListOf<String>()
         if (track.path.startsWith("/")) {
@@ -205,8 +231,8 @@ object LyricsExtractor {
                 return try {
                     val raw = f.readText()
                     when {
-                        p.endsWith(".ttml", true) -> parseTtml(raw)
-                        else -> parseLrcText(raw) // also handles eLRC word tags
+                        p.endsWith(".ttml", true) -> parseTtml(raw).ifEmpty { parseLyricsContent(raw) }
+                        else -> parseLyricsContent(raw)
                     }
                 } catch (_: Exception) { null }
             }
@@ -240,6 +266,11 @@ object LyricsExtractor {
                     val wText = if (i + 1 < parts.size) parts[i + 1] else ""
                     if (wText.isNotEmpty()) words.add(LyricWord(wTime, wText))
                 }
+                // Preenche endMs de cada palavra com o início da próxima
+                for (i in words.indices) {
+                    val end = if (i < words.lastIndex) words[i + 1].timeMs else -1L
+                    if (end > 0) words[i] = words[i].copy(endMs = end)
+                }
             }
             val plainText = lyricPart.replace(wordRegex, "").trim()
             if (plainText.isNotEmpty() || words.isNotEmpty()) {
@@ -268,48 +299,135 @@ object LyricsExtractor {
     }
 
     /**
-     * Parser simplificado de TTML (Timed Text Markup Language) usado por alguns players
-     * para letras com sincronização silábica / por palavra.
+     * Parser de TTML (Timed Text Markup Language), incluindo o formato Apple Music:
+     * - &lt;p begin end ttm:agent&gt; com &lt;span begin end&gt; por palavra
+     * - multi-vocais via ttm:agent / itunes:agent (v1, v2, bg…)
+     * - backing vocals marcados como isBackground
      */
     fun parseTtml(text: String): List<LyricLine> {
         val lines = mutableListOf<LyricLine>()
-        // <p begin="10.5s" end="12.0s"> or begin="00:00:10.500"
+        // Captura a tag <p ...> completa e o corpo até </p>
         val pRegex = Regex(
-            """<p\s+[^>]*begin\s*=\s*["']([^"']+)["'][^>]*>(.*?)</p>""",
+            """<\s*p\s+([^>]*)>(.*?)</\s*p\s*>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
         val spanRegex = Regex(
-            """<span\s+[^>]*begin\s*=\s*["']([^"']+)["'][^>]*>(.*?)</span>""",
+            """<\s*span\s+([^>]*)>(.*?)</\s*span\s*>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
+        val attrBegin = Regex("""begin\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val attrEnd = Regex("""end\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val attrAgent = Regex(
+            """(?:ttm:agent|itunes:agent|agent)\s*=\s*["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+        val attrRole = Regex(
+            """(?:ttm:role|role|itunes:key)\s*=\s*["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        // Agente principal = o mais frequente (geralmente v1); demais podem ser backing
+        val agentCounts = mutableMapOf<String, Int>()
         for (m in pRegex.findAll(text)) {
-            val begin = parseTtmlTime(m.groupValues[1])
-            val body = m.groupValues[2]
-            val words = mutableListOf<LyricWord>()
-            for (sm in spanRegex.findAll(body)) {
-                val wBegin = parseTtmlTime(sm.groupValues[1])
-                val wText = sm.groupValues[2]
-                    .replace(Regex("<[^>]+>"), "")
-                    .replace("&amp;", "&")
-                    .replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&quot;", "\"")
-                    .trim()
-                if (wText.isNotEmpty()) words.add(LyricWord(wBegin, wText))
-            }
-            val plain = body
-                .replace(Regex("<[^>]+>"), "")
-                .replace("&amp;", "&")
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .trim()
-            if (plain.isNotEmpty() || words.isNotEmpty()) {
-                lines.add(LyricLine(begin, if (plain.isNotEmpty()) plain else words.joinToString(" ") { it.text }, words))
+            val attrs = m.groupValues[1]
+            attrAgent.find(attrs)?.groupValues?.get(1)?.trim()?.lowercase()?.let {
+                agentCounts[it] = (agentCounts[it] ?: 0) + 1
             }
         }
-        return lines.sortedBy { it.timeMs }
+        val primaryAgent = agentCounts.maxByOrNull { it.value }?.key
+
+        for (m in pRegex.findAll(text)) {
+            val attrs = m.groupValues[1]
+            val body = m.groupValues[2]
+            val beginRaw = attrBegin.find(attrs)?.groupValues?.get(1) ?: continue
+            val begin = parseTtmlTime(beginRaw)
+            val endRaw = attrEnd.find(attrs)?.groupValues?.get(1)
+            val endMs = endRaw?.let { parseTtmlTime(it) } ?: -1L
+            val agent = attrAgent.find(attrs)?.groupValues?.get(1)?.trim()
+            val role = attrRole.find(attrs)?.groupValues?.get(1)?.trim()?.lowercase()
+            val agentLower = agent?.lowercase()
+            val isBg = when {
+                role != null && (role.contains("bg") || role.contains("back") || role.contains("harmon") || role == "x-bg") -> true
+                agentLower != null && (
+                    agentLower.contains("bg") ||
+                        agentLower.contains("back") ||
+                        agentLower.contains("harmon") ||
+                        agentLower.contains("chorus") ||
+                        agentLower.contains("choir") ||
+                        (primaryAgent != null && agentLower != primaryAgent && agentCounts.size > 1)
+                    ) -> true
+                else -> false
+            }
+
+            val words = mutableListOf<LyricWord>()
+            for (sm in spanRegex.findAll(body)) {
+                val sAttrs = sm.groupValues[1]
+                val wBeginRaw = attrBegin.find(sAttrs)?.groupValues?.get(1) ?: continue
+                val wBegin = parseTtmlTime(wBeginRaw)
+                val wEndRaw = attrEnd.find(sAttrs)?.groupValues?.get(1)
+                val wEnd = wEndRaw?.let { parseTtmlTime(it) } ?: -1L
+                val wText = decodeXmlEntities(
+                    sm.groupValues[2].replace(Regex("<[^>]+>"), "")
+                ).trim()
+                // Preserva espaços entre palavras quando o span não traz espaço
+                if (wText.isNotEmpty()) {
+                    words.add(LyricWord(wBegin, wText, wEnd))
+                }
+            }
+            // Se spans existem mas o join ficou colado, tenta reinserir espaço entre palavras
+            // que terminam em letra e a seguinte começa em letra maiúscula/minúscula sem pontuação.
+            val joinedWords = if (words.isNotEmpty()) {
+                buildString {
+                    words.forEachIndexed { i, w ->
+                        if (i > 0) {
+                            val prev = words[i - 1].text
+                            val cur = w.text
+                            val needSpace = prev.isNotEmpty() && cur.isNotEmpty() &&
+                                !prev.last().isWhitespace() && !cur.first().isWhitespace() &&
+                                !",.;:!?)]}".contains(cur.first()) &&
+                                !"([".contains(prev.last())
+                            if (needSpace && !prev.endsWith("-") && !prev.endsWith("'")) append(' ')
+                        }
+                        append(w.text)
+                    }
+                }
+            } else ""
+
+            val plain = decodeXmlEntities(body.replace(Regex("<[^>]+>"), "")).trim()
+                .replace(Regex("\\s+"), " ")
+            val display = when {
+                plain.isNotEmpty() -> plain
+                joinedWords.isNotEmpty() -> joinedWords
+                else -> ""
+            }
+            if (display.isNotEmpty() || words.isNotEmpty()) {
+                lines.add(
+                    LyricLine(
+                        timeMs = begin,
+                        text = display.ifEmpty { joinedWords },
+                        words = words,
+                        endMs = endMs,
+                        agent = agent,
+                        isBackground = isBg
+                    )
+                )
+            }
+        }
+        return lines.sortedWith(compareBy({ it.timeMs }, { if (it.isBackground) 1 else 0 }))
     }
+
+    private fun decodeXmlEntities(s: String): String =
+        s.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace(Regex("""&#(\d+);""")) { mr ->
+                mr.groupValues[1].toIntOrNull()?.toChar()?.toString() ?: mr.value
+            }
+            .replace(Regex("""&#x([0-9a-fA-F]+);""")) { mr ->
+                mr.groupValues[1].toIntOrNull(16)?.toChar()?.toString() ?: mr.value
+            }
 
     private fun parseTtmlTime(raw: String): Long {
         val s = raw.trim()
@@ -374,10 +492,7 @@ object LyricsExtractor {
         }
         if (synced.isNotEmpty()) return synced.sortedBy { it.timeMs }
         unsyncedText?.let { text ->
-            val asLrc = parseLrcText(text)
-            if (asLrc.isNotEmpty()) return asLrc
-            // quebra em linhas sem tempo
-            return text.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { LyricLine(-1, it) }
+            return parseLyricsContent(text)
         }
         return null
     }
@@ -497,12 +612,12 @@ object LyricsExtractor {
             if (key == "LYRICS" || key == "UNSYNCEDLYRICS" || key == "SYNCEDLYRICS") {
                 val body = entry.substring(eq + 1).trim()
                 if (body.isEmpty()) continue
-                val lrc = parseLrcText(body)
-                if (lrc.isNotEmpty()) return lrc
+                val parsed = parseLyricsContent(body)
+                if (parsed.isNotEmpty() && parsed.any { it.timeMs >= 0 }) return parsed
                 if (plain == null) plain = body
             }
         }
-        return plain?.let { toPlainLines(it) }
+        return plain?.let { parseLyricsContent(it) }
     }
 
     /** Plano B para OGG cujos comentários cruzam páginas: busca textual só no trecho já lido. */
@@ -517,9 +632,7 @@ object LyricsExtractor {
             val m = p.find(text) ?: continue
             val body = m.groupValues[1].trim()
             if (body.isEmpty()) continue
-            val lrc = parseLrcText(body)
-            if (lrc.isNotEmpty()) return lrc
-            return toPlainLines(body)
+            return parseLyricsContent(body)
         }
         return null
     }

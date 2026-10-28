@@ -17,8 +17,8 @@ android {
         applicationId = "gui.pgcr.music"
         minSdk = 26
         targetSdk = 36
-        versionCode = 215
-        versionName = "0.55"
+        versionCode = 220
+        versionName = "0.60"
 
         if (hasProjectM) {
             ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }

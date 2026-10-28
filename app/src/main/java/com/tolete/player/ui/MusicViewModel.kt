@@ -28,6 +28,8 @@ import com.tolete.player.data.LyricsExtractor
 import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.LibrarySettings
 import com.tolete.player.data.LrcLibClient
+import com.tolete.player.data.LyricsSearch
+import com.tolete.player.data.LyricsSearchResult
 import com.tolete.player.data.Playlist
 import com.tolete.player.data.SourceFolder
 import com.tolete.player.data.MusicScanner
@@ -713,6 +715,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // e tentamos sinalizar via sessão se possível
     }
 
+    /** Modo imersivo na tela Now Playing (esconde barras de status e navegação). */
+    private val _immersiveNowPlaying = MutableStateFlow(prefs.getBoolean(KEY_IMMERSIVE_NOW_PLAYING, true))
+    val immersiveNowPlaying: StateFlow<Boolean> = _immersiveNowPlaying.asStateFlow()
+
+    fun setImmersiveNowPlaying(enabled: Boolean) {
+        _immersiveNowPlaying.value = enabled
+        prefs.edit().putBoolean(KEY_IMMERSIVE_NOW_PLAYING, enabled).apply()
+    }
+
     // ---------- Visualizador .milk (presets do usuário) ----------
     private val _milkPresets = MutableStateFlow(
         com.tolete.player.visualizer.MilkPresetStore.list(application)
@@ -781,7 +792,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
 
     /** Saída de áudio preferida (UI + preferência; aplicação plena exige reinício da sessão). */
-    enum class AudioOutputBackend { DEFAULT, AUDIOTRACK, AAUDIO, OPENSLES }
+    enum class AudioOutputBackend { DEFAULT, AUDIOTRACK, AAUDIO, OPENSLES, USB_EXCLUSIVE }
 
     private val _audioOutput = MutableStateFlow(
         try {
@@ -797,12 +808,78 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString(KEY_AUDIO_OUTPUT, backend.name).apply()
     }
 
-    private val _forceMaxSampleRate = MutableStateFlow(prefs.getBoolean(KEY_FORCE_MAX_SR, false))
-    val forceMaxSampleRate: StateFlow<Boolean> = _forceMaxSampleRate.asStateFlow()
+    /**
+     * Taxa de amostragem preferida da saída (Hz).
+     * 0 = automática (sistema). Pedido ao pipeline; o Android ainda pode reamostrar.
+     */
+    private val _preferredSampleRate = MutableStateFlow(
+        prefs.getInt(KEY_PREFERRED_SAMPLE_RATE, 0).let { if (it < 0) 0 else it }
+    )
+    val preferredSampleRate: StateFlow<Int> = _preferredSampleRate.asStateFlow()
 
-    fun setForceMaxSampleRate(enabled: Boolean) {
-        _forceMaxSampleRate.value = enabled
-        prefs.edit().putBoolean(KEY_FORCE_MAX_SR, enabled).apply()
+    fun setPreferredSampleRate(hz: Int) {
+        val v = if (hz <= 0) 0 else hz
+        _preferredSampleRate.value = v
+        prefs.edit().putInt(KEY_PREFERRED_SAMPLE_RATE, v).apply()
+    }
+
+    /**
+     * Recria o PlaybackService/ExoPlayer para aplicar backend, taxa e rota USB agora.
+     * Restaura fila, posição e play/pause.
+     */
+    fun applyAudioSettingsNow() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val c = controller
+            val items = try {
+                if (c != null && c.mediaItemCount > 0) {
+                    (0 until c.mediaItemCount).map { c.getMediaItemAt(it) }
+                } else emptyList()
+            } catch (_: Exception) { emptyList() }
+            val idx = try { c?.currentMediaItemIndex ?: 0 } catch (_: Exception) { 0 }
+            val pos = try { c?.currentPosition ?: 0L } catch (_: Exception) { 0L }
+            val shouldPlay = try { c?.playWhenReady == true } catch (_: Exception) { false }
+            try { c?.pause() } catch (_: Exception) {}
+            try { c?.stop() } catch (_: Exception) {}
+            try {
+                c?.release()
+            } catch (_: Exception) {}
+            controller = null
+            try {
+                controllerFuture?.cancel(true)
+            } catch (_: Exception) {}
+            controllerFuture = null
+            try {
+                app.stopService(android.content.Intent(app, com.tolete.player.PlaybackService::class.java))
+            } catch (_: Exception) {}
+            kotlinx.coroutines.delay(450)
+            connectController()
+            var waits = 0
+            while (controller == null && waits < 25) {
+                kotlinx.coroutines.delay(120)
+                waits++
+            }
+            val c2 = controller
+            if (c2 != null && items.isNotEmpty()) {
+                try {
+                    c2.setMediaItems(items, idx.coerceAtLeast(0), pos.coerceAtLeast(0L))
+                    c2.prepare()
+                    if (shouldPlay) c2.play() else c2.pause()
+                    syncFromController()
+                } catch (e: Exception) {
+                    android.util.Log.e("MusicVM", "applyAudioSettingsNow restore failed", e)
+                }
+            }
+            val usb = com.tolete.player.data.UsbAudioRouter.findUsbOutput(app)
+            val msg = when {
+                _audioOutput.value == AudioOutputBackend.USB_EXCLUSIVE && usb == null ->
+                    "Player recriado · nenhum DAC USB detectado"
+                _audioOutput.value == AudioOutputBackend.USB_EXCLUSIVE ->
+                    "Player recriado · ${com.tolete.player.data.UsbAudioRouter.label(usb)}"
+                else -> "Player recriado com as preferências de áudio"
+            }
+            android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun artistSplitterOf(st: LibrarySettings) =
@@ -1355,6 +1432,46 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _positionMs.value = positionMs
     }
 
+    /** Velocidade de reprodução (1f = normal). Usado no sincronizador de letras. */
+    fun setPlaybackSpeed(speed: Float) {
+        val s = speed.coerceIn(0.5f, 2f)
+        android.util.Log.i("MusicVM", "setPlaybackSpeed($s) player=${com.tolete.player.PlaybackService.exoPlayerRef != null} ctrl=${controller != null}")
+
+        // 1) Referência direta ao ExoPlayer
+        com.tolete.player.PlaybackService.setSpeed(s)
+
+        // 2) MediaController
+        try {
+            controller?.setPlaybackSpeed(s)
+        } catch (e: Exception) {
+            android.util.Log.w("MusicVM", "controller.setPlaybackSpeed failed", e)
+        }
+        try {
+            controller?.playbackParameters =
+                androidx.media3.common.PlaybackParameters(s, /* pitch= */ 1f)
+        } catch (_: Exception) { }
+
+        // 3) Comando customizado da sessão
+        try {
+            val args = android.os.Bundle().apply {
+                putFloat(com.tolete.player.PlaybackService.EXTRA_SPEED, s)
+            }
+            val cmd = androidx.media3.session.SessionCommand(
+                com.tolete.player.PlaybackService.ACTION_SET_SPEED,
+                android.os.Bundle.EMPTY
+            )
+            controller?.sendCustomCommand(cmd, args)
+        } catch (e: Exception) {
+            android.util.Log.w("MusicVM", "sendCustomCommand SET_SPEED failed", e)
+        }
+    }
+
+    fun currentPlaybackSpeed(): Float {
+        val direct = com.tolete.player.PlaybackService.currentSpeed()
+        if (direct > 0f) return direct
+        return controller?.playbackParameters?.speed?.takeIf { it > 0f } ?: 1f
+    }
+
     fun toggleShuffle() {
         applyShuffleMode(!_shuffle.value)
     }
@@ -1618,17 +1735,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else emptyList()
     }
 
-    suspend fun searchLyrics(trackName: String, artistName: String): List<LrcLibClient.SearchResult> =
-        LrcLibClient.search(trackName, artistName)
+    /** Busca manual: LRCLIB + QQ Music + NetEase + KuGou, todas ao mesmo tempo. */
+    suspend fun searchLyrics(trackName: String, artistName: String): List<LyricsSearchResult> =
+        LyricsSearch.search(trackName, artistName)
 
     suspend fun embedLyricsResult(
         track: Track,
-        result: LrcLibClient.SearchResult,
+        result: LyricsSearchResult,
         target: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE
     ): List<LyricLine> =
         withContext(Dispatchers.IO) {
-            val lines = result.toLyricLines()
-            val raw = result.toLrcText()
+            val lines = result.lines
+            val raw = result.lrcText
             if (lines.isNotEmpty() && !raw.isNullOrBlank()) {
                 when (target) {
                     LyricsEmbedder.Target.LRC_FILE -> LyricsEmbedder.embedLrc(getApplication(), track, raw)
@@ -1698,6 +1816,223 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?: emptyMap()
     )
 
+    /**
+     * Log de plays com timestamp (id\tts por linha), para estatísticas por período.
+     * Limitado a PLAY_EVENTS_MAX entradas (mais recentes).
+     */
+    private val _playEvents = MutableStateFlow(
+        prefs.getString(KEY_PLAY_EVENTS, null)
+            ?.lineSequence()
+            ?.mapNotNull { line ->
+                val parts = line.split('\t', limit = 2)
+                if (parts.size == 2) {
+                    val ts = parts[1].toLongOrNull() ?: return@mapNotNull null
+                    parts[0] to ts
+                } else null
+            }
+            ?.toList()
+            ?: emptyList()
+    )
+
+    enum class StatsPeriod {
+        ALL_TIME, THIS_WEEK, LAST_WEEK, THIS_MONTH, LAST_MONTH, THIS_YEAR, LAST_YEAR
+    }
+
+    enum class MostPlayedKind { TRACKS, ARTISTS, ALBUMS }
+
+    data class RankedItem(
+        val key: String,
+        val title: String,
+        val subtitle: String,
+        val count: Int,
+        val trackIds: List<String> = emptyList(),
+        val artPath: String? = null
+    )
+
+    /** Intervalo [start, end) em epoch ms para o período. */
+    fun periodRange(period: StatsPeriod, now: Long = System.currentTimeMillis()): Pair<Long, Long> {
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = now }
+        fun startOfDay(c: java.util.Calendar) {
+            c.set(java.util.Calendar.HOUR_OF_DAY, 0)
+            c.set(java.util.Calendar.MINUTE, 0)
+            c.set(java.util.Calendar.SECOND, 0)
+            c.set(java.util.Calendar.MILLISECOND, 0)
+        }
+        return when (period) {
+            StatsPeriod.ALL_TIME -> 0L to Long.MAX_VALUE
+            StatsPeriod.THIS_WEEK -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_WEEK, cal.firstDayOfWeek)
+                val start = cal.timeInMillis
+                cal.add(java.util.Calendar.WEEK_OF_YEAR, 1)
+                start to cal.timeInMillis
+            }
+            StatsPeriod.LAST_WEEK -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_WEEK, cal.firstDayOfWeek)
+                val thisStart = cal.timeInMillis
+                cal.add(java.util.Calendar.WEEK_OF_YEAR, -1)
+                cal.timeInMillis to thisStart
+            }
+            StatsPeriod.THIS_MONTH -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+                val start = cal.timeInMillis
+                cal.add(java.util.Calendar.MONTH, 1)
+                start to cal.timeInMillis
+            }
+            StatsPeriod.LAST_MONTH -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+                val thisStart = cal.timeInMillis
+                cal.add(java.util.Calendar.MONTH, -1)
+                cal.timeInMillis to thisStart
+            }
+            StatsPeriod.THIS_YEAR -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_YEAR, 1)
+                val start = cal.timeInMillis
+                cal.add(java.util.Calendar.YEAR, 1)
+                start to cal.timeInMillis
+            }
+            StatsPeriod.LAST_YEAR -> {
+                startOfDay(cal)
+                cal.set(java.util.Calendar.DAY_OF_YEAR, 1)
+                val thisStart = cal.timeInMillis
+                cal.add(java.util.Calendar.YEAR, -1)
+                cal.timeInMillis to thisStart
+            }
+        }
+    }
+
+    private fun countsInPeriod(period: StatsPeriod): Map<String, Int> {
+        if (period == StatsPeriod.ALL_TIME) return _playCounts.value
+        val (start, end) = periodRange(period)
+        val map = mutableMapOf<String, Int>()
+        for ((id, ts) in _playEvents.value) {
+            if (ts in start until end) map[id] = (map[id] ?: 0) + 1
+        }
+        // Fallback: se ainda não há log de eventos, usa lastPlayedAt + contagem total
+        if (map.isEmpty() && _playEvents.value.isEmpty()) {
+            for ((id, ts) in _lastPlayedAt.value) {
+                if (ts in start until end) {
+                    map[id] = _playCounts.value[id] ?: 1
+                }
+            }
+        }
+        return map
+    }
+
+    fun mostPlayedRanked(kind: MostPlayedKind, period: StatsPeriod, limit: Int = HISTORY_MAX): List<RankedItem> {
+        val counts = countsInPeriod(period)
+        if (counts.isEmpty()) return emptyList()
+        val lib = _library.value
+        val byId = lib.associateBy { it.id }
+        return when (kind) {
+            MostPlayedKind.TRACKS -> {
+                counts.entries
+                    .sortedByDescending { it.value }
+                    .mapNotNull { (id, c) ->
+                        val t = byId[id] ?: return@mapNotNull null
+                        RankedItem(
+                            key = id,
+                            title = t.title,
+                            subtitle = t.artist,
+                            count = c,
+                            trackIds = listOf(id),
+                            artPath = t.artPath
+                        )
+                    }
+                    .take(limit)
+            }
+            MostPlayedKind.ARTISTS -> {
+                val agg = mutableMapOf<String, Pair<Int, MutableList<String>>>()
+                for ((id, c) in counts) {
+                    val t = byId[id] ?: continue
+                    val names = artistNamesOf(t).ifEmpty { listOf(t.artist.ifBlank { "Desconhecido" }) }
+                    for (name in names) {
+                        val cur = agg[name] ?: (0 to mutableListOf())
+                        agg[name] = (cur.first + c) to cur.second.apply { add(id) }
+                    }
+                }
+                val app = getApplication<android.app.Application>()
+                agg.entries
+                    .sortedByDescending { it.value.first }
+                    .map { (name, pair) ->
+                        val firstTrack = pair.second.firstOrNull()?.let { byId[it] }
+                        // Mesma foto da lista de artistas: meta local → URL → capa de faixa
+                        val meta = try {
+                            com.tolete.player.data.ArtistMetaStore.load(
+                                app,
+                                com.tolete.player.data.ArtistMetaStore.artistKey(name)
+                            )
+                        } catch (_: Exception) { null }
+                        val art = meta?.localImagePath?.takeIf { java.io.File(it).exists() }
+                            ?: meta?.imageUrl
+                            ?: firstTrack?.artPath
+                        RankedItem(
+                            key = name,
+                            title = name,
+                            subtitle = if (pair.first == 1) "1 play" else "${pair.first} plays",
+                            count = pair.first,
+                            trackIds = pair.second.distinct(),
+                            artPath = art
+                        )
+                    }
+                    .take(limit)
+            }
+            MostPlayedKind.ALBUMS -> {
+                val agg = mutableMapOf<String, Pair<Int, MutableList<String>>>()
+                for ((id, c) in counts) {
+                    val t = byId[id] ?: continue
+                    val album = t.album.ifBlank { "Álbum desconhecido" }
+                    val cur = agg[album] ?: (0 to mutableListOf())
+                    agg[album] = (cur.first + c) to cur.second.apply { add(id) }
+                }
+                val app = getApplication<android.app.Application>()
+                agg.entries
+                    .sortedByDescending { it.value.first }
+                    .map { (album, pair) ->
+                        val tracks = pair.second.mapNotNull { byId[it] }
+                        val firstTrack = tracks.firstOrNull()
+                        val meta = try {
+                            com.tolete.player.data.ArtistMetaStore.load(
+                                app,
+                                com.tolete.player.data.ArtistMetaStore.albumKey(
+                                    album,
+                                    firstTrack?.artist
+                                )
+                            )
+                        } catch (_: Exception) { null }
+                        val art = tracks.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
+                            ?: meta?.localImagePath?.takeIf { java.io.File(it).exists() }
+                            ?: meta?.imageUrl
+                        RankedItem(
+                            key = album,
+                            title = album,
+                            subtitle = firstTrack?.artist.orEmpty(),
+                            count = pair.first,
+                            trackIds = pair.second.distinct(),
+                            artPath = art
+                        )
+                    }
+                    .take(limit)
+            }
+        }
+    }
+
+    fun historyInPeriod(period: StatsPeriod): List<Track> {
+        val all = _historyIds.value
+        val byId = _library.value.associateBy { it.id }
+        if (period == StatsPeriod.ALL_TIME) return all.mapNotNull { byId[it] }
+        val (start, end) = periodRange(period)
+        val lasts = _lastPlayedAt.value
+        return all.mapNotNull { id ->
+            val ts = lasts[id] ?: return@mapNotNull null
+            if (ts in start until end) byId[id] else null
+        }
+    }
+
     /** Últimas faixas tocadas (mais recente primeiro), já resolvidas na biblioteca. */
     val history: StateFlow<List<Track>> = combine(_historyIds, tracks) { ids, lib ->
         val byId = lib.associateBy { it.id }
@@ -1735,6 +2070,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun recordPlay(id: String) {
         if (id in countedThisSession) return
         countedThisSession.add(id)
+        val now = System.currentTimeMillis()
         val updated = (listOf(id) + _historyIds.value.filter { it != id }).take(HISTORY_MAX)
         _historyIds.value = updated
         prefs.edit().putString(KEY_HISTORY, updated.joinToString("\n")).apply()
@@ -1742,11 +2078,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         counts[id] = (counts[id] ?: 0) + 1
         _playCounts.value = counts
         val lasts = _lastPlayedAt.value.toMutableMap()
-        lasts[id] = System.currentTimeMillis()
+        lasts[id] = now
         _lastPlayedAt.value = lasts
+        val events = (listOf(id to now) + _playEvents.value).take(PLAY_EVENTS_MAX)
+        _playEvents.value = events
         prefs.edit()
             .putString(KEY_PLAY_COUNTS, counts.entries.joinToString("\n") { "${it.key}=${it.value}" })
             .putString(KEY_LAST_PLAYED, lasts.entries.joinToString("\n") { "${it.key}=${it.value}" })
+            .putString(KEY_PLAY_EVENTS, events.joinToString("\n") { "${it.first}\t${it.second}" })
             .apply()
     }
 
@@ -2066,7 +2405,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // ---------- Backup ----------
     fun exportBackup(): String {
         val obj = org.json.JSONObject()
-        obj.put("version", 2)
+        obj.put("version", 3)
         obj.put("theme", _themeId.value.name)
         obj.put("lyricsFont", _lyricsFontPath.value)
         obj.put("uiFont", _uiFontPath.value)
@@ -2084,25 +2423,43 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         obj.put("shuffleType", _shuffleType.value.name)
         obj.put("bitPerfect", _bitPerfect.value)
         obj.put("audioOutput", _audioOutput.value.name)
+        obj.put("preferredSampleRate", _preferredSampleRate.value)
         obj.put("allFilesMode", _allFilesMode.value)
         obj.put("splitArtists", _librarySettings.value.splitArtists)
         obj.put("artistSeparators", _librarySettings.value.artistSeparators)
         obj.put("artistExceptions", _librarySettings.value.artistExceptions)
         obj.put("splitGenres", _librarySettings.value.splitGenres)
         obj.put("genreSeparators", _librarySettings.value.genreSeparators)
+        obj.put("ignoredFolders", _librarySettings.value.ignoredFolders)
+        obj.put("minDurationSec", _librarySettings.value.minDurationSec)
         obj.put("fadeMs", _fadeMs.value)
+        obj.put("seekBarStyle", _seekBarStyle.value.name)
+        obj.put("immersiveNowPlaying", _immersiveNowPlaying.value)
         obj.put("milkIntervalSec", _milkIntervalSec.value)
         obj.put("changeSongWithMilkInterval", _changeSongWithMilkInterval.value)
         obj.put("changePresetOnSongChange", _changePresetOnSongChange.value)
         obj.put("playCountThreshold", _playCountThreshold.value)
         obj.put("splashEnabled", _splashEnabled.value)
         obj.put("splashSoundEnabled", _splashSoundEnabled.value)
+        obj.put("floatingIconsEnabled", _floatingIconsEnabled.value)
+        obj.put("menuBgColor", _menuBgColor.value)
         obj.put("dynamicDefaultColor", _dynamicDefaultColor.value)
-        // Histórico e contagem de plays
+        obj.put("groupSort", prefs.getString(KEY_GROUP_SORT, null))
+        obj.put("groupOrder", prefs.getString(KEY_GROUP_ORDER, null))
+        obj.put("trackSort", prefs.getString(KEY_TRACK_SORT, null))
+        obj.put("trackOrder", prefs.getString(KEY_TRACK_ORDER, null))
+        // Histórico, contagens, última reprodução e log de eventos (períodos)
         obj.put("history", _historyIds.value.joinToString("\n"))
         val counts = org.json.JSONObject()
         _playCounts.value.forEach { (k, v) -> counts.put(k, v) }
         obj.put("playCounts", counts)
+        val lasts = org.json.JSONObject()
+        _lastPlayedAt.value.forEach { (k, v) -> lasts.put(k, v) }
+        obj.put("lastPlayedAt", lasts)
+        obj.put(
+            "playEvents",
+            _playEvents.value.joinToString("\n") { "${it.first}\t${it.second}" }
+        )
         val folders = org.json.JSONArray()
         _treeUris.value.forEach { folders.put(it) }
         obj.put("folders", folders)
@@ -2111,6 +2468,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _playlists.value.find { it.isFavorites }?.trackIds?.forEach { favs.put(it) }
         } catch (_: Exception) {}
         obj.put("favorites", favs)
+        // Playlists (exceto a lista de favoritos embutida, já coberta por favorites)
+        try {
+            val pls = org.json.JSONArray()
+            _playlists.value.filter { !it.isFavorites }.forEach { pl ->
+                val o = org.json.JSONObject()
+                o.put("id", pl.id)
+                o.put("name", pl.name)
+                o.put("trackIds", org.json.JSONArray(pl.trackIds))
+                pls.put(o)
+            }
+            obj.put("playlists", pls)
+        } catch (_: Exception) {}
+        // Favoritos de presets .milk
+        try {
+            val milkFavs = prefs.getStringSet("milk_preset_favs", emptySet()) ?: emptySet()
+            val arr = org.json.JSONArray()
+            milkFavs.forEach { arr.put(it) }
+            obj.put("milkPresetFavorites", arr)
+        } catch (_: Exception) {}
         // Metadados de artistas (texto/foto URL) — fotos locais vão no ZIP separado
         try {
             obj.put("artistMeta", org.json.JSONObject(ArtistMetaStore.exportAll(getApplication())))
@@ -2215,6 +2591,38 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (obj.has("lyricsBorder")) setLyricsBorderColor(obj.getInt("lyricsBorder"))
             if (obj.has("lyricsBorderWidth")) setLyricsBorderWidth(obj.getDouble("lyricsBorderWidth").toFloat())
             if (obj.has("autoFetchLyrics")) setAutoFetchLyrics(obj.getBoolean("autoFetchLyrics"))
+            if (obj.has("shuffleType")) {
+                try { setShuffleType(ShuffleType.valueOf(obj.getString("shuffleType"))) } catch (_: Exception) {}
+            }
+            if (obj.has("audioOutput")) {
+                try { setAudioOutput(AudioOutputBackend.valueOf(obj.getString("audioOutput"))) } catch (_: Exception) {}
+            }
+            if (obj.has("preferredSampleRate")) setPreferredSampleRate(obj.getInt("preferredSampleRate"))
+            if (obj.has("fadeMs")) setFadeMs(obj.getInt("fadeMs"))
+            if (obj.has("seekBarStyle")) {
+                try { setSeekBarStyle(SeekBarStyle.valueOf(obj.getString("seekBarStyle"))) } catch (_: Exception) {}
+            }
+            if (obj.has("immersiveNowPlaying")) setImmersiveNowPlaying(obj.getBoolean("immersiveNowPlaying"))
+            if (obj.has("milkIntervalSec")) setMilkIntervalSec(obj.getInt("milkIntervalSec"))
+            if (obj.has("changeSongWithMilkInterval")) setChangeSongWithMilkInterval(obj.getBoolean("changeSongWithMilkInterval"))
+            if (obj.has("changePresetOnSongChange")) setChangePresetOnSongChange(obj.getBoolean("changePresetOnSongChange"))
+            if (obj.has("playCountThreshold")) setPlayCountThreshold(obj.getInt("playCountThreshold"))
+            if (obj.has("splashEnabled")) setSplashEnabled(obj.getBoolean("splashEnabled"))
+            if (obj.has("splashSoundEnabled")) setSplashSoundEnabled(obj.getBoolean("splashSoundEnabled"))
+            if (obj.has("floatingIconsEnabled")) setFloatingIconsEnabled(obj.getBoolean("floatingIconsEnabled"))
+            if (obj.has("menuBgColor")) setMenuBgColor(obj.getInt("menuBgColor"))
+            if (obj.has("dynamicDefaultColor")) setDynamicDefaultColor(obj.getInt("dynamicDefaultColor"))
+            if (obj.has("splitArtists")) setSplitArtists(obj.getBoolean("splitArtists"))
+            if (obj.has("artistSeparators")) setArtistSeparators(obj.getString("artistSeparators"))
+            if (obj.has("artistExceptions")) setArtistExceptions(obj.getString("artistExceptions"))
+            if (obj.has("splitGenres")) setSplitGenres(obj.getBoolean("splitGenres"))
+            if (obj.has("genreSeparators")) setGenreSeparators(obj.getString("genreSeparators"))
+            if (obj.has("ignoredFolders")) setIgnoredFolders(obj.getString("ignoredFolders"))
+            if (obj.has("minDurationSec")) setMinDurationSec(obj.getInt("minDurationSec"))
+            if (obj.has("groupSort")) prefs.edit().putString(KEY_GROUP_SORT, obj.optString("groupSort")).apply()
+            if (obj.has("groupOrder")) prefs.edit().putString(KEY_GROUP_ORDER, obj.optString("groupOrder")).apply()
+            if (obj.has("trackSort")) prefs.edit().putString(KEY_TRACK_SORT, obj.optString("trackSort")).apply()
+            if (obj.has("trackOrder")) prefs.edit().putString(KEY_TRACK_ORDER, obj.optString("trackOrder")).apply()
             if (obj.has("history")) {
                 _historyIds.value = obj.optString("history").split('\n').filter { it.isNotBlank() }
                 prefs.edit().putString(KEY_HISTORY, _historyIds.value.joinToString("\n")).apply()
@@ -2225,6 +2633,79 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 c.keys().forEach { k -> map[k] = c.optInt(k) }
                 _playCounts.value = map
                 prefs.edit().putString(KEY_PLAY_COUNTS, map.entries.joinToString("\n") { "${it.key}=${it.value}" }).apply()
+            }
+            if (obj.has("lastPlayedAt")) {
+                val c = obj.getJSONObject("lastPlayedAt")
+                val map = mutableMapOf<String, Long>()
+                c.keys().forEach { k -> map[k] = c.optLong(k) }
+                _lastPlayedAt.value = map
+                prefs.edit().putString(KEY_LAST_PLAYED, map.entries.joinToString("\n") { "${it.key}=${it.value}" }).apply()
+            }
+            if (obj.has("playEvents")) {
+                val events = obj.optString("playEvents").lineSequence().mapNotNull { line ->
+                    val parts = line.split('\t', limit = 2)
+                    if (parts.size == 2) {
+                        val ts = parts[1].toLongOrNull() ?: return@mapNotNull null
+                        parts[0] to ts
+                    } else null
+                }.toList()
+                _playEvents.value = events
+                prefs.edit().putString(KEY_PLAY_EVENTS, events.joinToString("\n") { "${it.first}\t${it.second}" }).apply()
+            }
+            if (obj.has("folders")) {
+                val arr = obj.getJSONArray("folders")
+                val list = (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+                if (list.isNotEmpty()) {
+                    _treeUris.value = list
+                    prefs.edit().putStringSet(KEY_TREE_URIS, list.toSet()).apply()
+                }
+            }
+            if (obj.has("milkPresetFavorites")) {
+                val arr = obj.getJSONArray("milkPresetFavorites")
+                val set = (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }.toSet()
+                prefs.edit().putStringSet("milk_preset_favs", set).apply()
+            }
+            if (obj.has("favorites")) {
+                try {
+                    val arr = obj.getJSONArray("favorites")
+                    val ids = (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+                    val list = _playlists.value.toMutableList()
+                    val favIdx = list.indexOfFirst { it.isFavorites }
+                    if (favIdx >= 0) {
+                        list[favIdx] = list[favIdx].copy(trackIds = ids)
+                    } else {
+                        list.add(0, Playlist.favorites(ids))
+                    }
+                    _playlists.value = list
+                    persistPlaylists()
+                } catch (_: Exception) {}
+            }
+            if (obj.has("playlists")) {
+                try {
+                    val arr = obj.getJSONArray("playlists")
+                    // Mescla playlists salvas (não sobrescreve favoritos)
+                    val existing = _playlists.value.toMutableList()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val id = o.optString("id")
+                        if (id.isBlank()) continue
+                        val name = o.optString("name").ifBlank { "Playlist" }
+                        val idsArr = o.optJSONArray("trackIds")
+                        val trackIds = if (idsArr != null) {
+                            (0 until idsArr.length()).mapNotNull { idsArr.optString(it).takeIf { s -> s.isNotBlank() } }
+                        } else emptyList()
+                        val idx = existing.indexOfFirst { it.id == id }
+                        if (idx >= 0) {
+                            existing[idx] = existing[idx].copy(name = name, trackIds = trackIds)
+                        } else {
+                            existing.add(
+                                Playlist(id = id, name = name, trackIds = trackIds, isFavorites = false)
+                            )
+                        }
+                    }
+                    _playlists.value = existing
+                    persistPlaylists()
+                } catch (_: Exception) {}
             }
             if (obj.has("artistMeta")) {
                 try { ArtistMetaStore.importAll(getApplication(), obj.getJSONObject("artistMeta").toString()) } catch (_: Exception) {}
@@ -2315,11 +2796,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
         const val KEY_SHUFFLE_TYPE = "shuffle_type"
         const val KEY_BIT_PERFECT = "bit_perfect"
+        const val KEY_IMMERSIVE_NOW_PLAYING = "immersive_now_playing"
         const val KEY_MILK_INTERVAL = "milk_interval_sec"
         const val KEY_MILK_CHANGE_SONG = "milk_change_song_with_interval"
         const val KEY_MILK_PRESET_ON_SONG = "milk_preset_on_song_change"
         const val KEY_AUDIO_OUTPUT = "audio_output_backend"
-        const val KEY_FORCE_MAX_SR = "force_max_sample_rate"
+        const val KEY_FORCE_MAX_SR = "force_max_sample_rate" // legado
+        const val KEY_PREFERRED_SAMPLE_RATE = "preferred_sample_rate"
+        const val KEY_PLAY_EVENTS = "play_events_log"
+        private const val PLAY_EVENTS_MAX = 8000
         const val KEY_LYRICS_FONT_SIZE = "lyrics_font_size"
         const val KEY_LYRICS_PRIMARY = "lyrics_primary_color"
         const val KEY_LYRICS_SECONDARY = "lyrics_secondary_color"

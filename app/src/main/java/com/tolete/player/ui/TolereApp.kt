@@ -263,17 +263,16 @@ fun TolereApp(
     val allFilesMode by vm.allFilesMode.collectAsStateWithLifecycle()
     val autoFetchLyrics by vm.autoFetchLyrics.collectAsStateWithLifecycle()
     val shuffleType by vm.shuffleType.collectAsStateWithLifecycle()
-    val bitPerfect by vm.bitPerfect.collectAsStateWithLifecycle()
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
+    val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
     val rootContext = LocalContext.current
     val milkIntervalSec by vm.milkIntervalSec.collectAsStateWithLifecycle()
     val changeSongWithMilkInterval by vm.changeSongWithMilkInterval.collectAsStateWithLifecycle()
     val changePresetOnSongChange by vm.changePresetOnSongChange.collectAsStateWithLifecycle()
-    val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
-    val forceMaxSampleRate by vm.forceMaxSampleRate.collectAsStateWithLifecycle()
+
     val lyricsFontSize by vm.lyricsFontSize.collectAsStateWithLifecycle()
     val lyricsPrimaryColor by vm.lyricsPrimaryColor.collectAsStateWithLifecycle()
     val lyricsSecondaryColor by vm.lyricsSecondaryColor.collectAsStateWithLifecycle()
@@ -349,7 +348,6 @@ fun TolereApp(
     BackHandler(enabled = settingsPage != SettingsPage.NONE) {
         settingsPage = when (settingsPage) {
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
-            SettingsPage.AUDIO_OUTPUT -> SettingsPage.PLAYER
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
             SettingsPage.LIBRARY, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
             SettingsPage.CHANGELOG -> SettingsPage.ABOUT
@@ -822,6 +820,16 @@ fun TolereApp(
                                         },
                                         onTrackLongClick = { track ->
                                             selectedTrackIds = selectedTrackIds + track.id
+                                        },
+                                        mostPlayedRanked = { kind, period -> vm.mostPlayedRanked(kind, period) },
+                                        historyInPeriod = { period -> vm.historyInPeriod(period) },
+                                        onExportTopStats = { kind, period, items ->
+                                            TopStatsShareHelper.share(
+                                                context = rootContext,
+                                                kind = kind,
+                                                period = period,
+                                                items = items
+                                            )
                                         }
                                     )
                                 }
@@ -915,7 +923,6 @@ fun TolereApp(
                     onBack = {
                         settingsPage = when (settingsPage) {
                             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
-                            SettingsPage.AUDIO_OUTPUT -> SettingsPage.PLAYER
                             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
                             SettingsPage.CHANGELOG, SettingsPage.LICENSES -> SettingsPage.ABOUT
                             SettingsPage.LIBRARY, SettingsPage.APPEARANCE,
@@ -950,12 +957,12 @@ fun TolereApp(
                     onAutoFetchLyricsChange = vm::setAutoFetchLyrics,
                     shuffleType = shuffleType,
                     onShuffleTypeChange = vm::setShuffleType,
-                    bitPerfect = bitPerfect,
-                    onBitPerfectChange = vm::setBitPerfect,
                     fadeMs = fadeMs,
                     onFadeMsChange = vm::setFadeMs,
                     seekBarStyle = seekBarStyle,
                     onSeekBarStyleChange = vm::setSeekBarStyle,
+                    immersiveNowPlaying = immersiveNowPlaying,
+                    onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
                     playCountThreshold = playCountThreshold,
                     onPlayCountThresholdChange = vm::setPlayCountThreshold,
                     milkPresetCount = milkPresets.size,
@@ -975,10 +982,6 @@ fun TolereApp(
                         )
                         rootContext.startActivity(intent)
                     },
-                    audioOutput = audioOutput,
-                    onAudioOutputChange = vm::setAudioOutput,
-                    forceMaxSampleRate = forceMaxSampleRate,
-                    onForceMaxSampleRateChange = vm::setForceMaxSampleRate,
                     lyricsFontSize = lyricsFontSize,
                     onLyricsFontSizeChange = vm::setLyricsFontSize,
                     lyricsPrimaryColor = lyricsPrimaryColor,
@@ -1070,15 +1073,23 @@ fun TolereApp(
                                 else -> "Falha ao salvar letra"
                             }
                             android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
-                            if (ok) lyricsEditTrack = null
+                            if (ok) {
+                                vm.setPlaybackSpeed(1f)
+                                lyricsEditTrack = null
+                            }
                         },
-                        onClose = { lyricsEditTrack = null },
+                        onClose = {
+                            vm.setPlaybackSpeed(1f)
+                            lyricsEditTrack = null
+                        },
                         appColors = appColors,
                         initialTarget = if (LyricsEmbedder.hasExternalLrc(track))
                             LyricsEmbedder.Target.LRC_FILE
                         else
                             LyricsEmbedder.Target.EMBEDDED,
-                        canWriteLrc = LyricsEmbedder.canWriteExternalLrc(track)
+                        canWriteLrc = LyricsEmbedder.canWriteExternalLrc(track),
+                        getPlaybackSpeed = vm::currentPlaybackSpeed,
+                        onPlaybackSpeed = vm::setPlaybackSpeed
                     )
                 }
             }
@@ -1120,6 +1131,8 @@ fun TolereApp(
                         onToggle = vm::togglePlayPause,
                         onNext = vm::next,
                         onSeek = vm::seekTo,
+                        getPlaybackSpeed = vm::currentPlaybackSpeed,
+                        onPlaybackSpeed = vm::setPlaybackSpeed,
                         onToggleShuffle = vm::toggleShuffle,
                         onCycleRepeat = vm::cycleRepeatMode,
                         onSkipToQueueItem = vm::skipToQueueItem,
@@ -1176,7 +1189,8 @@ fun TolereApp(
                         menuBgColor = menuBgColor,
                         playCount = vm.playCountOf(current.id),
                         lastPlayedAt = vm.lastPlayedAt(current.id),
-                        seekBarStyle = seekBarStyle
+                        seekBarStyle = seekBarStyle,
+                        immersiveNowPlaying = immersiveNowPlaying
                     )
                 }
             }
@@ -3790,15 +3804,23 @@ private fun LysPlaceHome(
     selectedIds: Set<String> = emptySet(),
     selectionMode: Boolean = false,
     onTrackClick: (List<Track>, Int, Track) -> Unit = { list, idx, _ -> onPlayTracks(list, idx) },
-    onTrackLongClick: (Track) -> Unit = {}
+    onTrackLongClick: (Track) -> Unit = {},
+    mostPlayedRanked: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod) -> List<MusicViewModel.RankedItem> = { _, _ -> emptyList() },
+    historyInPeriod: (MusicViewModel.StatsPeriod) -> List<Track> = { emptyList() },
+    onExportTopStats: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod, List<MusicViewModel.RankedItem>) -> Unit = { _, _, _ -> }
 ) {
     val homeFontFamily = rememberFontFamily(homeButtonFontPath)
     val homeTextColor = Color(homeButtonColor)
     var section by remember { mutableStateOf<String?>(null) }
+    var mostKind by remember { mutableStateOf(MusicViewModel.MostPlayedKind.TRACKS) }
+    var mostPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
+    var historyPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
+    val context = LocalContext.current
     Box(
         Modifier
             .fillMaxSize()
-            .padding(bottom = bottomPadding)
+            // Padding só na home; nas seções o padding vai no contentPadding da lista
+            .padding(bottom = if (section == null) bottomPadding else 0.dp)
     ) {
         Column(
             Modifier
@@ -3913,52 +3935,114 @@ private fun LysPlaceHome(
                 }
                 when (section) {
                     "most" -> {
-                        if (mostPlayed.isEmpty()) {
-                            Text("Nenhuma reprodução registrada ainda.", color = Color.White.copy(0.6f))
-                        } else {
-                            androidx.compose.foundation.lazy.LazyColumn(
-                                contentPadding = PaddingValues(bottom = 8.dp)
+                        val ranked = remember(mostKind, mostPeriod, mostPlayed) {
+                            mostPlayedRanked(mostKind, mostPeriod)
+                        }
+                        Column(Modifier.fillMaxSize()) {
+                            // Abas: Músicas / Artistas / Álbuns
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(mostPlayed.size) { index ->
-                                    val track = mostPlayed[index]
-                                    val count = playCountOf(track.id)
-                                    val selected = track.id in selectedIds
+                                listOf(
+                                    MusicViewModel.MostPlayedKind.TRACKS to "Músicas",
+                                    MusicViewModel.MostPlayedKind.ARTISTS to "Artistas",
+                                    MusicViewModel.MostPlayedKind.ALBUMS to "Álbuns"
+                                ).forEach { (kind, label) ->
+                                    val sel = mostKind == kind
+                                    Text(
+                                        label,
+                                        color = if (sel) Color.Black else Color.White.copy(0.85f),
+                                        fontSize = 13.sp,
+                                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(20.dp))
+                                            .background(if (sel) appColors.accent else Color.White.copy(0.12f))
+                                            .clickable { mostKind = kind }
+                                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                            // Períodos
+                            StatsPeriodRow(
+                                selected = mostPeriod,
+                                accent = appColors.accent,
+                                onSelect = { mostPeriod = it }
+                            )
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                Text(
+                                    "Exportar top 10",
+                                    color = appColors.accent,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(appColors.accent.copy(0.15f))
+                                        .clickable {
+                                            val top = ranked.take(10)
+                                            if (top.isEmpty()) {
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    "Nada para exportar neste período",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                onExportTopStats(mostKind, mostPeriod, top)
+                                            }
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                            }
+                            if (ranked.isEmpty()) {
+                                Text("Nenhuma reprodução registrada neste período.", color = Color.White.copy(0.6f))
+                            } else {
+                            androidx.compose.foundation.lazy.LazyColumn(
+                                contentPadding = PaddingValues(bottom = bottomPadding + 8.dp),
+                                modifier = Modifier.weight(1f).fillMaxSize()
+                            ) {
+                                items(ranked.size) { index ->
+                                    val item = ranked[index]
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
-                                            .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
-                                            .combinedClickable(
-                                                onClick = { onTrackClick(mostPlayed, index, track) },
-                                                onLongClick = { onTrackLongClick(track) }
-                                            )
+                                            .clickable {
+                                                if (mostKind == MusicViewModel.MostPlayedKind.TRACKS && item.trackIds.isNotEmpty()) {
+                                                    val list = ranked.mapNotNull { r ->
+                                                        mostPlayed.find { it.id == r.key }
+                                                    }.ifEmpty {
+                                                        // fallback: usa mostPlayed global filtrado
+                                                        mostPlayed.filter { t -> ranked.any { it.key == t.id } }
+                                                    }
+                                                    val idx = list.indexOfFirst { it.id == item.key }.coerceAtLeast(0)
+                                                    if (list.isNotEmpty()) {
+                                                        onTrackClick(list, idx, list[idx])
+                                                    }
+                                                } else if (item.trackIds.isNotEmpty()) {
+                                                    val pool = mostPlayed.filter { it.id in item.trackIds.toSet() }
+                                                        .ifEmpty { mostPlayed }
+                                                    if (pool.isNotEmpty()) onPlayTracks(pool, 0)
+                                                }
+                                            }
                                             .padding(vertical = 10.dp, horizontal = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        if (selectionMode) {
-                                            Box(
-                                                Modifier
-                                                    .size(24.dp)
-                                                    .clip(CircleShape)
-                                                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                if (selected) {
-                                                    Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                                                }
-                                            }
-                                            Spacer(Modifier.width(10.dp))
-                                        } else {
-                                            Text(
-                                                "${index + 1}",
-                                                color = Color.White.copy(0.45f),
-                                                fontSize = 13.sp,
-                                                modifier = Modifier.width(28.dp)
-                                            )
-                                        }
+                                        Text(
+                                            "${index + 1}",
+                                            color = Color.White.copy(0.45f),
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.width(28.dp)
+                                        )
                                         Column(Modifier.weight(1f)) {
-                                            Text(track.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(item.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                             Text(
-                                                track.artist,
+                                                item.subtitle,
                                                 color = Color.White.copy(0.55f),
                                                 fontSize = 13.sp,
                                                 maxLines = 1,
@@ -3966,7 +4050,7 @@ private fun LysPlaceHome(
                                             )
                                         }
                                         Text(
-                                            if (count == 1) "1 play" else "$count plays",
+                                            if (item.count == 1) "1 play" else "${item.count} plays",
                                             color = appColors.accent,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold
@@ -3974,22 +4058,32 @@ private fun LysPlaceHome(
                                     }
                                 }
                             }
-                        }
+                            } // ranked not empty
+                        } // Column most
                     }
                     "history" -> {
-                        if (history.isEmpty()) {
-                            Text("Nenhuma faixa recente.", color = Color.White.copy(0.6f))
-                        } else {
-                            TrackList(
-                                tracks = history,
-                                nowPlayingId = null,
-                                bottomPadding = 0.dp,
-                                showTrackNumbers = false,
-                                selectedIds = selectedIds,
-                                selectionMode = selectionMode,
-                                onClick = { index, track -> onTrackClick(history, index, track) },
-                                onLongClick = onTrackLongClick
+                        val hist = remember(historyPeriod, history) { historyInPeriod(historyPeriod) }
+                        Column(Modifier.fillMaxSize()) {
+                            StatsPeriodRow(
+                                selected = historyPeriod,
+                                accent = appColors.accent,
+                                onSelect = { historyPeriod = it }
                             )
+                            Spacer(Modifier.height(8.dp))
+                            if (hist.isEmpty()) {
+                                Text("Nenhuma faixa neste período.", color = Color.White.copy(0.6f))
+                            } else {
+                                TrackList(
+                                    tracks = hist,
+                                    nowPlayingId = null,
+                                    bottomPadding = bottomPadding,
+                                    showTrackNumbers = false,
+                                    selectedIds = selectedIds,
+                                    selectionMode = selectionMode,
+                                    onClick = { index, track -> onTrackClick(hist, index, track) },
+                                    onLongClick = onTrackLongClick
+                                )
+                            }
                         }
                     }
                     "favorites" -> {
@@ -4000,7 +4094,7 @@ private fun LysPlaceHome(
                             TrackList(
                                 tracks = favorites,
                                 nowPlayingId = null,
-                                bottomPadding = 0.dp,
+                                bottomPadding = bottomPadding,
                                 showTrackNumbers = false,
                                 selectedIds = selectedIds,
                                 selectionMode = selectionMode,
@@ -4337,5 +4431,42 @@ private class ArchShape(private val bottomCornerDp: Float) : Shape {
             close()
         }
         return androidx.compose.ui.graphics.Outline.Generic(p)
+    }
+}
+
+@Composable
+private fun StatsPeriodRow(
+    selected: MusicViewModel.StatsPeriod,
+    accent: Color,
+    onSelect: (MusicViewModel.StatsPeriod) -> Unit
+) {
+    val periods = listOf(
+        MusicViewModel.StatsPeriod.ALL_TIME to "Tempo todo",
+        MusicViewModel.StatsPeriod.THIS_WEEK to "Esta semana",
+        MusicViewModel.StatsPeriod.LAST_WEEK to "Última semana",
+        MusicViewModel.StatsPeriod.THIS_MONTH to "Este mês",
+        MusicViewModel.StatsPeriod.LAST_MONTH to "Último mês",
+        MusicViewModel.StatsPeriod.THIS_YEAR to "Este ano",
+        MusicViewModel.StatsPeriod.LAST_YEAR to "Último ano"
+    )
+    androidx.compose.foundation.lazy.LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(vertical = 4.dp)
+    ) {
+        items(periods.size) { i ->
+            val (period, label) = periods[i]
+            val sel = selected == period
+            Text(
+                label,
+                color = if (sel) Color.Black else Color.White.copy(0.8f),
+                fontSize = 12.sp,
+                fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (sel) accent else Color.White.copy(0.1f))
+                    .clickable { onSelect(period) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            )
+        }
     }
 }

@@ -30,14 +30,11 @@ object LrcLibClient {
     ) {
         fun toLyricLines(): List<LyricLine> {
             if (!syncedLyrics.isNullOrBlank()) {
-                val lines = LyricsExtractor.parseLrcText(syncedLyrics)
+                val lines = LyricsExtractor.parseLyricsContent(syncedLyrics)
                 if (lines.isNotEmpty()) return lines
             }
             if (!plainLyrics.isNullOrBlank()) {
-                return plainLyrics.lines()
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .map { LyricLine(-1, it) }
+                return LyricsExtractor.parseLyricsContent(plainLyrics)
             }
             return emptyList()
         }
@@ -173,15 +170,12 @@ object LrcLibClient {
     private fun parseRecord(o: JSONObject): List<LyricLine> {
         val synced = o.optString("syncedLyrics", "")
         if (synced.isNotBlank()) {
-            val lines = LyricsExtractor.parseLrcText(synced)
+            val lines = LyricsExtractor.parseLyricsContent(synced)
             if (lines.isNotEmpty()) return lines
         }
         val plain = o.optString("plainLyrics", "")
         if (plain.isNotBlank()) {
-            return plain.lines()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .map { LyricLine(-1, it) }
+            return LyricsExtractor.parseLyricsContent(plain)
         }
         return emptyList()
     }

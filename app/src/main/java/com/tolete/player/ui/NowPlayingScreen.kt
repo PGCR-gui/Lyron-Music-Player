@@ -95,7 +95,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.rememberCoroutineScope
-import com.tolete.player.data.LrcLibClient
+import com.tolete.player.data.LyricsSearchResult
+import com.tolete.player.data.LyricsType
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -133,6 +134,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -328,8 +330,8 @@ fun NowPlayingScreen(
     onOpenArtist: (String) -> Unit,
     onOpenAlbum: () -> Unit,
     loadLyrics: suspend () -> List<LyricLine>,
-    searchLyrics: suspend (String, String) -> List<LrcLibClient.SearchResult> = { _, _ -> emptyList() },
-    embedLyricsResult: suspend (LrcLibClient.SearchResult, com.tolete.player.data.LyricsEmbedder.Target) -> List<LyricLine> = { _, _ -> emptyList() },
+    searchLyrics: suspend (String, String) -> List<LyricsSearchResult> = { _, _ -> emptyList() },
+    embedLyricsResult: suspend (LyricsSearchResult, com.tolete.player.data.LyricsEmbedder.Target) -> List<LyricLine> = { _, _ -> emptyList() },
     appColors: AppColors = DefaultAppColors,
     milkPresets: List<String> = emptyList(),
     onDeletePreset: (String) -> Unit = {},
@@ -345,14 +347,20 @@ fun NowPlayingScreen(
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
     playCount: Int = 0,
     lastPlayedAt: Long = 0L,
-    seekBarStyle: SeekBarStyle = SeekBarStyle.Standard
+    seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
+    immersiveNowPlaying: Boolean = true,
+    getPlaybackSpeed: () -> Float = { 1f },
+    onPlaybackSpeed: (Float) -> Unit = {}
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
 
     // Modo imersivo: esconde barra de status e de navegação enquanto o Now Playing estiver aberto
     val view = LocalView.current
-    DisposableEffect(Unit) {
+    DisposableEffect(immersiveNowPlaying) {
+        if (!immersiveNowPlaying) {
+            return@DisposableEffect onDispose { }
+        }
         val window = (view.context as? Activity)?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
         val prevBehavior = controller?.systemBarsBehavior
@@ -436,13 +444,29 @@ fun NowPlayingScreen(
         }
     }
 
-    // Atualiza posição com menos frequência e só quando muda de fato,
-    // para não recompôr a tela inteira (blur, capa, controles) a cada tick.
+    // Posição da UI geral (menos frequente) + posição fina para karaokê em tela cheia
+    var lyricsPosition by remember { mutableLongStateOf(getPosition()) }
+    // Enquanto arrasta ou logo após seek, não deixa o ticker do player puxar a barra de volta
+    var isDraggingSeek by remember { mutableStateOf(false) }
+    var pendingSeekMs by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(track.id, isPlaying) {
         position = getPosition()
+        lyricsPosition = position
+        pendingSeekMs = null
         while (isPlaying) {
-            delay(400)
+            delay(if (showFullLyrics) 48 else 80)
             val p = getPosition()
+            lyricsPosition = p
+            if (isDraggingSeek || dragFraction != null) continue
+            val pending = pendingSeekMs
+            if (pending != null) {
+                // Espera o player alcançar o seek (ou timeout ~1,2s)
+                if (kotlin.math.abs(p - pending) <= 450L) {
+                    pendingSeekMs = null
+                    position = p
+                }
+                continue
+            }
             if (kotlin.math.abs(p - position) >= 200L || p < position) {
                 position = p
             }
@@ -583,6 +607,37 @@ fun NowPlayingScreen(
                                 showSleepTimer = true
                             }
                         )
+                        val speedSteps = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+                        var menuSpeed by remember(showMenu) {
+                            mutableStateOf(
+                                getPlaybackSpeed().let { cur ->
+                                    speedSteps.minByOrNull { kotlin.math.abs(it - cur) } ?: 1f
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = {
+                                val label = when (menuSpeed) {
+                                    0.5f -> "0.5x"
+                                    0.75f -> "0.75x"
+                                    1f -> "1x"
+                                    1.25f -> "1.25x"
+                                    1.5f -> "1.5x"
+                                    1.75f -> "1.75x"
+                                    2f -> "2x"
+                                    else -> "${"%.2f".format(menuSpeed)}x"
+                                }
+                                Text("Velocidade: $label  (tocar p/ mudar)", color = MenuDarkText)
+                            },
+                            onClick = {
+                                val idx = speedSteps.indexOf(menuSpeed).let {
+                                    if (it < 0) speedSteps.indexOf(1f) else it
+                                }
+                                val next = speedSteps[(idx + 1) % speedSteps.size]
+                                menuSpeed = next
+                                onPlaybackSpeed(next)
+                            }
+                        )
                         DropdownMenuItem(
                             text = {
                                 Text("Gerar foto do trecho", color = MenuDarkText)
@@ -593,7 +648,7 @@ fun NowPlayingScreen(
                                 val linesToShare = if (lyric != null) {
                                     listOf(lyric)
                                 } else {
-                                    lyrics.filter { it.text.isNotBlank() }.take(8).map { it.text }
+                                    lyrics.filter { it.text.isNotBlank() }.take(15).map { it.text }
                                 }
                                 if (linesToShare.isEmpty()) {
                                     android.widget.Toast.makeText(
@@ -889,7 +944,7 @@ fun NowPlayingScreen(
                         )
                     }
 
-                    // Letra — até 2 linhas; fonte reduz automaticamente se não couber
+                    // Letra — palavra-a-palavra quando houver sync; senão linha inteira
                     Box(
                         Modifier
                             .fillMaxWidth()
@@ -898,6 +953,23 @@ fun NowPlayingScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         if (synced.isNotEmpty()) {
+                            val line = activeLine
+                            if (line != null && line.hasSyllableSync) {
+                                // Usa position fina no karaokê embutido
+                                val finePos = if (isPlaying) lyricsPosition else position
+                                SyllableLine(
+                                    line = line,
+                                    position = finePos,
+                                    fontSize = lyricsFontSize.sp,
+                                    fontFamily = lyricsFont,
+                                    primary = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
+                                    secondary = Color(lyricsSecondaryColor),
+                                    borderColor = Color(lyricsBorderColor),
+                                    borderWidth = lyricsBorderWidth,
+                                    isBackground = false,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                )
+                            } else {
                             AnimatedContent(
                                 targetState = activeLine?.text.orEmpty(),
                                 transitionSpec = {
@@ -913,16 +985,17 @@ fun NowPlayingScreen(
                                             scaleOut(targetScale = 1.06f, animationSpec = tween(280)))
                                 },
                                 label = "lyricLine"
-                            ) { line ->
-                                if (line.isNotEmpty()) {
+                            ) { lineText ->
+                                if (lineText.isNotEmpty()) {
                                     AutoSizeSingleLineLyric(
-                                        text = line,
+                                        text = lineText,
                                         baseFontSize = lyricsFontSize.sp,
                                         fontFamily = lyricsFont,
                                         color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
                                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                     )
                                 }
+                            }
                             }
                         } else if (lyrics.isNotEmpty()) {
                             // Sem timestamps: trecho atual (até 2 linhas na tela)
@@ -1038,14 +1111,22 @@ fun NowPlayingScreen(
                 accentColor = appColors.accent,
                 style = seekBarStyle,
                 isPlaying = isPlaying,
-                onDrag = { dragFraction = it },
+                onDrag = {
+                    isDraggingSeek = true
+                    dragFraction = it
+                },
                 onDragEnd = { f ->
-                    val target = (f * duration).toLong()
+                    val target = (f * duration).toLong().coerceIn(0L, duration)
                     position = target
+                    pendingSeekMs = target
                     dragFraction = null
+                    isDraggingSeek = false
                     onSeek(target)
                 },
-                onDragCancel = { dragFraction = null }
+                onDragCancel = {
+                    dragFraction = null
+                    isDraggingSeek = false
+                }
             )
 
             // Tempos
@@ -1056,62 +1137,24 @@ fun NowPlayingScreen(
                 Text(formatDuration(shownPosition), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
                 Text(formatDuration(duration), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
             }
-            // Linha 1: previous / play / next
-            Row(
-                Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(56.dp)) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_previous),
-                        contentDescription = "Anterior",
-                        tint = Color.White,
-                        modifier = Modifier.size(38.dp)
-                    )
-                }
-                Box(
-                    Modifier
-                        .padding(horizontal = 10.dp)
-                        .size(68.dp)
-                        .clip(CircleShape)
-                        .background(Color.White)
-                        .clickable(onClick = onToggle),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
-                        contentDescription = if (isPlaying) "Pausar" else "Tocar",
-                        tint = Color.Unspecified,
-                        modifier = Modifier.size(38.dp)
-                    )
-                }
-                IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(56.dp)) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_next),
-                        contentDescription = "Próxima",
-                        tint = Color.White,
-                        modifier = Modifier.size(38.dp)
-                    )
-                }
-            }
-            // Linha 2: shuffle, repeat | equalizer, queue
+            // Controles em uma única linha: shuffle, repeat, prev, play, next, eq, queue
+            // play/pause, previous e next maiores que os outros quatro
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 6.dp, top = 2.dp),
+                    .padding(top = 4.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(40.dp)) {
                     Icon(
                         painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
                         contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
                         tint = Color.Unspecified,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
-                IconButton(onClick = onCycleRepeat, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = onCycleRepeat, modifier = Modifier.size(40.dp)) {
                     val repeatIcon = when (repeatMode) {
                         Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
                         Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
@@ -1125,23 +1168,54 @@ fun NowPlayingScreen(
                             else -> "Repetição desligada"
                         },
                         tint = Color.Unspecified,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
-                IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(52.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_previous),
+                        contentDescription = "Anterior",
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+                Box(
+                    Modifier
+                        .size(64.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable(onClick = onToggle),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                        contentDescription = if (isPlaying) "Pausar" else "Tocar",
+                        tint = Color.Unspecified,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+                IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(52.dp)) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_next),
+                        contentDescription = "Próxima",
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+                IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(40.dp)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_equalizer),
                         contentDescription = "Equalizador",
-                        modifier = Modifier.size(28.dp),
+                        modifier = Modifier.size(24.dp),
                         tint = Color.White.copy(alpha = 0.9f)
                     )
                 }
-                IconButton(onClick = { showQueue = true }, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = { showQueue = true }, modifier = Modifier.size(40.dp)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_queue),
                         contentDescription = "Fila",
                         tint = Color.White.copy(alpha = 0.9f),
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
@@ -1230,7 +1304,7 @@ fun NowPlayingScreen(
             FullscreenLyrics(
                 track = track,
                 lyrics = if (synced.isNotEmpty()) synced else lyrics,
-                position = position,
+                position = lyricsPosition,
                 lyricsFont = lyricsFont,
                 fontSizeSp = lyricsFontSize,
                 primaryColor = Color(lyricsPrimaryColor),
@@ -1240,13 +1314,14 @@ fun NowPlayingScreen(
                 onSeek = { ms ->
                     onSeek(ms)
                     position = ms
+                    lyricsPosition = ms
                 },
                 onClose = { showFullLyrics = false }
             )
         }
 
         if (showLyricsSearch) {
-            var pendingLyricResult by remember { mutableStateOf<LrcLibClient.SearchResult?>(null) }
+            var pendingLyricResult by remember { mutableStateOf<LyricsSearchResult?>(null) }
             LyricsSearchDialog(
                 initialTitle = track.title,
                 initialArtist = track.artist,
@@ -1345,56 +1420,6 @@ internal fun TechDetailsDialog(
     playCount: Int = 0,
     lastPlayedAt: Long = 0L
 ) {
-    val context = LocalContext.current
-    val audioLines = remember {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        buildList {
-            add("Saída de áudio")
-            try {
-                if (Build.VERSION.SDK_INT >= 23) {
-                    val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                    val active = devices.filter {
-                        it.isSink && (
-                            it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_USB_DEVICE ||
-                                it.type == android.media.AudioDeviceInfo.TYPE_HEARING_AID ||
-                                (Build.VERSION.SDK_INT >= 31 && it.type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET)
-                            )
-                    }
-                    if (active.isEmpty()) {
-                        add("Dispositivos: padrão do sistema")
-                    } else {
-                        for (d in active) {
-                            val name = if (Build.VERSION.SDK_INT >= 28) d.productName?.toString() else null
-                            val type = when (d.type) {
-                                android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Alto-falante"
-                                android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                                android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Fone com fio"
-                                android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth A2DP"
-                                android.media.AudioDeviceInfo.TYPE_USB_HEADSET,
-                                android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
-                                else -> "Saída ${d.type}"
-                            }
-                            val rates = d.sampleRates?.takeIf { it.isNotEmpty() }?.joinToString { formatSampleRate(it) }
-                            val ch = d.channelCounts?.maxOrNull()?.let { formatChannels(it) }
-                            add("$type${name?.let { " ($it)" } ?: ""}")
-                            if (rates != null) add("  Taxas: $rates")
-                            if (ch != null) add("  Canais: $ch")
-                        }
-                    }
-                } else {
-                    add("Modo: ${am.mode}")
-                }
-            } catch (_: Exception) {
-                add("Informação de saída indisponível")
-            }
-        }
-    }
-
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Color(menuBgColor),
@@ -1409,7 +1434,7 @@ internal fun TechDetailsDialog(
                 TechRow("Codec", track.codec ?: "—")
                 TechRow("Bitrate", if (track.bitrate > 0) "${Math.round(track.bitrate / 1000.0)} kbps" else "—")
                 TechRow("Amostragem", formatSampleRate(track.sampleRate))
-                TechRow("BitDepth", if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—")
+                TechRow("Bit depth", if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—")
                 TechRow("Canais", formatChannels(track.channels))
                 TechRow("Duração", formatDuration(track.duration))
                 TechRow(
@@ -1431,14 +1456,6 @@ internal fun TechDetailsDialog(
                 )
                 TechRow("Vezes reproduzida", if (playCount > 0) playCount.toString() else "—")
                 TechRow("Arquivo", track.path)
-                Spacer(Modifier.height(12.dp))
-                audioLines.forEachIndexed { i, line ->
-                    if (i == 0) {
-                        Text(line, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Color(0xFF1A1A1A), modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
-                    } else {
-                        Text(line, fontSize = 13.sp, color = Color(0xFF333333), modifier = Modifier.padding(vertical = 2.dp))
-                    }
-                }
             }
         },
         confirmButton = {
@@ -1565,18 +1582,32 @@ private fun SeekBar(
         Modifier
             .fillMaxWidth()
             .height(boxHeight)
+            .onSizeChanged { barWidth = it.width.toFloat().coerceAtLeast(1f) }
             .pointerInput(Unit) {
-                detectDragGestures(
+                detectTapGestures { o ->
+                    val w = size.width.toFloat().coerceAtLeast(1f)
+                    barWidth = w
+                    val f = (o.x / w).coerceIn(0f, 1f)
+                    lastDragFraction = f
+                    onDrag(f)
+                    onDragEnd(f)
+                }
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
                     onDragStart = { o ->
-                        barWidth = size.width.toFloat().coerceAtLeast(1f)
-                        val f = (o.x / barWidth).coerceIn(0f, 1f)
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        barWidth = w
+                        val f = (o.x / w).coerceIn(0f, 1f)
                         lastDragFraction = f
                         dragging = true
                         onDrag(f)
                     },
-                    onDrag = { change, _ ->
+                    onHorizontalDrag = { change, _ ->
                         change.consume()
-                        val f = (change.position.x / barWidth).coerceIn(0f, 1f)
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        barWidth = w
+                        val f = (change.position.x / w).coerceIn(0f, 1f)
                         lastDragFraction = f
                         onDrag(f)
                     },
@@ -1589,19 +1620,11 @@ private fun SeekBar(
                         onDragCancel()
                     }
                 )
-            }
-            .pointerInput(Unit) {
-                detectTapGestures { o ->
-                    barWidth = size.width.toFloat().coerceAtLeast(1f)
-                    val f = (o.x / barWidth).coerceIn(0f, 1f)
-                    lastDragFraction = f
-                    onDragEnd(f)
-                }
             },
         contentAlignment = Alignment.Center
     ) {
         Canvas(Modifier.fillMaxWidth().height(trackHeight)) {
-            barWidth = size.width
+            if (size.width > 1f) barWidth = size.width
             val h = size.height
             val frac = fraction.coerceIn(0f, 1f)
             val progW = size.width * frac
@@ -2240,12 +2263,12 @@ internal fun LyricsSearchDialog(
     initialTitle: String,
     initialArtist: String,
     onDismiss: () -> Unit,
-    onSearch: suspend (String, String) -> List<LrcLibClient.SearchResult>,
-    onPick: (LrcLibClient.SearchResult) -> Unit
+    onSearch: suspend (String, String) -> List<LyricsSearchResult>,
+    onPick: (LyricsSearchResult) -> Unit
 ) {
     var title by remember { mutableStateOf(initialTitle) }
     var artist by remember { mutableStateOf(initialArtist) }
-    var results by remember { mutableStateOf<List<LrcLibClient.SearchResult>>(emptyList()) }
+    var results by remember { mutableStateOf<List<LyricsSearchResult>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -2298,7 +2321,7 @@ internal fun LyricsSearchDialog(
                 } else if (searched && results.isEmpty()) {
                     Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = dialogMuted)
                 } else if (results.isNotEmpty()) {
-                    var expandedId by remember { mutableStateOf<Int?>(null) }
+                    var expandedId by remember { mutableStateOf<String?>(null) }
                     LazyColumn(Modifier.height(280.dp)) {
                         items(results, key = { it.id }) { r ->
                             val expanded = expandedId == r.id
@@ -2327,13 +2350,24 @@ internal fun LyricsSearchDialog(
                                             append(r.artistName)
                                             if (r.albumName.isNotBlank()) append(" · ${r.albumName}")
                                             if (r.durationSec > 0) append(" · ${r.durationSec}s")
-                                            append(if (r.hasSynced) " · sincronizada" else " · simples")
                                         },
                                         fontSize = 12.sp,
                                         color = dialogMuted,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    Row(
+                                        Modifier.padding(top = 4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        LyricsBadge(r.source.label, Color(0xFFECEFF1), Color(0xFF263238))
+                                        val (badgeBg, badgeFg) = when (r.type) {
+                                            LyricsType.PLAIN -> Color(0xFFE0E0E0) to Color(0xFF424242)
+                                            LyricsType.SYNCED -> Color(0xFFD6E4FF) to Color(0xFF1E4DB7)
+                                            LyricsType.WORD -> Color(0xFFE6D8FF) to Color(0xFF5B2CA0)
+                                        }
+                                        LyricsBadge(r.type.label, badgeBg, badgeFg)
+                                    }
                                 } else {
                                     // Preview estilo referência: faixa/artista + linhas sincronizadas
                                     Text("faixa", fontSize = 11.sp, color = Color(0xFF8BC9A0))
@@ -2352,19 +2386,27 @@ internal fun LyricsSearchDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    Spacer(Modifier.height(6.dp))
+                                    Text("fonte", fontSize = 11.sp, color = Color(0xFF8BC9A0))
                                     Text(
-                                        if (r.hasSynced) "Linha sincronizada" else "Linha simples",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFF8BC9A0)
+                                        r.source.label,
+                                        fontSize = 13.sp,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
-                                    val previewLines = remember(r.id) {
-                                        r.toLyricLines().take(12)
-                                    }
+                                    Text("tipo de letra", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                    Text(
+                                        r.type.label,
+                                        fontSize = 13.sp,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    val previewLines = remember(r.id) { r.lines.take(12) }
                                     if (previewLines.isEmpty()) {
                                         Text(
-                                            r.plainLyrics?.lines()?.take(8)?.joinToString("\n")
-                                                ?: "(sem prévia)",
+                                            "(sem prévia)",
                                             fontSize = 12.sp,
                                             color = Color(0xFFD0E8D8)
                                         )
@@ -2420,6 +2462,25 @@ internal fun LyricsSearchDialog(
 
 
 @Composable
+private fun LyricsBadge(text: String, background: Color, foreground: Color) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(background)
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(
+            text,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = foreground,
+            maxLines = 1
+        )
+    }
+}
+
+
+@Composable
 internal fun FullscreenLyrics(
     track: Track,
     lyrics: List<LyricLine>,
@@ -2437,14 +2498,37 @@ internal fun FullscreenLyrics(
     val context = LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val hasTimestamps = remember(lyrics) { lyrics.any { it.timeMs >= 0 } }
-    val activeIndex = remember(lyrics, position, hasTimestamps) {
-        if (!hasTimestamps) -1
+    // Índices ativos: principal + backing sobrepostos no tempo atual
+    val (activeIndex, activeBgIndex) = remember(lyrics, position, hasTimestamps) {
+        if (!hasTimestamps) -1 to -1
         else {
-            var idx = 0
+            var bestMain = -1
+            var bestBg = -1
+            var lastStarted = -1
             for (i in lyrics.indices) {
-                if (lyrics[i].timeMs <= position) idx = i else break
+                val line = lyrics[i]
+                if (line.timeMs < 0) continue
+                if (line.timeMs > position) break
+                lastStarted = i
+                val stillActive = line.endMs < 0 || position <= line.endMs + 120
+                if (!stillActive) continue
+                if (line.isBackground) {
+                    if (bestBg < 0 || line.timeMs >= lyrics[bestBg].timeMs) bestBg = i
+                } else {
+                    if (bestMain < 0 || line.timeMs >= lyrics[bestMain].timeMs) bestMain = i
+                }
             }
-            idx
+            val main = if (bestMain >= 0) bestMain else lastStarted
+            // Backing só conta se sobrepõe a linha principal (ou o instante atual)
+            val bg = if (bestBg >= 0 && main >= 0) {
+                val mainLine = lyrics[main]
+                val bgLine = lyrics[bestBg]
+                val mainEnd = if (mainLine.endMs > 0) mainLine.endMs else Long.MAX_VALUE
+                val overlaps = bgLine.timeMs <= mainEnd &&
+                    (bgLine.endMs < 0 || bgLine.endMs >= mainLine.timeMs)
+                if (overlaps) bestBg else -1
+            } else bestBg
+            main to bg
         }
     }
     var selectMode by remember { mutableStateOf(false) }
@@ -2454,7 +2538,7 @@ internal fun FullscreenLyrics(
         if (hasTimestamps && !selectMode && activeIndex in lyrics.indices) {
             listState.animateScrollToItem(
                 index = activeIndex,
-                scrollOffset = -200
+                scrollOffset = -180
             )
         }
     }
@@ -2531,7 +2615,7 @@ internal fun FullscreenLyrics(
                 IconButton(onClick = {
                     if (selectMode) {
                         if (selectedLines.isNotEmpty()) {
-                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(8)
+                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(15)
                             android.widget.Toast.makeText(context, "Gerando foto…", android.widget.Toast.LENGTH_SHORT).show()
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
@@ -2539,7 +2623,7 @@ internal fun FullscreenLyrics(
                         } else {
                             android.widget.Toast.makeText(
                                 context,
-                                "Selecione até 8 linhas para gerar a foto",
+                                "Selecione até 15 linhas para gerar a foto",
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -2547,7 +2631,7 @@ internal fun FullscreenLyrics(
                         selectMode = true
                         android.widget.Toast.makeText(
                             context,
-                            "Toque nas linhas (até 8) e depois no compartilhar para gerar a foto",
+                            "Toque nas linhas (até 15) e depois no compartilhar para gerar a foto",
                             android.widget.Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -2569,21 +2653,41 @@ internal fun FullscreenLyrics(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 itemsIndexed(lyrics) { index, line ->
-                    val isActive = index == activeIndex
-                    val baseSize = if (isActive) (fontSizeSp + 4f).sp else fontSizeSp.sp
+                    val isMainActive = index == activeIndex
+                    val isBgActive = index == activeBgIndex
+                    val isActive = isMainActive || isBgActive
+                    val isBg = line.isBackground
+                    val baseSize = when {
+                        isMainActive -> (fontSizeSp + 6f).sp
+                        isBgActive -> (fontSizeSp + 1f).sp
+                        isBg -> (fontSizeSp - 2f).coerceAtLeast(12f).sp
+                        else -> fontSizeSp.sp
+                    }
                     val scale by androidx.compose.animation.core.animateFloatAsState(
-                        targetValue = if (isActive) 1.06f else 1f,
-                        animationSpec = tween(320, easing = FastOutSlowInEasing),
+                        targetValue = when {
+                            isMainActive -> 1.07f
+                            isBgActive -> 1.03f
+                            else -> 1f
+                        },
+                        animationSpec = androidx.compose.animation.core.spring(
+                            dampingRatio = 0.86f,
+                            stiffness = 280f
+                        ),
                         label = "lyricScale"
                     )
                     val alpha by androidx.compose.animation.core.animateFloatAsState(
                         targetValue = when {
                             !hasTimestamps -> 0.85f
-                            isActive -> 1f
+                            isMainActive -> 1f
+                            isBgActive -> 0.92f
                             kotlin.math.abs(index - activeIndex) <= 1 -> 0.55f
-                            else -> 0.32f
+                            kotlin.math.abs(index - activeIndex) <= 3 -> 0.34f
+                            else -> 0.18f
                         },
-                        animationSpec = tween(280, easing = FastOutSlowInEasing),
+                        animationSpec = androidx.compose.animation.core.spring(
+                            dampingRatio = 0.9f,
+                            stiffness = 220f
+                        ),
                         label = "lyricAlpha"
                     )
                     val isSelected = index in selectedLines
@@ -2604,12 +2708,12 @@ internal fun FullscreenLyrics(
                                 if (selectMode) {
                                     selectedLines = if (isSelected) {
                                         selectedLines - index
-                                    } else if (selectedLines.size < 8) {
+                                    } else if (selectedLines.size < 15) {
                                         selectedLines + index
                                     } else {
                                         android.widget.Toast.makeText(
                                             context,
-                                            "Máximo de 8 linhas",
+                                            "Máximo de 15 linhas",
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                         selectedLines
@@ -2618,7 +2722,7 @@ internal fun FullscreenLyrics(
                                     onSeek(line.timeMs)
                                 }
                             }
-                            .padding(vertical = 12.dp),
+                            .padding(vertical = if (isBg) 6.dp else 11.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         if (isActive && line.hasSyllableSync) {
@@ -2631,6 +2735,7 @@ internal fun FullscreenLyrics(
                                 secondary = secondaryColor,
                                 borderColor = borderColor,
                                 borderWidth = borderWidth,
+                                isBackground = isBg,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         } else {
@@ -2639,11 +2744,22 @@ internal fun FullscreenLyrics(
                                 modifier = Modifier.fillMaxWidth(),
                                 textAlign = TextAlign.Center,
                                 fontSize = baseSize,
-                                lineHeight = (baseSize.value * 1.35f).sp,
-                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isActive) primaryColor else secondaryColor,
+                                lineHeight = (baseSize.value * 1.32f).sp,
+                                fontWeight = when {
+                                    isMainActive -> FontWeight.Bold
+                                    isBgActive -> FontWeight.SemiBold
+                                    else -> FontWeight.Normal
+                                },
+                                color = when {
+                                    isMainActive -> primaryColor
+                                    isBgActive -> primaryColor.copy(alpha = 0.8f)
+                                    isBg -> secondaryColor.copy(alpha = 0.65f)
+                                    else -> secondaryColor
+                                },
                                 fontFamily = lyricsFont,
-                                style = if (borderWidth > 0f) {
+                                fontStyle = if (isBg) androidx.compose.ui.text.font.FontStyle.Italic
+                                else androidx.compose.ui.text.font.FontStyle.Normal,
+                                style = if (borderWidth > 0f && isActive) {
                                     androidx.compose.ui.text.TextStyle(
                                         shadow = androidx.compose.ui.graphics.Shadow(
                                             color = borderColor,
@@ -2670,44 +2786,67 @@ private fun SyllableLine(
     secondary: Color,
     borderColor: Color,
     borderWidth: Float,
+    isBackground: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // Progresso dentro da palavra atual (0..1) para preenchimento suave
-    val activeWordIdx = remember(line, position) {
-        var idx = -1
-        for (i in line.words.indices) {
-            if (position >= line.words[i].timeMs) idx = i else break
-        }
-        idx
+    // Índice da palavra atual + progresso 0..1 (recalculado a cada frame de posição)
+    var activeWordIdx = -1
+    for (i in line.words.indices) {
+        if (position >= line.words[i].timeMs) activeWordIdx = i else break
     }
-    val wordProgress = remember(line, position, activeWordIdx) {
-        if (activeWordIdx < 0 || activeWordIdx >= line.words.lastIndex) 1f
-        else {
-            val cur = line.words[activeWordIdx]
-            val next = line.words[activeWordIdx + 1]
-            val span = (next.timeMs - cur.timeMs).coerceAtLeast(1L).toFloat()
-            ((position - cur.timeMs) / span).coerceIn(0f, 1f)
+    val wordProgress = if (activeWordIdx < 0) {
+        0f
+    } else {
+        val cur = line.words[activeWordIdx]
+        val end = when {
+            cur.endMs > cur.timeMs -> cur.endMs
+            activeWordIdx < line.words.lastIndex -> line.words[activeWordIdx + 1].timeMs
+            line.endMs > cur.timeMs -> line.endMs
+            else -> cur.timeMs + 350L
         }
+        val span = (end - cur.timeMs).coerceAtLeast(1L).toFloat()
+        // Curva suave (ease-out) para o preenchimento da palavra
+        val linear = ((position - cur.timeMs) / span).coerceIn(0f, 1f)
+        1f - (1f - linear) * (1f - linear)
     }
+
+    val dimSecondary = secondary.copy(alpha = if (isBackground) 0.48f else 0.58f)
+    val activePrimary = if (isBackground) primary.copy(alpha = 0.88f) else primary
+
     val annotated = androidx.compose.ui.text.buildAnnotatedString {
         line.words.forEachIndexed { i, w ->
             val fullyActive = i < activeWordIdx
             val isCurrent = i == activeWordIdx
             val color = when {
-                fullyActive -> primary
-                isCurrent -> androidx.compose.ui.graphics.lerp(secondary, primary, wordProgress)
-                else -> secondary
+                fullyActive -> activePrimary
+                isCurrent -> androidx.compose.ui.graphics.lerp(dimSecondary, activePrimary, wordProgress)
+                else -> dimSecondary
+            }
+            if (i > 0) {
+                val prev = line.words[i - 1].text
+                val needSpace = prev.isNotEmpty() && w.text.isNotEmpty() &&
+                    !prev.last().isWhitespace() && !w.text.first().isWhitespace() &&
+                    !",.;:!?)]}".contains(w.text.first())
+                if (needSpace) append(' ')
             }
             pushStyle(
                 androidx.compose.ui.text.SpanStyle(
                     color = color,
-                    fontWeight = if (fullyActive || isCurrent) FontWeight.Bold else FontWeight.Normal,
+                    fontWeight = when {
+                        fullyActive || (isCurrent && wordProgress > 0.15f) ->
+                            if (isBackground) FontWeight.SemiBold else FontWeight.Bold
+                        else -> FontWeight.Normal
+                    },
                     fontSize = fontSize,
                     fontFamily = fontFamily,
-                    shadow = if (borderWidth > 0f) androidx.compose.ui.graphics.Shadow(
-                        color = borderColor,
-                        blurRadius = borderWidth * 2f
-                    ) else null
+                    fontStyle = if (isBackground) androidx.compose.ui.text.font.FontStyle.Italic
+                    else androidx.compose.ui.text.font.FontStyle.Normal,
+                    shadow = if (borderWidth > 0f && (fullyActive || isCurrent)) {
+                        androidx.compose.ui.graphics.Shadow(
+                            color = borderColor.copy(alpha = 0.7f),
+                            blurRadius = borderWidth * 1.8f
+                        )
+                    } else null
                 )
             )
             append(w.text)
@@ -2718,7 +2857,7 @@ private fun SyllableLine(
         text = annotated,
         modifier = modifier,
         textAlign = TextAlign.Center,
-        lineHeight = (fontSize.value * 1.35f).sp
+        lineHeight = (fontSize.value * 1.32f).sp
     )
 }
 
@@ -2921,7 +3060,56 @@ internal fun MilkPresetPickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+            Row {
+                if (manageMode) {
+                    TextButton(onClick = {
+                        val favPaths = presets.filter { java.io.File(it).name in favorites }
+                        if (favPaths.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "Nenhum preset favorito para exportar",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            try {
+                                val dir = java.io.File(context.cacheDir, "updates").apply { mkdirs() }
+                                val out = java.io.File(dir, "milk_favorites_${System.currentTimeMillis()}.zip")
+                                java.util.zip.ZipOutputStream(java.io.FileOutputStream(out)).use { zos ->
+                                    for (p in favPaths) {
+                                        val f = java.io.File(p)
+                                        if (!f.isFile) continue
+                                        zos.putNextEntry(java.util.zip.ZipEntry(f.name))
+                                        f.inputStream().use { it.copyTo(zos) }
+                                        zos.closeEntry()
+                                    }
+                                }
+                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                    context,
+                                    context.packageName + ".updates",
+                                    out
+                                )
+                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "application/zip"
+                                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(
+                                    android.content.Intent.createChooser(intent, "Exportar presets favoritos")
+                                )
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Falha ao exportar: ${e.message}",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }) {
+                        Text("Exportar favoritos (.zip)", color = Color(0xFF5C6BC0))
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+            }
         }
     )
 

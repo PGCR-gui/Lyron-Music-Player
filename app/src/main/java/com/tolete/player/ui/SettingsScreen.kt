@@ -82,7 +82,7 @@ import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
 
-enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, APPEARANCE, LYRICS_VIEWER, ABOUT, CHANGELOG, LICENSES, PLAYER, AUDIO_OUTPUT, BACKUP, VISUALIZER }
+enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, APPEARANCE, LYRICS_VIEWER, ABOUT, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER }
 
 internal data class SettingsEntry(
     val icon: ImageVector,
@@ -132,12 +132,6 @@ fun SettingsScreen(
     onAutoFetchLyricsChange: (Boolean) -> Unit = {},
     shuffleType: ShuffleType = ShuffleType.ABSOLUTE,
     onShuffleTypeChange: (ShuffleType) -> Unit = {},
-    bitPerfect: Boolean = false,
-    onBitPerfectChange: (Boolean) -> Unit = {},
-    audioOutput: MusicViewModel.AudioOutputBackend = MusicViewModel.AudioOutputBackend.DEFAULT,
-    onAudioOutputChange: (MusicViewModel.AudioOutputBackend) -> Unit = {},
-    forceMaxSampleRate: Boolean = false,
-    onForceMaxSampleRateChange: (Boolean) -> Unit = {},
     lyricsFontSize: Float = 22f,
     onLyricsFontSizeChange: (Float) -> Unit = {},
     lyricsPrimaryColor: Int = 0xFFFFFFFF.toInt(),
@@ -172,6 +166,8 @@ fun SettingsScreen(
     onFadeMsChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
+    immersiveNowPlaying: Boolean = true,
+    onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
     milkPresetCount: Int = 0,
@@ -195,7 +191,6 @@ fun SettingsScreen(
         SettingsPage.CHANGELOG -> "Logs de atualização"
         SettingsPage.LICENSES -> "Licenças dos serviços"
         SettingsPage.PLAYER -> "Player"
-        SettingsPage.AUDIO_OUTPUT -> "Saída de áudio"
         SettingsPage.BACKUP -> "Backup"
         SettingsPage.VISUALIZER -> "Visualizador (.milk)"
         else -> "Configurações"
@@ -267,21 +262,14 @@ fun SettingsScreen(
                 onAutoFetchLyricsChange = onAutoFetchLyricsChange,
                 shuffleType = shuffleType,
                 onShuffleTypeChange = onShuffleTypeChange,
-                bitPerfect = bitPerfect,
-                onBitPerfectChange = onBitPerfectChange,
                 fadeMs = fadeMs,
                 onFadeMsChange = onFadeMsChange,
                 playCountThreshold = playCountThreshold,
                 onPlayCountThresholdChange = onPlayCountThresholdChange,
-                onOpenAudioOutput = { onNavigate(SettingsPage.AUDIO_OUTPUT) },
                 seekBarStyle = seekBarStyle,
-                onSeekBarStyleChange = onSeekBarStyleChange
-            )
-            SettingsPage.AUDIO_OUTPUT -> AudioOutputPage(
-                audioOutput = audioOutput,
-                onAudioOutputChange = onAudioOutputChange,
-                forceMaxSampleRate = forceMaxSampleRate,
-                onForceMaxSampleRateChange = onForceMaxSampleRateChange
+                onSeekBarStyleChange = onSeekBarStyleChange,
+                immersiveNowPlaying = immersiveNowPlaying,
+                onImmersiveNowPlayingChange = onImmersiveNowPlayingChange
             )
             SettingsPage.FOLDERS -> FoldersPage(
                 folders, totalTracks, isScanning, scanCount, onAddFolder, onRemoveFolder, onRefresh

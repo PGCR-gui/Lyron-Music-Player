@@ -29,7 +29,7 @@ import java.io.FileOutputStream
  */
 object LyricsShareHelper {
 
-    private const val MAX_LINES = 8
+    private const val MAX_LINES = 15
 
     // Foto em 9:16 (1080x1920)
     private const val CARD_W = 1080
@@ -216,6 +216,14 @@ object LyricsShareHelper {
                 textSize = 48f
                 if (customTypeface != null) typeface = customTypeface
             }
+            val lyricStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFF000000.toInt()
+                textSize = 48f
+                style = Paint.Style.STROKE
+                strokeWidth = 4.5f
+                strokeJoin = Paint.Join.ROUND
+                if (customTypeface != null) typeface = customTypeface
+            }
 
             // ---- Layout das letras (altura do card acompanha o conteúdo) ----
             val lineHeight = 64f
@@ -298,9 +306,11 @@ object LyricsShareHelper {
             }
             canvas.drawLine(contentLeft, divY, cardRight - pad, divY, divPaint)
 
-            // ---- Letras ----
+            // ---- Letras (borda preta + preenchimento) ----
             for ((text, rel) in laidOut) {
-                canvas.drawText(text, contentLeft, cardTop + rel, lyricPaint)
+                val y = cardTop + rel
+                canvas.drawText(text, contentLeft, y, lyricStrokePaint)
+                canvas.drawText(text, contentLeft, y, lyricPaint)
             }
 
             if (coverSrc != null && !coverSrc.isRecycled) coverSrc.recycle()

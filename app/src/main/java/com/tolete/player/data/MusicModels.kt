@@ -88,7 +88,13 @@ data class LyricWord(
 data class LyricLine(
     val timeMs: Long,
     val text: String,
-    val words: List<LyricWord> = emptyList()
+    val words: List<LyricWord> = emptyList(),
+    /** Fim da linha (ms). -1 se desconhecido. */
+    val endMs: Long = -1L,
+    /** Agente/voz TTML (ex.: "v1", "v2", "bg"). */
+    val agent: String? = null,
+    /** True para backing vocals / harmonia / coro. */
+    val isBackground: Boolean = false
 ) {
     val hasSyllableSync: Boolean get() = words.isNotEmpty()
 }

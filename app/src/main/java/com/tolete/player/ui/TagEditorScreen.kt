@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,6 +39,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -163,6 +167,11 @@ fun TagEditorScreen(
 
     // A capa só é gravada no arquivo ao tocar em "Salvar", junto com as tags.
     var pendingCover by remember(track.id) { mutableStateOf<ByteArray?>(null) }
+
+    var showOnlineLookup by remember { mutableStateOf(false) }
+    var onlineLoading by remember { mutableStateOf(false) }
+    var onlineResults by remember { mutableStateOf<List<com.tolete.player.data.TagLookupClient.Result>>(emptyList()) }
+    var onlineError by remember { mutableStateOf<String?>(null) }
 
     val pickCoverLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
@@ -471,6 +480,35 @@ fun TagEditorScreen(
                     ) {
                         Text("Escolher imagem", color = Color.Black)
                     }
+                    Spacer(Modifier.height(6.dp))
+                    Button(
+                        onClick = {
+                            showOnlineLookup = true
+                            onlineLoading = true
+                            onlineError = null
+                            onlineResults = emptyList()
+                            scope.launch {
+                                try {
+                                    onlineResults = com.tolete.player.data.TagLookupClient.search(
+                                        title = title,
+                                        artist = artist,
+                                        album = album
+                                    )
+                                    if (onlineResults.isEmpty()) {
+                                        onlineError = "Nenhum resultado encontrado"
+                                    }
+                                } catch (e: Exception) {
+                                    onlineError = e.message ?: "Falha na busca"
+                                } finally {
+                                    onlineLoading = false
+                                }
+                            }
+                        },
+                        enabled = !savingArt && !onlineLoading,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(0.18f))
+                    ) {
+                        Text("Buscar tags e capa online", color = Color.White)
+                    }
                 }
             }
 
@@ -551,6 +589,134 @@ fun TagEditorScreen(
             Text("Salvar no arquivo", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
         } // Column content
+
+        if (showOnlineLookup) {
+            AlertDialog(
+                onDismissRequest = { if (!onlineLoading) showOnlineLookup = false },
+                title = { Text("Resultados online") },
+                text = {
+                    when {
+                        onlineLoading -> {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.size(22.dp), color = appColors.accent)
+                                Spacer(Modifier.width(12.dp))
+                                Text("Buscando no Deezer e Last.fm…")
+                            }
+                        }
+                        onlineError != null && onlineResults.isEmpty() -> {
+                            Text(onlineError ?: "Sem resultados")
+                        }
+                        else -> {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(360.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(onlineResults) { r ->
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color.White.copy(0.08f))
+                                            .clickable {
+                                                // Aplica tags no formulário (preview antes de Salvar)
+                                                if (r.title.isNotBlank()) title = r.title
+                                                if (r.artist.isNotBlank()) artist = r.artist
+                                                if (r.album.isNotBlank()) album = r.album
+                                                r.year?.takeIf { it.isNotBlank() }?.let { year = it }
+                                                r.genre?.takeIf { it.isNotBlank() }?.let { genre = it }
+                                                r.trackNumber?.takeIf { it.isNotBlank() }?.let { trackNumber = it }
+                                                val coverUrl = r.coverUrl
+                                                if (!coverUrl.isNullOrBlank()) {
+                                                    savingArt = true
+                                                    scope.launch {
+                                                        try {
+                                                            val bytes = withContext(Dispatchers.IO) {
+                                                                com.tolete.player.data.TagLookupClient.downloadCover(coverUrl)
+                                                            }
+                                                            if (bytes != null) {
+                                                                pendingCover = bytes
+                                                                localArtPath = withContext(Dispatchers.IO) {
+                                                                    com.tolete.player.data.TagWriter.saveCoverPreview(
+                                                                        context, bytes, "image/jpeg"
+                                                                    )
+                                                                }
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    "Tags e capa aplicadas no formulário. Toque em Salvar para gravar.",
+                                                                    Toast.LENGTH_LONG
+                                                                ).show()
+                                                            } else {
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    "Tags aplicadas. Não foi possível baixar a capa.",
+                                                                    Toast.LENGTH_SHORT
+                                                                ).show()
+                                                            }
+                                                        } finally {
+                                                            savingArt = false
+                                                            showOnlineLookup = false
+                                                        }
+                                                    }
+                                                } else {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Tags aplicadas no formulário. Toque em Salvar para gravar.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                    showOnlineLookup = false
+                                                }
+                                            }
+                                            .padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .size(56.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color.White.copy(0.1f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (!r.coverUrl.isNullOrBlank()) {
+                                                AsyncImage(
+                                                    model = r.coverUrl,
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            } else {
+                                                Icon(
+                                                    Icons.Rounded.Image,
+                                                    contentDescription = null,
+                                                    tint = Color.White.copy(0.4f)
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(r.title, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                            Text(
+                                                listOf(r.artist, r.album).filter { it.isNotBlank() }.joinToString(" · "),
+                                                fontSize = 12.sp,
+                                                color = Color.White.copy(0.7f),
+                                                maxLines = 2
+                                            )
+                                            Text(r.source, fontSize = 11.sp, color = appColors.accent.copy(0.9f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showOnlineLookup = false }, enabled = !onlineLoading) {
+                        Text("Fechar")
+                    }
+                }
+            )
+        }
 
         if (showLyricsSync) {
             val initialLines = remember(lyrics) {

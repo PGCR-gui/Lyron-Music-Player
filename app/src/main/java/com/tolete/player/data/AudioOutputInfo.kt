@@ -14,7 +14,9 @@ import android.os.Build
 data class OutputFormat(
     val sampleRateHz: Int,
     val bitDepth: Int,
-    val deviceLabel: String = ""
+    val deviceLabel: String = "",
+    /** De onde veio a taxa: mixer USB configurado, mixer do sistema etc. */
+    val source: String = ""
 ) {
     val label: String
         get() {
@@ -35,10 +37,44 @@ object AudioOutputInfo {
 
     fun probe(context: Context): OutputFormat {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        // 1) DAC USB com mixer configurado (Android 14+): é a taxa REAL do hardware.
+        //    PROPERTY_OUTPUT_SAMPLE_RATE descreve só a saída primária (alto-falante),
+        //    por isso antes sempre aparecia 48 kHz mesmo com o DAC conectado.
+        val usb = UsbAudioRouter.findUsbOutput(context)
+        if (usb != null) {
+            val usbLabel = usb.productName?.toString()?.trim().orEmpty()
+                .ifBlank { UsbAudioRouter.label(usb) }
+            val mixer = UsbMixer.currentMixerFormat(context, usb)
+            if (mixer != null && mixer.sampleRate > 0) {
+                return OutputFormat(
+                    sampleRateHz = mixer.sampleRate,
+                    bitDepth = UsbMixer.bitsOf(mixer.encoding).takeIf { it > 0 } ?: 16,
+                    deviceLabel = usbLabel,
+                    source = if (UsbMixer.mixerBitPerfect) "Mixer USB · bit-perfect" else "Mixer USB configurado"
+                )
+            }
+            // 2) USB sem mixer configurado: o Android usa o formato padrão do mixer
+            //    (o app não consegue ler a taxa do hardware nesse caso).
+            val sysSr = am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull() ?: 0
+            return OutputFormat(
+                sampleRateHz = sysSr,
+                bitDepth = maxBits(usb),
+                deviceLabel = usbLabel,
+                source = when {
+                    android.os.Build.VERSION.SDK_INT < 34 ->
+                        "Padrão do sistema (Android < 14 não permite mudar a taxa do USB)"
+                    UsbMixer.status.isNotBlank() -> "Padrão do sistema · ${UsbMixer.status}"
+                    else -> "Padrão do sistema (ative \"USB exclusivo\" para seguir a faixa)"
+                }
+            )
+        }
+
+        // 3) Sem USB: taxa nativa da saída primária (o Android reamostra para ela)
         val outSr = am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
             ?.toIntOrNull()
             ?.takeIf { it > 0 }
-            ?: 48_000
+            ?: 0
 
         var bitDepth = 16
         var label = ""
@@ -52,8 +88,6 @@ object AudioOutputInfo {
                     it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
                         it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
                         it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                        it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
-                        it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
                         (Build.VERSION.SDK_INT >= 28 && it.type == AudioDeviceInfo.TYPE_HEARING_AID)
                 } ?: sinks.firstOrNull {
                     it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
@@ -61,22 +95,28 @@ object AudioOutputInfo {
 
                 preferred?.let { d ->
                     label = d.productName?.toString().orEmpty()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        for (enc in d.encodings) {
-                            when (enc) {
-                                AudioFormat.ENCODING_PCM_16BIT -> bitDepth = maxOf(bitDepth, 16)
-                                AudioFormat.ENCODING_PCM_FLOAT -> bitDepth = maxOf(bitDepth, 32)
-                                // 21 = PCM_24BIT_PACKED, 22 = PCM_32BIT (API 31)
-                                21 -> bitDepth = maxOf(bitDepth, 24)
-                                22 -> bitDepth = maxOf(bitDepth, 32)
-                            }
-                        }
-                    }
+                    bitDepth = maxBits(d)
                 }
             } catch (_: Exception) { }
         }
 
-        return OutputFormat(sampleRateHz = outSr, bitDepth = bitDepth, deviceLabel = label)
+        return OutputFormat(sampleRateHz = outSr, bitDepth = bitDepth, deviceLabel = label, source = "Mixer do sistema")
+    }
+
+    private fun maxBits(d: AudioDeviceInfo): Int {
+        var bitDepth = 16
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            for (enc in d.encodings) {
+                when (enc) {
+                    AudioFormat.ENCODING_PCM_16BIT -> bitDepth = maxOf(bitDepth, 16)
+                    AudioFormat.ENCODING_PCM_FLOAT -> bitDepth = maxOf(bitDepth, 32)
+                    // 21 = PCM_24BIT_PACKED, 22 = PCM_32BIT (API 31)
+                    21 -> bitDepth = maxOf(bitDepth, 24)
+                    22 -> bitDepth = maxOf(bitDepth, 32)
+                }
+            }
+        }
+        return bitDepth
     }
 
     /**
