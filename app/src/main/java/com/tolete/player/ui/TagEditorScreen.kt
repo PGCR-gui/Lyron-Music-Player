@@ -509,6 +509,49 @@ fun TagEditorScreen(
                     ) {
                         Text("Buscar tags e capa online", color = Color.White)
                     }
+                    Spacer(Modifier.height(6.dp))
+                    Button(
+                        onClick = {
+                            onlineLoading = true
+                            onlineError = null
+                            scope.launch {
+                                try {
+                                    val results = com.tolete.player.data.TagLookupClient.search(
+                                        title = title,
+                                        artist = artist,
+                                        album = album
+                                    )
+                                    val withCover = results.firstOrNull { !it.coverUrl.isNullOrBlank() }
+                                    if (withCover == null) {
+                                        onlineError = "Nenhuma capa encontrada"
+                                        Toast.makeText(context, onlineError, Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        val bytes = withContext(Dispatchers.IO) {
+                                            com.tolete.player.data.TagLookupClient.downloadCover(withCover.coverUrl!!)
+                                        }
+                                        if (bytes != null) {
+                                            pendingCover = bytes
+                                            localArtPath = withContext(Dispatchers.IO) {
+                                                com.tolete.player.data.TagWriter.saveCoverPreview(context, bytes, "image/jpeg")
+                                            }
+                                            Toast.makeText(context, "Capa aplicada no formulário. Salve para gravar.", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Falha ao baixar a capa", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    onlineError = e.message ?: "Falha na busca de capa"
+                                    Toast.makeText(context, onlineError, Toast.LENGTH_SHORT).show()
+                                } finally {
+                                    onlineLoading = false
+                                }
+                            }
+                        },
+                        enabled = !savingArt && !onlineLoading,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(0.12f))
+                    ) {
+                        Text("Buscar apenas a capa do álbum", color = Color.White)
+                    }
                 }
             }
 

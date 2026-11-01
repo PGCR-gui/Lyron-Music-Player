@@ -121,4 +121,80 @@ object LastFmClient {
             null
         }
     }
+
+
+    data class UserTrack(
+        val title: String,
+        val artist: String,
+        val album: String? = null,
+        val playedAt: Long? = null, // epoch ms, se disponível
+        val loved: Boolean = false
+    )
+
+    /**
+     * Faixas recentes do usuário (público; basta o username).
+     * Sem scrobbling — só leitura.
+     */
+    suspend fun getRecentTracks(user: String, limit: Int = 50): List<UserTrack> = withContext(Dispatchers.IO) {
+        if (user.isBlank()) return@withContext emptyList()
+        try {
+            val url = "${BASE}?method=user.getrecenttracks&user=${enc(user)}&api_key=$API_KEY&format=json&limit=${limit.coerceIn(1, 200)}"
+            val root = getJson(url) ?: return@withContext emptyList()
+            val arr = root.optJSONObject("recenttracks")?.optJSONArray("track") ?: return@withContext emptyList()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("name").trim()
+                    val artist = o.optJSONObject("artist")?.optString("#text")
+                        ?: o.optString("artist")
+                    val album = o.optJSONObject("album")?.optString("#text")?.takeIf { it.isNotBlank() }
+                    val dateUts = o.optJSONObject("date")?.optString("uts")?.toLongOrNull()
+                    // faixa "now playing" não tem date
+                    if (title.isBlank()) continue
+                    add(
+                        UserTrack(
+                            title = title,
+                            artist = artist?.trim().orEmpty(),
+                            album = album,
+                            playedAt = dateUts?.let { it * 1000L }
+                        )
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Faixas amadas (loved) do usuário (público).
+     */
+    suspend fun getLovedTracks(user: String, limit: Int = 100): List<UserTrack> = withContext(Dispatchers.IO) {
+        if (user.isBlank()) return@withContext emptyList()
+        try {
+            val url = "${BASE}?method=user.getlovedtracks&user=${enc(user)}&api_key=$API_KEY&format=json&limit=${limit.coerceIn(1, 200)}"
+            val root = getJson(url) ?: return@withContext emptyList()
+            val arr = root.optJSONObject("lovedtracks")?.optJSONArray("track") ?: return@withContext emptyList()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val title = o.optString("name").trim()
+                    val artist = o.optJSONObject("artist")?.optString("name")
+                        ?: o.optJSONObject("artist")?.optString("#text")
+                        ?: o.optString("artist")
+                    if (title.isBlank()) continue
+                    add(
+                        UserTrack(
+                            title = title,
+                            artist = artist?.trim().orEmpty(),
+                            loved = true
+                        )
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
 }

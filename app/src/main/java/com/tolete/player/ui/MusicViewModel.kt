@@ -23,6 +23,7 @@ import com.tolete.player.data.FavoritesBridge
 import com.tolete.player.data.FavoritesFile
 import com.tolete.player.data.Genre
 import com.tolete.player.data.LibraryCache
+import com.tolete.player.data.LastFmClient
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.LyricsExtractor
 import com.tolete.player.data.LyricsEmbedder
@@ -36,6 +37,10 @@ import com.tolete.player.data.MusicScanner
 import com.tolete.player.data.TagSplitter
 import com.tolete.player.data.TagWriter
 import com.tolete.player.data.Track
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -70,7 +75,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val scanner = MusicScanner(application)
     private val cache = LibraryCache(application)
     private val prefs = application.getSharedPreferences("tolete", Context.MODE_PRIVATE)
-    private val playlistsFile = File(application.filesDir, "playlists.json")
+    private val playlistsFile = File(com.tolete.player.data.LyronStorage.playlistsDir, "playlists.json")
+    private val favoritesFile = com.tolete.player.data.LyronStorage.favoritesFile
 
     /** Biblioteca crua (pode ter a mesma faixa duas vezes se pastas se sobrepõem). */
     private val _library = MutableStateFlow<List<Track>>(emptyList())
@@ -530,6 +536,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         put("trackIds", JSONArray(pl.trackIds))
                     })
                 }
+                // Favoritos em arquivo próprio
+                val favIds = _playlists.value.firstOrNull { it.isFavorites }?.trackIds.orEmpty()
+                val favJson = JSONObject().put("v", 1).put("trackIds", JSONArray(favIds)).toString()
+                val favTmp = File(favoritesFile.parentFile, "favorites.json.tmp")
+                favTmp.writeText(favJson)
+                if (!favTmp.renameTo(favoritesFile)) {
+                    favoritesFile.writeText(favJson)
+                    favTmp.delete()
+                }
+                // Demais playlists (sem duplicar favoritos track list como única fonte)
                 val json = JSONObject().put("v", 1).put("playlists", arr).toString()
                 val tmp = File(playlistsFile.parentFile, "playlists.json.tmp")
                 tmp.writeText(json)
@@ -537,7 +553,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     try { playlistsFile.copyTo(File(playlistsFile.parentFile, "playlists.json.bak"), overwrite = true) } catch (_: Exception) {}
                 }
                 if (!tmp.renameTo(playlistsFile)) {
-                    playlistsFile.writeText(json) // nunca apaga antes de ter o novo conteúdo salvo
+                    playlistsFile.writeText(json)
                     tmp.delete()
                 }
             } catch (_: Exception) { }
@@ -577,10 +593,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (!f.exists()) null else try { parsePlaylistsFile(f) } catch (_: Exception) { null }
             }
         }
-        if (loaded != null) {
-            _playlists.value = loaded
-            FavoritesBridge.notifyChanged()
-        }
+        var list = loaded?.toMutableList() ?: _playlists.value.toMutableList()
+        try {
+            if (favoritesFile.exists()) {
+                val o = org.json.JSONObject(favoritesFile.readText())
+                val arr = o.optJSONArray("trackIds")
+                if (arr != null) {
+                    val ids = (0 until arr.length()).map { arr.getString(it) }
+                    val idx = list.indexOfFirst { it.isFavorites }
+                    val fav = Playlist.favorites(ids)
+                    if (idx >= 0) list[idx] = fav else list.add(0, fav)
+                }
+            }
+        } catch (_: Exception) {}
+        if (list.none { it.isFavorites }) list.add(0, Playlist.favorites())
+        _playlists.value = list
+        FavoritesBridge.notifyChanged()
     }
 
     // ---------- Biblioteca: separar artistas / gêneros ----------
@@ -641,12 +669,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .map { it.trim() }
             .filter { it.isNotEmpty() }
         val minMs = if (st.minDurationSec > 0) st.minDurationSec * 1000L else 0L
+        val trackBl = _trackBlacklist.value
         return tracks.filter { t ->
             if (minMs > 0 && t.duration > 0 && t.duration < minMs) return@filter false
             if (ignored.isNotEmpty()) {
                 val path = t.path
                 if (ignored.any { ign -> path.contains(ign, ignoreCase = true) }) return@filter false
             }
+            if (trackBl.isNotEmpty() && (t.id in trackBl || t.path in trackBl)) return@filter false
             true
         }
     }
@@ -902,6 +932,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .sortedBy { it.name.lowercase() }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** Compositores: mesma lógica de divisão de tags dos artistas (separadores/exceções). */
+    val composers: StateFlow<List<Artist>> = combine(tracks, _librarySettings) { list, st ->
+        val splitter = artistSplitterOf(st)
+        list.flatMap { t ->
+            splitter.split(t.composer)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .map { name -> name to t }
+        }
+            .groupBy({ it.first }, { it.second })
+            .map { (name, l) -> Artist(name, l.size, l.firstNotNullOfOrNull { it.artPath }, l.sumOf { it.duration }) }
+            .sortedBy { it.name.lowercase() }
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    fun openComposer(name: String) {
+        _currentTab.value = Tab.ARTISTS
+        _filter.value = Filter(Tab.ARTISTS, "composer::$name")
+    }
+
     val albums: StateFlow<List<Album>> = tracks.map { list ->
         // Mescla álbuns com mesmo nome e mesmo artista do álbum (case-insensitive + trim)
         // para evitar entradas duplicadas quando tags diferem só em maiúsculas/espaços.
@@ -987,7 +1036,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val base = list.filter {
                     when (f.tab) {
                         Tab.HOME, Tab.ALL -> true
-                        Tab.ARTISTS -> f.key in artistSplitter.split(it.artist)
+                        Tab.ARTISTS -> {
+                            val key = f.key
+                            if (key.startsWith("composer::")) {
+                                val c = key.removePrefix("composer::")
+                                c in artistSplitter.split(it.composer) ||
+                                    it.composer.equals(c, ignoreCase = true)
+                            } else {
+                                key in artistSplitter.split(it.artist) || it.artist.equals(key, ignoreCase = true)
+                            }
+                        }
                         Tab.ALBUMS -> it.album.trim().equals(f.key.trim(), ignoreCase = true)
                         Tab.GENRES -> f.key in genreSplitter.split(it.genre)
                         Tab.PLAYLISTS -> false
@@ -1030,6 +1088,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Adiciona uma pasta e lê só ela (as outras continuam do cache). */
+    fun addFolderPath(absolutePath: String) {
+        val path = absolutePath.trim().trimEnd('/')
+        if (path.isBlank()) return
+        val key = if (path.startsWith("file:")) path else "file://$path"
+        if (key in _treeUris.value || path in _treeUris.value) return
+        _treeUris.value = _treeUris.value + key
+        saveFolders()
+        // Com all-files mode a biblioteca já cobre o disco; ainda assim força refresh
+        refreshLibrary()
+    }
+
     fun addFolder(treeUri: Uri) {
         val key = treeUri.toString()
         if (key in _treeUris.value) return
@@ -1219,6 +1288,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // Zera posição imediatamente para não reutilizar o progresso da faixa anterior
+            // no cálculo de play count (race com o combine de _positionMs).
+            _positionMs.value = 0L
+            _durationMs.value = 0L
             _nowPlaying.value = _queue.value.firstOrNull { it.id == mediaItem?.mediaId }
             persistPlaybackState(paused = !(_isPlaying.value))
             // Re-anexa EQ caso a sessão de áudio mude
@@ -1357,40 +1430,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val c = controller ?: return
-        val ms = _fadeMs.value
+        // Fade é aplicado no PlaybackService (vale para notificação, Bluetooth e UI)
         fadeJob?.cancel()
-        if (ms <= 0) {
-            c.volume = 1f
-            if (c.isPlaying) c.pause() else c.play()
-            return
-        }
-        if (c.isPlaying) {
-            // fade out then pause
-            fadeJob = viewModelScope.launch {
-                val steps = (ms / 30).coerceIn(4, 40)
-                val startVol = c.volume.coerceIn(0.01f, 1f)
-                for (i in 0..steps) {
-                    if (!isActive) return@launch
-                    c.volume = startVol * (1f - i.toFloat() / steps)
-                    delay(ms.toLong() / steps)
-                }
-                c.pause()
-                c.volume = 1f
-            }
-        } else {
-            // fade in from silence
-            c.volume = 0f
-            c.play()
-            fadeJob = viewModelScope.launch {
-                val steps = (ms / 30).coerceIn(4, 40)
-                for (i in 0..steps) {
-                    if (!isActive) return@launch
-                    c.volume = i.toFloat() / steps
-                    delay(ms.toLong() / steps)
-                }
-                c.volume = 1f
-            }
-        }
+        if (c.isPlaying) c.pause() else c.play()
     }
 
     fun next() {
@@ -1815,6 +1857,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?.toMap()
             ?: emptyMap()
     )
+private val _firstPlayedAt = MutableStateFlow(
+        prefs.getString(KEY_FIRST_PLAYED, null)
+            ?.lineSequence()
+            ?.mapNotNull { line ->
+                val parts = line.split("=", limit = 2)
+                if (parts.size == 2) parts[0] to (parts[1].toLongOrNull() ?: 0L) else null
+            }
+            ?.toMap()
+            ?: emptyMap()
+    )
 
     /**
      * Log de plays com timestamp (id\tts por linha), para estatísticas por período.
@@ -1961,14 +2013,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     .map { (name, pair) ->
                         val firstTrack = pair.second.firstOrNull()?.let { byId[it] }
                         // Mesma foto da lista de artistas: meta local → URL → capa de faixa
-                        val meta = try {
-                            com.tolete.player.data.ArtistMetaStore.load(
-                                app,
-                                com.tolete.player.data.ArtistMetaStore.artistKey(name)
-                            )
-                        } catch (_: Exception) { null }
-                        val art = meta?.localImagePath?.takeIf { java.io.File(it).exists() }
-                            ?: meta?.imageUrl
+                        val art = com.tolete.player.data.ArtistMetaStore.cachedPhotoPath(name)
                             ?: firstTrack?.artPath
                         RankedItem(
                             key = name,
@@ -1995,18 +2040,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     .map { (album, pair) ->
                         val tracks = pair.second.mapNotNull { byId[it] }
                         val firstTrack = tracks.firstOrNull()
-                        val meta = try {
-                            com.tolete.player.data.ArtistMetaStore.load(
-                                app,
-                                com.tolete.player.data.ArtistMetaStore.albumKey(
-                                    album,
-                                    firstTrack?.artist
-                                )
-                            )
-                        } catch (_: Exception) { null }
                         val art = tracks.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
-                            ?: meta?.localImagePath?.takeIf { java.io.File(it).exists() }
-                            ?: meta?.imageUrl
                         RankedItem(
                             key = album,
                             title = album,
@@ -2049,6 +2083,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun playCountOf(trackId: String): Int = _playCounts.value[trackId] ?: 0
+    fun firstPlayedAtOf(trackId: String): Long = _firstPlayedAt.value[trackId] ?: 0L
+    fun lastPlayedAtOf(trackId: String): Long = _lastPlayedAt.value[trackId] ?: 0L
 
     fun lastPlayedAt(trackId: String): Long = _lastPlayedAt.value[trackId] ?: 0L
 
@@ -2064,6 +2100,227 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_PLAY_COUNT_THRESHOLD, v).apply()
     }
 
+    /** Username público do Last.fm (sem scrobbling; só leitura de histórico/loved). */
+    private val _lastFmUsername = MutableStateFlow(prefs.getString(KEY_LASTFM_USER, null)?.takeIf { it.isNotBlank() })
+    val lastFmUsername: StateFlow<String?> = _lastFmUsername.asStateFlow()
+
+    private val _lastFmSyncMessage = MutableStateFlow<String?>(null)
+    val lastFmSyncMessage: StateFlow<String?> = _lastFmSyncMessage.asStateFlow()
+
+    fun setLastFmUsername(user: String?) {
+        val v = user?.trim()?.takeIf { it.isNotBlank() }
+        _lastFmUsername.value = v
+        prefs.edit().putString(KEY_LASTFM_USER, v).apply()
+        if (v == null) _lastFmSyncMessage.value = null
+    }
+
+
+    private val _libraryRootPath = MutableStateFlow(prefs.getString(KEY_LIBRARY_ROOT, null)?.takeIf { it.isNotBlank() })
+    val libraryRootPath: StateFlow<String?> = _libraryRootPath.asStateFlow()
+
+    private val _organizeStatus = MutableStateFlow<String?>(null)
+    val organizeStatus: StateFlow<String?> = _organizeStatus.asStateFlow()
+
+    fun setLibraryRootPath(path: String?) {
+        val v = path?.trim()?.takeIf { it.isNotBlank() }
+        _libraryRootPath.value = v
+        prefs.edit().putString(KEY_LIBRARY_ROOT, v).apply()
+    }
+
+    private fun sanitizeFilePart(s: String): String =
+        s.replace(Regex("[\\/:*?\"<>|]"), "_").trim().ifBlank { "Desconhecido" }
+
+    private fun collectAudioFiles(root: File): List<File> {
+        val out = mutableListOf<File>()
+        fun walk(d: File) {
+            val kids = d.listFiles() ?: return
+            for (f in kids) {
+                if (f.isDirectory) walk(f)
+                else if (f.extension.lowercase() in setOf("mp3","flac","wav","m4a","aac","ogg","opus","alac","aiff","aif","wma","dsf","dff")) {
+                    out.add(f)
+                }
+            }
+        }
+        if (root.isDirectory) walk(root) else if (root.isFile) out.add(root)
+        return out
+    }
+
+    fun bulkRenameFolderByPattern(folderPath: String, pattern: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            _organizeStatus.value = "Renomeando…"
+            try {
+                val files = collectAudioFiles(File(folderPath))
+                var ok = 0
+                for (src in files) {
+                    val tags = com.tolete.player.data.TagReader.read(src)
+                    val trackNum = tags?.track?.filter { it.isDigit() }?.take(2)?.padStart(2, '0') ?: "00"
+                    val base = pattern
+                        .replace("%ARTIST%", tags?.artist.orEmpty())
+                        .replace("%TITLE%", tags?.title ?: src.nameWithoutExtension)
+                        .replace("%ALBUM%", tags?.album.orEmpty())
+                        .replace("%ALBUM_ARTIST%", tags?.albumArtist ?: tags?.artist.orEmpty())
+                        .replace("%TRACK%", trackNum)
+                        .replace("%YEAR%", tags?.year.orEmpty())
+                        .replace("%GENRE%", tags?.genre.orEmpty())
+                        .replace("%COMPOSER%", tags?.composer.orEmpty())
+                        .trim()
+                        .ifBlank { src.nameWithoutExtension }
+                    val safe = sanitizeFilePart(base)
+                    val dest = File(src.parentFile, "$safe.${src.extension}")
+                    if (dest.absolutePath == src.absolutePath) { ok++; continue }
+                    if (dest.exists()) continue
+                    if (src.renameTo(dest)) ok++
+                }
+                _organizeStatus.value = "Renomeadas $ok de ${files.size} faixas"
+                refreshLibrary()
+            } catch (e: Exception) {
+                _organizeStatus.value = "Falha: ${e.message}"
+            }
+        }
+    }
+
+    fun moveFolderToLibraryRoot(sourceFolder: String) {
+        val rootPath = _libraryRootPath.value ?: run {
+            _organizeStatus.value = "Defina a pasta principal antes"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val channelId = "lyron_organize"
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(
+                    android.app.NotificationChannel(channelId, "Organizar biblioteca", android.app.NotificationManager.IMPORTANCE_LOW)
+                )
+            }
+            val files = collectAudioFiles(File(sourceFolder))
+            val total = files.size.coerceAtLeast(1)
+            _organizeStatus.value = "Movendo 0/$total…"
+            var done = 0
+            var moved = 0
+            fun notify(progress: Int, text: String, ongoing: Boolean = true) {
+                val builder = if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    android.app.Notification.Builder(app, channelId)
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.app.Notification.Builder(app)
+                }
+                val n = builder
+                    .setContentTitle("Organizar biblioteca")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.stat_sys_download)
+                    .setOngoing(ongoing)
+                    .setProgress(total, progress, false)
+                    .build()
+                nm.notify(4242, n)
+            }
+            notify(0, "Preparando…")
+            val root = File(rootPath)
+            root.mkdirs()
+            for (src in files) {
+                try {
+                    val tags = com.tolete.player.data.TagReader.read(src)
+                    // Hierarquia: Artista do Álbum → Artista → "Artista desconhecido"
+                    val albumArtistRaw = tags?.albumArtist?.trim().orEmpty()
+                    val artistRaw = tags?.artist?.trim().orEmpty()
+                    val folderArtist = sanitizeFilePart(
+                        when {
+                            albumArtistRaw.isNotBlank() -> albumArtistRaw
+                            artistRaw.isNotBlank() -> artistRaw
+                            else -> "Artista desconhecido"
+                        }
+                    )
+                    val album = sanitizeFilePart(
+                        tags?.album?.trim()?.takeIf { it.isNotBlank() } ?: "Álbum desconhecido"
+                    )
+                    val destDir = File(root, "$folderArtist/$album")
+                    destDir.mkdirs()
+                    var dest = File(destDir, src.name)
+                    if (dest.exists() && dest.absolutePath != src.absolutePath) {
+                        var i = 1
+                        val base = src.nameWithoutExtension
+                        val ext = src.extension
+                        while (dest.exists()) {
+                            dest = File(destDir, "$base ($i).$ext")
+                            i++
+                        }
+                    }
+                    if (dest.absolutePath != src.absolutePath) {
+                        if (!src.renameTo(dest)) {
+                            try {
+                                src.copyTo(dest, overwrite = false)
+                                src.delete()
+                            } catch (_: Exception) {}
+                        }
+                        if (dest.exists()) moved++
+                    }
+                } catch (_: Exception) {}
+                done++
+                if (done % 3 == 0 || done == files.size) {
+                    notify(done, "$done de ${files.size}")
+                    _organizeStatus.value = "Movendo $done/${files.size}…"
+                }
+            }
+            notify(files.size, "Concluído: $moved movida(s)", ongoing = false)
+            _organizeStatus.value = "Movidas $moved de ${files.size} faixas"
+            refreshLibrary()
+        }
+    }
+
+    private fun normMatch(s: String): String =
+        s.lowercase().trim().replace(Regex("\\s+"), " ")
+
+    private fun matchLocal(title: String, artist: String): Track? {
+        val nt = normMatch(title)
+        val na = normMatch(artist)
+        if (nt.isEmpty()) return null
+        val lib = tracks.value
+        // 1) título + artista
+        lib.firstOrNull { normMatch(it.title) == nt && (na.isEmpty() || normMatch(it.artist) == na) }
+            ?.let { return it }
+        // 2) só título
+        return lib.firstOrNull { normMatch(it.title) == nt }
+    }
+
+    /**
+     * Importa histórico recente e faixas amadas do Last.fm (conta pública).
+     * Casa com a biblioteca local por título/artista. Não faz scrobbling.
+     */
+    fun syncFromLastFm() {
+        val user = _lastFmUsername.value ?: run {
+            _lastFmSyncMessage.value = "Informe o usuário do Last.fm"
+            return
+        }
+        viewModelScope.launch {
+            _lastFmSyncMessage.value = "Importando favoritos…"
+            try {
+                val loved = LastFmClient.getLovedTracks(user, limit = 200)
+                var lovedMatched = 0
+                if (loved.isNotEmpty()) {
+                    val list = _playlists.value.toMutableList()
+                    val favIdx = list.indexOfFirst { it.isFavorites }
+                    val current = if (favIdx >= 0) list[favIdx].trackIds.toMutableList() else mutableListOf()
+                    for (ut in loved) {
+                        val t = matchLocal(ut.title, ut.artist) ?: continue
+                        if (t.id !in current) {
+                            current.add(0, t.id)
+                            lovedMatched++
+                        }
+                    }
+                    val fav = Playlist.favorites(current)
+                    if (favIdx >= 0) list[favIdx] = fav else list.add(0, fav)
+                    _playlists.value = list
+                    persistPlaylists()
+                }
+                _lastFmSyncMessage.value =
+                    if (lovedMatched > 0) "Favoritos: $lovedMatched nova(s) faixa(s)"
+                    else "Nenhum favorito novo encontrado na biblioteca"
+            } catch (e: Exception) {
+                _lastFmSyncMessage.value = "Erro: ${e.message}"
+            }
+        }
+    }
+
     /** IDs já contados nesta sessão de play (evita recontagem até trocar de faixa). */
     private val countedThisSession = mutableSetOf<String>()
 
@@ -2075,11 +2332,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _historyIds.value = updated
         prefs.edit().putString(KEY_HISTORY, updated.joinToString("\n")).apply()
         val counts = _playCounts.value.toMutableMap()
-        counts[id] = (counts[id] ?: 0) + 1
+        val prev = counts[id] ?: 0
+        counts[id] = prev + 1
         _playCounts.value = counts
         val lasts = _lastPlayedAt.value.toMutableMap()
         lasts[id] = now
         _lastPlayedAt.value = lasts
+        if (prev == 0) {
+            val firsts = _firstPlayedAt.value.toMutableMap()
+            firsts[id] = now
+            _firstPlayedAt.value = firsts
+            val firstLine = firsts.entries.joinToString(separator = "\n") { e -> e.key + "=" + e.value }
+            prefs.edit().putString(KEY_FIRST_PLAYED, firstLine).apply()
+        }
         val events = (listOf(id to now) + _playEvents.value).take(PLAY_EVENTS_MAX)
         _playEvents.value = events
         prefs.edit()
@@ -2087,26 +2352,346 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .putString(KEY_LAST_PLAYED, lasts.entries.joinToString("\n") { "${it.key}=${it.value}" })
             .putString(KEY_PLAY_EVENTS, events.joinToString("\n") { "${it.first}\t${it.second}" })
             .apply()
+        val track = tracks.value.firstOrNull { it.id == id }
+        if (track != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                appendPlaybackHistoryCsv(track, now)
+            }
+        }
     }
 
-    init {
-        // Atualiza histórico de ordem quando a faixa atual muda (sem contar play ainda)
-        viewModelScope.launch {
-            _nowPlaying.collect { t ->
-                val id = t?.id
-                // Nova faixa: libera contagem novamente
-                if (id != null) {
-                    countedThisSession.removeAll { it != id }
+    private val playbackHistoryCsvLock = Any()
+
+    private fun csvEscape(value: String): String {
+        val needsQuotes = value.contains(',') || value.contains('"') ||
+            value.contains('\n') || value.contains('\r')
+        val escaped = value.replace("\"", "\"\"")
+        return if (needsQuotes) "\"$escaped\"" else escaped
+    }
+
+    private fun detectFileFormat(track: Track): String {
+        val fromCodec = track.codec?.trim().orEmpty()
+        if (fromCodec.isNotEmpty()) {
+            val c = fromCodec.uppercase()
+            return when {
+                "FLAC" in c -> "Flac"
+                "MPEG" in c || "MP3" in c || "LAYER" in c -> "Mp3"
+                "WAV" in c || "PCM" in c -> "Wav"
+                "AAC" in c || "M4A" in c || "MP4" in c -> "M4a"
+                "OGG" in c || "VORBIS" in c || "OPUS" in c -> "Ogg"
+                "ALAC" in c -> "Alac"
+                "AIFF" in c -> "Aiff"
+                else -> fromCodec.replaceFirstChar {
+                    if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
                 }
             }
         }
-        // Conta play só ao atingir o percentual configurado da duração
+        val ext = track.path.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "flac" -> "Flac"
+            "mp3" -> "Mp3"
+            "wav" -> "Wav"
+            "m4a", "aac", "mp4" -> "M4a"
+            "ogg", "opus" -> "Ogg"
+            "alac" -> "Alac"
+            "aiff", "aif" -> "Aiff"
+            "wma" -> "Wma"
+            else -> ext.replaceFirstChar {
+                if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
+            }.ifBlank { "Unknown" }
+        }
+    }
+
+    private fun formatPlayTimeHuman(epochMs: Long): String {
+        val sdf = SimpleDateFormat("d 'de' MMMM 'de' yyyy 'às' HH:mm z", Locale("pt", "BR"))
+        sdf.timeZone = TimeZone.getTimeZone("America/Sao_Paulo")
+        return sdf.format(Date(epochMs))
+    }
+
+    /** Caminho do CSV de plays (fonte de verdade do histórico e mais tocadas). */
+    private fun playbackHistoryCsvFile(): File {
+        val dir = File("/storage/emulated/0/Lyron")
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, "playback history.csv")
+    }
+
+    private val CSV_HEADER =
+        "timeHuman,epochMs,artist,track,album,albumArtist,fileFormat,isFavorite,path,durationMs,year,genre,trackId,codec,sampleRate,bitrate,playCountAfter"
+
+    /** Grava cada play datada em /storage/emulated/0/Lyron/playback history.csv */
+    private fun appendPlaybackHistoryCsv(track: Track, epochMs: Long) {
+        try {
+            val file = playbackHistoryCsvFile()
+            val timeHuman = formatPlayTimeHuman(epochMs)
+            val albumArtist = track.albumArtist.ifBlank { track.artist }
+            val format = detectFileFormat(track)
+            val fav = if (isFavorite(track.id)) "Yes" else "No"
+            val afterCount = (_playCounts.value[track.id] ?: 0)
+            val line = listOf(
+                timeHuman,
+                epochMs.toString(),
+                track.artist,
+                track.title,
+                track.album,
+                albumArtist,
+                format,
+                fav,
+                track.path,
+                track.duration.toString(),
+                track.year?.toString().orEmpty(),
+                track.genre,
+                track.id,
+                track.codec.orEmpty(),
+                if (track.sampleRate > 0) track.sampleRate.toString() else "",
+                if (track.bitrate > 0) track.bitrate.toString() else "",
+                afterCount.toString()
+            ).joinToString(",") { csvEscape(it) }
+            synchronized(playbackHistoryCsvLock) {
+                val needsHeader = !file.exists() || file.length() == 0L
+                val sb = StringBuilder()
+                if (needsHeader) sb.append(CSV_HEADER).append('\n')
+                sb.append(line).append('\n')
+                file.appendText(sb.toString(), Charsets.UTF_8)
+            }
+            // Mantém memória alinhada ao CSV
+            reloadStatsFromCsv()
+        } catch (e: Exception) {
+            android.util.Log.w("MusicVM", "Falha ao gravar playback history.csv", e)
+        }
+    }
+
+    /**
+     * Lê o CSV e reconstrói histórico, contagens e primeira/última reprodução.
+     * Aceita o cabeçalho antigo (sem epochMs/path/…) e o novo.
+     */
+    fun reloadStatsFromCsv() {
+        try {
+            val file = playbackHistoryCsvFile()
+            if (!file.exists() || file.length() == 0L) return
+            val lines = file.readLines(Charsets.UTF_8).filter { it.isNotBlank() }
+            if (lines.isEmpty()) return
+            val headerCells = parseCsvLine(lines.first()).map { it.lowercase() }
+            val hasEpoch = "epochms" in headerCells
+            val hasPath = "path" in headerCells
+            val hasTrackId = "trackid" in headerCells
+            val data = if (headerCells.firstOrNull()?.contains("timehuman") == true) lines.drop(1) else lines
+
+            val counts = linkedMapOf<String, Int>()
+            val first = mutableMapOf<String, Long>()
+            val last = mutableMapOf<String, Long>()
+            val recentOrder = mutableListOf<String>() // mais recente primeiro
+
+            for (raw in data) {
+                val cols = parseCsvLine(raw)
+                if (cols.size < 4) continue
+                val epoch = if (hasEpoch && cols.size > 1) cols[1].toLongOrNull() ?: 0L else 0L
+                val artist = if (hasEpoch) cols.getOrNull(2).orEmpty() else cols.getOrNull(1).orEmpty()
+                val title = if (hasEpoch) cols.getOrNull(3).orEmpty() else cols.getOrNull(2).orEmpty()
+                val path = if (hasPath) {
+                    val idx = headerCells.indexOf("path")
+                    if (idx >= 0) cols.getOrNull(idx).orEmpty() else ""
+                } else ""
+                val trackId = if (hasTrackId) {
+                    val idx = headerCells.indexOf("trackid")
+                    if (idx >= 0) cols.getOrNull(idx).orEmpty() else ""
+                } else ""
+                val key = when {
+                    trackId.isNotBlank() -> trackId
+                    path.isNotBlank() -> path
+                    else -> "$artist\t$title"
+                }
+                if (key.isBlank()) continue
+                counts[key] = (counts[key] ?: 0) + 1
+                if (epoch > 0L) {
+                    val f = first[key]
+                    if (f == null || epoch < f) first[key] = epoch
+                    val l = last[key]
+                    if (l == null || epoch > l) last[key] = epoch
+                }
+                if (key !in recentOrder) recentOrder.add(key)
+            }
+            // recentOrder was built oldest-first if reading top to bottom; reverse for most-recent-first
+            // Actually CSV appends newest at end, so reverse
+            val ordered = recentOrder.asReversed().distinct()
+
+            // Map keys to library track ids when possible
+            val lib = tracks.value
+            fun resolveId(key: String): String {
+                lib.firstOrNull { it.id == key }?.id?.let { return it }
+                lib.firstOrNull { it.path == key }?.id?.let { return it }
+                if (key.contains('\t')) {
+                    val parts = key.split('\t', limit = 2)
+                    if (parts.size == 2) {
+                        lib.firstOrNull {
+                            it.title.equals(parts[1], true) && it.artist.equals(parts[0], true)
+                        }?.id?.let { return it }
+                    }
+                }
+                return key
+            }
+
+            val countById = mutableMapOf<String, Int>()
+            counts.forEach { (k, v) ->
+                val id = resolveId(k)
+                countById[id] = (countById[id] ?: 0) + v
+            }
+            val firstById = mutableMapOf<String, Long>()
+            first.forEach { (k, v) ->
+                val id = resolveId(k)
+                val prev = firstById[id]
+                if (prev == null || v < prev) firstById[id] = v
+            }
+            val lastById = mutableMapOf<String, Long>()
+            last.forEach { (k, v) ->
+                val id = resolveId(k)
+                val prev = lastById[id]
+                if (prev == null || v > prev) lastById[id] = v
+            }
+            val histIds = ordered.map { resolveId(it) }.distinct().take(HISTORY_MAX)
+
+            _playCounts.value = countById
+            _firstPlayedAt.value = firstById
+            _lastPlayedAt.value = lastById
+            _historyIds.value = histIds
+            prefs.edit()
+                .putString(KEY_PLAY_COUNTS, countById.entries.joinToString("\n") { "${it.key}=${it.value}" })
+                .putString(KEY_FIRST_PLAYED, firstById.entries.joinToString("\n") { "${it.key}=${it.value}" })
+                .putString(KEY_LAST_PLAYED, lastById.entries.joinToString("\n") { "${it.key}=${it.value}" })
+                .putString(KEY_HISTORY, histIds.joinToString("\n"))
+                .apply()
+        } catch (e: Exception) {
+            android.util.Log.w("MusicVM", "Falha ao ler playback history.csv", e)
+        }
+    }
+
+    private fun parseCsvLine(line: String): List<String> {
+        val out = ArrayList<String>()
+        val sb = StringBuilder()
+        var inQuotes = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                c == '"' -> {
+                    if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                        sb.append('"'); i++
+                    } else inQuotes = !inQuotes
+                }
+                c == ',' && !inQuotes -> {
+                    out.add(sb.toString()); sb.clear()
+                }
+                else -> sb.append(c)
+            }
+            i++
+        }
+        out.add(sb.toString())
+        return out
+    }
+
+    fun clearFavorites() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val list = _playlists.value.toMutableList()
+            val idx = list.indexOfFirst { it.isFavorites }
+            if (idx >= 0) {
+                list[idx] = Playlist.favorites(emptyList())
+            } else {
+                list.add(0, Playlist.favorites(emptyList()))
+            }
+            _playlists.value = list
+            writePlaylistsNow()
+            try { com.tolete.player.data.FavoritesFile.clearAll(getApplication()) } catch (_: Exception) {}
+            _organizeStatus.value = "Favoritos limpos"
+        }
+    }
+
+    fun clearPlaybackHistory() {
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val f = playbackHistoryCsvFile()
+                if (f.exists()) f.writeText(CSV_HEADER + "\n", Charsets.UTF_8)
+            } catch (_: Exception) {}
+            _historyIds.value = emptyList()
+            _playCounts.value = emptyMap()
+            _firstPlayedAt.value = emptyMap()
+            _lastPlayedAt.value = emptyMap()
+            _playEvents.value = emptyList()
+            prefs.edit()
+                .remove(KEY_HISTORY)
+                .remove(KEY_PLAY_COUNTS)
+                .remove(KEY_FIRST_PLAYED)
+                .remove(KEY_LAST_PLAYED)
+                .remove(KEY_PLAY_EVENTS)
+                .apply()
+            _organizeStatus.value = "Histórico limpo"
+        }
+    }
+
+
+    private val _trackBlacklist = MutableStateFlow(
+        prefs.getString(KEY_TRACK_BLACKLIST, null)
+            ?.lineSequence()
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet()
+    )
+    val trackBlacklist: StateFlow<Set<String>> = _trackBlacklist.asStateFlow()
+
+    fun isTrackBlacklisted(trackId: String, path: String = ""): Boolean {
+        val set = _trackBlacklist.value
+        return trackId in set || (path.isNotBlank() && path in set)
+    }
+
+    fun addToTrackBlacklist(track: Track) {
+        val set = _trackBlacklist.value.toMutableSet()
+        set.add(track.id)
+        if (track.path.isNotBlank()) set.add(track.path)
+        _trackBlacklist.value = set
+        prefs.edit().putString(KEY_TRACK_BLACKLIST, set.joinToString("\n")).apply()
+        // Remove from library view immediately
+        _library.value = _library.value.filter { it.id != track.id && it.path != track.path }
+    }
+
+    fun removeFromTrackBlacklist(idOrPath: String) {
+        val set = _trackBlacklist.value.toMutableSet()
+        set.remove(idOrPath)
+        _trackBlacklist.value = set
+        prefs.edit().putString(KEY_TRACK_BLACKLIST, set.joinToString("\n")).apply()
+    }
+
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Aguarda um pouco a biblioteca e carrega stats do CSV
+            kotlinx.coroutines.delay(1500)
+            reloadStatsFromCsv()
+        }
+        // Atualiza histórico de ordem quando a faixa atual muda (sem contar play ainda)
         viewModelScope.launch {
-            combine(_nowPlaying, _positionMs, _playCountThreshold) { track, pos, threshold ->
-                Triple(track, pos, threshold)
-            }.collect { (track, pos, threshold) ->
+            _nowPlaying.collect { t ->
+                // Nova faixa (ou null): limpa sessão para não recontar nem herdar estado
+                countedThisSession.clear()
+            }
+        }
+        // Conta play só ao atingir o percentual configurado da duração.
+        // Usa a duração do player quando disponível; ignora posições residual da faixa anterior.
+        viewModelScope.launch {
+            combine(_nowPlaying, _positionMs, _durationMs, _playCountThreshold) { track, pos, playerDur, threshold ->
+                arrayOf(track, pos, playerDur, threshold)
+            }.collect { arr ->
+                val track = arr[0] as Track?
+                val pos = arr[1] as Long
+                val playerDur = arr[2] as Long
+                val threshold = arr[3] as Int
                 val t = track ?: return@collect
-                val dur = t.duration.coerceAtLeast(1L)
+                // Ainda não recebemos posição real desta faixa (ou ficou residual da anterior)
+                if (pos <= 0L) return@collect
+                val dur = when {
+                    playerDur > 0L -> playerDur
+                    t.duration > 0L -> t.duration
+                    else -> return@collect
+                }
                 val pct = ((pos * 100L) / dur).toInt()
                 if (pct >= threshold) {
                     recordPlay(t.id)
@@ -2230,6 +2815,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString(KEY_SHARE_FONT, path).apply()
     }
 
+    private val _shareBgColor = MutableStateFlow(
+        prefs.getInt(KEY_SHARE_BG_COLOR, 0xFF121212.toInt())
+    )
+    val shareBgColor: StateFlow<Int> = _shareBgColor.asStateFlow()
+    fun setShareBgColor(argb: Int) {
+        _shareBgColor.value = argb
+        prefs.edit().putInt(KEY_SHARE_BG_COLOR, argb).apply()
+    }
     private val _shareTextColor = MutableStateFlow(
         prefs.getInt(KEY_SHARE_TEXT_COLOR, 0xFFF5F5FA.toInt())
     )
@@ -2255,6 +2848,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val v = ms.coerceIn(0, 3000)
         _fadeMs.value = v
         prefs.edit().putInt(KEY_FADE_MS, v).apply()
+    }
+
+    /** Crossfade entre faixas (ms). 0 = desligado. */
+    private val _crossfadeMs = MutableStateFlow(prefs.getInt(KEY_CROSSFADE_MS, 0).coerceIn(0, 5000))
+    val crossfadeMs: StateFlow<Int> = _crossfadeMs.asStateFlow()
+    fun setCrossfadeMs(ms: Int) {
+        val v = ms.coerceIn(0, 5000)
+        _crossfadeMs.value = v
+        prefs.edit().putInt(KEY_CROSSFADE_MS, v).apply()
     }
 
     /** Estilo visual da barra de progresso no Now Playing. */
@@ -2403,9 +3005,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ---------- Backup ----------
-    fun exportBackup(): String {
+    data class BackupOptions(
+        val preferences: Boolean = true,
+        val playlistsFavorites: Boolean = true,
+        val playHistory: Boolean = true,
+        val playCounts: Boolean = true,
+        val librarySettings: Boolean = true,
+        val appearance: Boolean = true,
+        val artistPhotos: Boolean = true,
+        val trackBlacklist: Boolean = true
+    )
+
+    @Volatile
+    var pendingBackupOptions: BackupOptions = BackupOptions()
+
+    fun exportBackup(options: BackupOptions = BackupOptions()): String {
+
         val obj = org.json.JSONObject()
         obj.put("version", 3)
+        obj.put("backupOptions", org.json.JSONObject().apply {
+            put("preferences", options.preferences)
+            put("playlistsFavorites", options.playlistsFavorites)
+            put("playHistory", options.playHistory)
+            put("playCounts", options.playCounts)
+            put("librarySettings", options.librarySettings)
+            put("appearance", options.appearance)
+            put("artistPhotos", options.artistPhotos)
+            put("trackBlacklist", options.trackBlacklist)
+        })
         obj.put("theme", _themeId.value.name)
         obj.put("lyricsFont", _lyricsFontPath.value)
         obj.put("uiFont", _uiFontPath.value)
@@ -2433,6 +3060,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         obj.put("ignoredFolders", _librarySettings.value.ignoredFolders)
         obj.put("minDurationSec", _librarySettings.value.minDurationSec)
         obj.put("fadeMs", _fadeMs.value)
+        obj.put("crossfadeMs", _crossfadeMs.value)
         obj.put("seekBarStyle", _seekBarStyle.value.name)
         obj.put("immersiveNowPlaying", _immersiveNowPlaying.value)
         obj.put("milkIntervalSec", _milkIntervalSec.value)
@@ -2448,18 +3076,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         obj.put("groupOrder", prefs.getString(KEY_GROUP_ORDER, null))
         obj.put("trackSort", prefs.getString(KEY_TRACK_SORT, null))
         obj.put("trackOrder", prefs.getString(KEY_TRACK_ORDER, null))
-        // Histórico, contagens, última reprodução e log de eventos (períodos)
-        obj.put("history", _historyIds.value.joinToString("\n"))
-        val counts = org.json.JSONObject()
-        _playCounts.value.forEach { (k, v) -> counts.put(k, v) }
-        obj.put("playCounts", counts)
-        val lasts = org.json.JSONObject()
-        _lastPlayedAt.value.forEach { (k, v) -> lasts.put(k, v) }
-        obj.put("lastPlayedAt", lasts)
-        obj.put(
-            "playEvents",
-            _playEvents.value.joinToString("\n") { "${it.first}\t${it.second}" }
-        )
+        if (options.playHistory || options.playCounts) {
+            if (options.playHistory) {
+                obj.put("history", _historyIds.value.joinToString("\n"))
+                obj.put(
+                    "playEvents",
+                    _playEvents.value.joinToString("\n") { "${it.first}\t${it.second}" }
+                )
+                val lasts = org.json.JSONObject()
+                _lastPlayedAt.value.forEach { (k, v) -> lasts.put(k, v) }
+                obj.put("lastPlayedAt", lasts)
+                val firsts = org.json.JSONObject()
+                _firstPlayedAt.value.forEach { (k, v) -> firsts.put(k, v) }
+                obj.put("firstPlayedAt", firsts)
+            }
+            if (options.playCounts) {
+                val counts = org.json.JSONObject()
+                _playCounts.value.forEach { (k, v) -> counts.put(k, v) }
+                obj.put("playCounts", counts)
+            }
+        }
+        if (options.trackBlacklist) {
+            obj.put("trackBlacklist", _trackBlacklist.value.joinToString("\n"))
+        }
         val folders = org.json.JSONArray()
         _treeUris.value.forEach { folders.put(it) }
         obj.put("folders", folders)
@@ -2495,21 +3134,43 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Gera um ZIP com preferences.json + fotos de artistas em artist_photos/. */
-    fun exportBackupZip(destFile: java.io.File): Boolean {
+    fun exportBackupZip(destFile: java.io.File, options: BackupOptions = pendingBackupOptions): Boolean {
         return try {
-            val json = exportBackup()
+            val json = exportBackup(options)
             java.util.zip.ZipOutputStream(java.io.FileOutputStream(destFile)).use { zos ->
                 zos.putNextEntry(java.util.zip.ZipEntry("preferences.json"))
                 zos.write(json.toByteArray(Charsets.UTF_8))
                 zos.closeEntry()
-                val photoDir = java.io.File(getApplication<android.app.Application>().filesDir, "artist_photos")
-                if (photoDir.isDirectory) {
-                    photoDir.listFiles()?.forEach { f ->
-                        if (f.isFile) {
-                            zos.putNextEntry(java.util.zip.ZipEntry("artist_photos/${f.name}"))
+                fun putDir(dir: java.io.File, zipPrefix: String) {
+                    if (!dir.isDirectory) return
+                    dir.listFiles()?.forEach { f ->
+                        if (f.isFile && f.name != ".nomedia") {
+                            zos.putNextEntry(java.util.zip.ZipEntry("$zipPrefix/${f.name}"))
                             f.inputStream().use { it.copyTo(zos) }
                             zos.closeEntry()
                         }
+                    }
+                }
+                if (options.artistPhotos) {
+                    putDir(com.tolete.player.data.LyronStorage.artistPhotos, "artist_photos")
+                    putDir(com.tolete.player.data.LyronStorage.artistInfos, "artist_infos")
+                    putDir(com.tolete.player.data.LyronStorage.albumInfos, "album_infos")
+                }
+                if (options.playlistsFavorites) {
+                    putDir(com.tolete.player.data.LyronStorage.playlistsDir, "playlists")
+                    val fav = com.tolete.player.data.LyronStorage.favoritesFile
+                    if (fav.isFile) {
+                        zos.putNextEntry(java.util.zip.ZipEntry("favorites.json"))
+                        fav.inputStream().use { it.copyTo(zos) }
+                        zos.closeEntry()
+                    }
+                }
+                if (options.playHistory) {
+                    val hist = com.tolete.player.data.LyronStorage.playbackHistory
+                    if (hist.isFile) {
+                        zos.putNextEntry(java.util.zip.ZipEntry("playback history.csv"))
+                        hist.inputStream().use { it.copyTo(zos) }
+                        zos.closeEntry()
                     }
                 }
             }
@@ -2519,59 +3180,62 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importBackupZip(bytes: ByteArray): Boolean {
+    fun importBackupZip(bytes: ByteArray, options: BackupOptions = pendingBackupOptions): Boolean {
         return try {
             var json: String? = null
-            val app = getApplication<android.app.Application>()
-            val photoDir = java.io.File(app.filesDir, "artist_photos").also { it.mkdirs() }
-            val restoredFiles = mutableSetOf<String>() // filenames only
+            val restoredFiles = mutableSetOf<String>()
             java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
                     val name = entry.name.replace("\\", "/")
                     if (name == "preferences.json" || name.endsWith("/preferences.json")) {
                         json = zis.readBytes().toString(Charsets.UTF_8)
-                    } else if ((name.contains("artist_photos/") || name.startsWith("artist_photos/")) && !entry.isDirectory) {
+                    } else if (!entry.isDirectory) {
                         val base = name.substringAfterLast('/')
                         if (base.isNotBlank()) {
-                            val dest = java.io.File(photoDir, base)
-                            dest.outputStream().use { out -> zis.copyTo(out) }
-                            restoredFiles.add(base)
+                            val dest = when {
+                                options.artistPhotos && ("artist_photos/" in name) ->
+                                    java.io.File(com.tolete.player.data.LyronStorage.artistPhotos, base)
+                                options.artistPhotos && ("artist_infos/" in name) ->
+                                    java.io.File(com.tolete.player.data.LyronStorage.artistInfos, base)
+                                options.artistPhotos && ("album_infos/" in name) ->
+                                    java.io.File(com.tolete.player.data.LyronStorage.albumInfos, base)
+                                options.playlistsFavorites && ("playlists/" in name) ->
+                                    java.io.File(com.tolete.player.data.LyronStorage.playlistsDir, base)
+                                options.playlistsFavorites && base == "favorites.json" ->
+                                    com.tolete.player.data.LyronStorage.favoritesFile
+                                options.playHistory && base == "playback history.csv" ->
+                                    com.tolete.player.data.LyronStorage.playbackHistory
+                                else -> null
+                            }
+                            if (dest != null) {
+                                dest.parentFile?.mkdirs()
+                                dest.outputStream().use { out -> zis.copyTo(out) }
+                                restoredFiles.add(base)
+                            }
                         }
                     }
                     zis.closeEntry()
                     entry = zis.nextEntry
                 }
             }
-            val ok = if (json != null) importBackup(json!!) else restoredFiles.isNotEmpty()
-            // Religa caminhos absolutos antigos de localImagePath para o diretório local atual
-            if (restoredFiles.isNotEmpty()) {
-                try {
-                    val prefs = app.getSharedPreferences("entity_meta", android.content.Context.MODE_PRIVATE)
-                    val ed = prefs.edit()
-                    prefs.all.forEach { (key, value) ->
-                        if (value !is String) return@forEach
-                        try {
-                            val o = org.json.JSONObject(value)
-                            val oldPath = o.optString("localImagePath")
-                            if (oldPath.isNullOrBlank()) return@forEach
-                            val base = java.io.File(oldPath).name
-                            if (base in restoredFiles || java.io.File(photoDir, base).exists()) {
-                                o.put("localImagePath", java.io.File(photoDir, base).absolutePath)
-                                ed.putString(key, o.toString())
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    ed.apply()
-                } catch (_: Exception) {}
+            val okJson = if (json != null) importBackup(json!!, options) else false
+            if (options.artistPhotos) {
+                try { com.tolete.player.data.ArtistMetaStore.rebuildPhotoIndex() } catch (_: Exception) {}
             }
-            ok
+            if (options.playHistory) {
+                try { reloadStatsFromCsv() } catch (_: Exception) {}
+            }
+            if (options.playlistsFavorites) {
+                try { loadPlaylists() } catch (_: Exception) {}
+            }
+            okJson || restoredFiles.isNotEmpty()
         } catch (_: Exception) {
             false
         }
     }
 
-    fun importBackup(json: String): Boolean {
+        fun importBackup(json: String, options: BackupOptions = pendingBackupOptions): Boolean {
 
         return try {
             val obj = org.json.JSONObject(json)
@@ -2599,6 +3263,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (obj.has("preferredSampleRate")) setPreferredSampleRate(obj.getInt("preferredSampleRate"))
             if (obj.has("fadeMs")) setFadeMs(obj.getInt("fadeMs"))
+            if (obj.has("crossfadeMs")) setCrossfadeMs(obj.getInt("crossfadeMs"))
             if (obj.has("seekBarStyle")) {
                 try { setSeekBarStyle(SeekBarStyle.valueOf(obj.getString("seekBarStyle"))) } catch (_: Exception) {}
             }
@@ -2623,25 +3288,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (obj.has("groupOrder")) prefs.edit().putString(KEY_GROUP_ORDER, obj.optString("groupOrder")).apply()
             if (obj.has("trackSort")) prefs.edit().putString(KEY_TRACK_SORT, obj.optString("trackSort")).apply()
             if (obj.has("trackOrder")) prefs.edit().putString(KEY_TRACK_ORDER, obj.optString("trackOrder")).apply()
-            if (obj.has("history")) {
+            if (options.playHistory && obj.has("history")) {
                 _historyIds.value = obj.optString("history").split('\n').filter { it.isNotBlank() }
                 prefs.edit().putString(KEY_HISTORY, _historyIds.value.joinToString("\n")).apply()
             }
-            if (obj.has("playCounts")) {
+            if (options.trackBlacklist && obj.has("trackBlacklist")) {
+                val rawBl = obj.optString("trackBlacklist")
+                val set = rawBl.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+                _trackBlacklist.value = set
+                prefs.edit().putString(KEY_TRACK_BLACKLIST, set.joinToString("\n")).apply()
+            }
+            if (options.playCounts && obj.has("playCounts")) {
                 val c = obj.getJSONObject("playCounts")
                 val map = mutableMapOf<String, Int>()
                 c.keys().forEach { k -> map[k] = c.optInt(k) }
                 _playCounts.value = map
                 prefs.edit().putString(KEY_PLAY_COUNTS, map.entries.joinToString("\n") { "${it.key}=${it.value}" }).apply()
             }
-            if (obj.has("lastPlayedAt")) {
+            if (options.playHistory && obj.has("lastPlayedAt")) {
                 val c = obj.getJSONObject("lastPlayedAt")
                 val map = mutableMapOf<String, Long>()
                 c.keys().forEach { k -> map[k] = c.optLong(k) }
                 _lastPlayedAt.value = map
                 prefs.edit().putString(KEY_LAST_PLAYED, map.entries.joinToString("\n") { "${it.key}=${it.value}" }).apply()
             }
-            if (obj.has("playEvents")) {
+            if (options.playHistory && obj.has("playEvents")) {
                 val events = obj.optString("playEvents").lineSequence().mapNotNull { line ->
                     val parts = line.split('\t', limit = 2)
                     if (parts.size == 2) {
@@ -2779,9 +3450,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_THEME = "app_theme"
         const val KEY_DYNAMIC_DEFAULT_COLOR = "dynamic_default_color"
         const val KEY_HISTORY = "play_history"
+        const val KEY_TRACK_BLACKLIST = "track_blacklist"
         const val KEY_PLAY_COUNTS = "play_counts"
+        const val KEY_FIRST_PLAYED = "first_played_at"
         const val KEY_LAST_PLAYED = "last_played_at"
         const val KEY_PLAY_COUNT_THRESHOLD = "play_count_threshold"
+        const val KEY_LASTFM_USER = "lastfm_username"
+        const val KEY_LIBRARY_ROOT = "library_root_path"
         const val HISTORY_MAX = 50
         const val KEY_LYRICS_FONT = "lyrics_font_path"
         const val KEY_UI_FONT = "ui_font_path"
@@ -2818,8 +3493,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val KEY_HOME_BUTTON_COLOR = "home_button_color"
         const val KEY_SHARE_FONT = "share_font_path"
         const val KEY_SHARE_TEXT_COLOR = "share_text_color"
+        const val KEY_SHARE_BG_COLOR = "share_bg_color"
         const val KEY_SHARE_BRAND_COLOR = "share_brand_color"
         const val KEY_FADE_MS = "fade_ms"
+        const val KEY_CROSSFADE_MS = "crossfade_ms"
         const val KEY_SEEK_BAR_STYLE = "seek_bar_style"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"

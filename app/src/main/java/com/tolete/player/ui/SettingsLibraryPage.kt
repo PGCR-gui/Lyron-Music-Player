@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FontDownload
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -57,7 +58,13 @@ internal fun LibraryPage(
     onRequestAllFilesPermission: () -> Unit,
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
-    onMinDurationSecChange: (Int) -> Unit = {}
+    onMinDurationSecChange: (Int) -> Unit = {},
+    lastFmUsername: String? = null,
+    onLastFmUsernameChange: (String?) -> Unit = {},
+    lastFmSyncMessage: String? = null,
+    onSyncLastFm: () -> Unit = {},
+    onClearPlaybackHistory: () -> Unit = {},
+    onClearFavorites: () -> Unit = {}
 ) {
     Column(
         Modifier
@@ -93,7 +100,7 @@ internal fun LibraryPage(
                 )
             } else {
                 Text(
-                    "Recomendado: ative para o app funcionar sem pastas SAF",
+                    "Devido a funções avançadas do app, ele precisa dessa permissão para funcionar",
                     fontSize = 12.sp,
                     color = Color(0xFFFFB74D),
                     modifier = Modifier.padding(top = 6.dp)
@@ -104,12 +111,8 @@ internal fun LibraryPage(
         EntryRow(
             SettingsEntry(
                 Icons.Rounded.Folder,
-                "Pastas extras (opcional)",
-                when (folders.size) {
-                    0 -> if (allFilesMode) "Usando todos os arquivos" else "Nenhuma pasta · ative o acesso total"
-                    1 -> "1 pasta · $totalTracks músicas"
-                    else -> "${folders.size} pastas · $totalTracks músicas"
-                },
+                "Organizar biblioteca",
+                "Pasta principal, renomear e mover por tags",
                 onOpenFolders
             )
         )
@@ -193,8 +196,30 @@ internal fun LibraryPage(
             ) {
                 Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Adicionar pasta (SAF)")
+                Text("Adicionar pasta (gerenciador interno)")
             }
+        Spacer(Modifier.height(20.dp))
+        Text("Histórico e plays", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        Text(
+            "O histórico e as Mais tocadas usam o arquivo playback history.csv em Lyron/.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        OutlinedButton(
+            onClick = onClearPlaybackHistory,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Limpar histórico de plays")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onClearFavorites,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Limpar favoritas")
+        }
+
 
             Spacer(Modifier.height(16.dp))
             val minSec = settings.minDurationSec
@@ -205,7 +230,7 @@ internal fun LibraryPage(
                 fontWeight = FontWeight.Medium
             )
             Text(
-                "Arraste para 2–50 segundos. Em 0 (extrema esquerda) o filtro fica desligado.",
+                "Arraste entre 0-50 segundos. Em 0 (extrema esquerda) o filtro fica desligado.",
                 fontSize = 12.sp,
                 color = Color.White.copy(0.5f),
                 modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
@@ -227,6 +252,79 @@ internal fun LibraryPage(
                 Text("50 s", fontSize = 11.sp, color = Color.White.copy(0.45f))
             }
         }
+
+        // Last.fm (somente leitura: histórico e loved — sem scrobbling)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+            Text(
+                "Last.fm",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Text(
+                "Usuário (público)",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                "Importa histórico recente e faixas amadas para a biblioteca local. Sem scrobbling por enquanto.",
+                fontSize = 13.sp,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
+            )
+            var userText by remember(lastFmUsername) { mutableStateOf(lastFmUsername.orEmpty()) }
+            OutlinedTextField(
+                value = userText,
+                onValueChange = {
+                    userText = it
+                    onLastFmUsernameChange(it.trim().ifBlank { null })
+                },
+                label = { Text("Username Last.fm") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White.copy(0.9f),
+                    focusedBorderColor = Color(0xFFBB86FC),
+                    unfocusedBorderColor = Color.White.copy(0.35f),
+                    cursorColor = Color(0xFFBB86FC),
+                    focusedLabelColor = Color(0xFFBB86FC),
+                    unfocusedLabelColor = Color.White.copy(0.55f),
+                    focusedContainerColor = Color.White.copy(0.06f),
+                    unfocusedContainerColor = Color.White.copy(0.04f)
+                )
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(top = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onSyncLastFm,
+                    enabled = !userText.isBlank(),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Sincronizar")
+                }
+                if (!lastFmUsername.isNullOrBlank()) {
+                    TextButton(onClick = {
+                        userText = ""
+                        onLastFmUsernameChange(null)
+                    }) {
+                        Text("Sair", color = Color(0xFFE57373))
+                    }
+                }
+            }
+            if (!lastFmSyncMessage.isNullOrBlank()) {
+                Text(
+                    lastFmSyncMessage!!,
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.65f),
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        }
+
         Spacer(Modifier.height(24.dp))
     }
 }
@@ -245,7 +343,7 @@ internal fun ArtistExceptionsField(
             fontWeight = FontWeight.Medium
         )
         Text(
-            "Nomes que não serão separados (um por linha, ou separados por vírgula). Ex.: AC/DC, Crosby, Stills & Nash",
+            "Nomes que não serão separados (um por linha). Ex.: AC/DC",
             fontSize = 12.sp,
             color = Color.White.copy(0.5f),
             modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -256,7 +354,7 @@ internal fun ArtistExceptionsField(
                 text = it
                 onValueChange(it)
             },
-            placeholder = { Text("AC/DC\nCrosby, Stills & Nash", color = Color.White.copy(0.35f)) },
+            placeholder = { Text("AC/DC\nJoão Mineiro & Marciano", color = Color.White.copy(0.35f)) },
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 5,
@@ -301,7 +399,7 @@ internal fun SeparatorOption(
                     onSeparatorsChange(it)
                 },
                 label = { Text("Separadores (separados por espaço)") },
-                placeholder = { Text("; / feat.", color = Color.White.copy(0.35f)) },
+                placeholder = { Text("; / feat. & ft.", color = Color.White.copy(0.35f)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -383,5 +481,104 @@ internal fun FoldersPage(
             Spacer(Modifier.width(8.dp))
             Text("Atualizar biblioteca")
         }
+    }
+}
+
+
+@Composable
+internal fun OrganizeLibraryPage(
+    libraryRootPath: String?,
+    onPickLibraryRoot: () -> Unit,
+    onBulkRenameByTags: () -> Unit,
+    onMoveToLibraryRoot: () -> Unit,
+    organizeStatus: String? = null
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+    ) {
+        Text(
+            "Pasta principal",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Usada como destino ao mover músicas na função mover para pasta principal.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        Text(
+            libraryRootPath?.ifBlank { null } ?: "Nenhuma pasta definida",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (libraryRootPath.isNullOrBlank()) Color.White.copy(0.45f) else Color.White
+        )
+        OutlinedButton(
+            onClick = onPickLibraryRoot,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 20.dp)
+        ) {
+            Icon(Icons.Rounded.Folder, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(if (libraryRootPath.isNullOrBlank()) "Escolher pasta principal" else "Alterar pasta principal")
+        }
+
+        Text(
+            "Renomear em massa por tags",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Escolha uma pasta: todas as músicas nela e nas subpastas serão renomeadas pelo padrão de tags.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        OutlinedButton(
+            onClick = onBulkRenameByTags,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp)
+        ) {
+            Icon(Icons.Rounded.Edit, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Escolher pasta e renomear")
+        }
+
+        Text(
+            "Mover para pasta principal",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Escolha uma pasta de origem. As músicas dessa pasta (e das subpastas) vão para PastaPrincipal/Artista do Álbum/Álbum/. Se a tag de artista do álbum estiver vazia, usa o artista.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        OutlinedButton(
+            onClick = onMoveToLibraryRoot,
+            enabled = !libraryRootPath.isNullOrBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Rounded.Folder, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Escolher pasta e mover")
+        }
+        if (!organizeStatus.isNullOrBlank()) {
+            Text(
+                organizeStatus!!,
+                fontSize = 12.sp,
+                color = Color.White.copy(0.65f),
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }

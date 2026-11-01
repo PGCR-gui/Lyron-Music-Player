@@ -52,26 +52,13 @@ object TopStatsShareHelper {
                 bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
             }
             bmp.recycle()
-            val authority = appCtx.packageName + ".updates"
-            val uri = try {
-                FileProvider.getUriForFile(appCtx, authority, file)
-            } catch (e: Exception) {
-                android.util.Log.e(TAG, "FileProvider falhou ($authority): ${e.message}", e)
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Toast.makeText(appCtx, "Falha ao preparar compartilhamento", Toast.LENGTH_SHORT).show()
-                }
-                return@Thread
-            }
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "image/png"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                appCtx.startActivity(
-                    Intent.createChooser(intent, "Compartilhar ranking")
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ShareImageActions.offerSaveOrShare(
+                    context = context,
+                    cacheFile = file,
+                    subdir = "Retrospectives",
+                    shareTitle = "Compartilhar ranking",
+                    shareText = ""
                 )
             }
         } catch (e: Exception) {
@@ -99,6 +86,27 @@ object TopStatsShareHelper {
         MostPlayedKind.ALBUMS -> "Álbuns"
     }
 
+    private fun loadTypeface(context: Context): Typeface {
+        val prefs = context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+        val path = prefs.getString("share_font_path", null)
+        if (!path.isNullOrBlank() && path != "system") {
+            try {
+                if (path.startsWith("builtin:")) {
+                    val id = path.removePrefix("builtin:")
+                    val emb = BuiltInFonts.EMBEDDED.firstOrNull { it.id == id }
+                    if (emb != null) {
+                        val tf = ResourcesCompat.getFont(context, emb.resId)
+                        if (tf != null) return tf
+                    }
+                } else {
+                    val f = File(path)
+                    if (f.exists()) return Typeface.createFromFile(f)
+                }
+            } catch (_: Exception) {}
+        }
+        return Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+    }
+
     private fun render(
         context: Context,
         items: List<RankedItem>,
@@ -112,32 +120,38 @@ object TopStatsShareHelper {
         val pad = 48
         val artSize = 84
         val h = headerH + items.size * rowH + footerH
+        val prefs = context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+        val bgColor = prefs.getInt("share_bg_color", 0xFF121212.toInt())
+        val textColor = prefs.getInt("share_text_color", 0xFFF5F5FA.toInt())
+        val baseTf = loadTypeface(context)
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
-        c.drawColor(0xFF121212.toInt())
+        c.drawColor(bgColor)
 
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFFFFFFF.toInt()
+            color = textColor
             textSize = 56f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            this.typeface = Typeface.create(baseTf, Typeface.BOLD)
         }
         val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFB0B0B0.toInt()
+            color = (textColor and 0x00FFFFFF) or 0xB0000000.toInt()
             textSize = 34f
+            this.typeface = baseTf
         }
         val rowTitle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFFFFFFF.toInt()
+            color = textColor
             textSize = 40f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            this.typeface = Typeface.create(baseTf, Typeface.BOLD)
         }
         val rowSub = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFAAAAAA.toInt()
+            color = (textColor and 0x00FFFFFF) or 0xAA000000.toInt()
             textSize = 30f
+            this.typeface = baseTf
         }
         val rankPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF69F0AE.toInt()
             textSize = 36f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            this.typeface = Typeface.create(baseTf, Typeface.BOLD)
         }
         val countPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF69F0AE.toInt()

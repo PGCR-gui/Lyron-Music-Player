@@ -326,8 +326,10 @@ fun NowPlayingScreen(
     onAddToPlaylist: () -> Unit,
     onEditTags: () -> Unit = {},
     onEditLyrics: () -> Unit = {},
+    onAddToBlacklist: () -> Unit = {},
     artistNames: List<String>,
     onOpenArtist: (String) -> Unit,
+    onOpenContainingFolder: () -> Unit = {},
     onOpenAlbum: () -> Unit,
     loadLyrics: suspend () -> List<LyricLine>,
     searchLyrics: suspend (String, String) -> List<LyricsSearchResult> = { _, _ -> emptyList() },
@@ -346,6 +348,7 @@ fun NowPlayingScreen(
     lyricsBorderWidth: Float = 0f,
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
     playCount: Int = 0,
+    firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L,
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     immersiveNowPlaying: Boolean = true,
@@ -500,6 +503,15 @@ fun NowPlayingScreen(
         BuiltInFonts.resolveFamily(lyricsFontPath)
     }
 
+    val layout = rememberLayoutScale()
+    val hPad = if (layout.compact) 14.dp else layout.dp(24)
+    val titleSp = if (layout.compact) 20.sp else layout.sp(24)
+    val artistSp = if (layout.compact) 14.sp else layout.sp(16)
+    val playBtn = if (layout.compact) 56.dp else layout.dp(64)
+    val sideBtn = if (layout.compact) 44.dp else layout.dp(52)
+    val iconSm = if (layout.compact) 36.dp else layout.dp(40)
+    val topBarH = if (layout.compact) 48.dp else 56.dp
+
     Box(
         Modifier
             .fillMaxSize()
@@ -523,11 +535,11 @@ fun NowPlayingScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = hPad)
         ) {
             // Top bar
             Row(
-                Modifier.fillMaxWidth().height(56.dp),
+                Modifier.fillMaxWidth().height(topBarH),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onClose, modifier = Modifier.offset(x = (-12).dp)) {
@@ -579,20 +591,20 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
+                                Text("Colocar na blacklist", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                onAddToBlacklist()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
                                 Text("Buscar letra", color = MenuDarkText)
                             },
                             onClick = {
                                 showMenu = false
                                 showLyricsSearch = true
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Text("Editar / sincronizar letra", color = MenuDarkText)
-                            },
-                            onClick = {
-                                showMenu = false
-                                onEditLyrics()
                             }
                         )
                         DropdownMenuItem(
@@ -735,9 +747,11 @@ fun NowPlayingScreen(
             // Capa + letra. A letra ocupa todo o espaço entre a capa e o título
             // e fica centralizada nele (sobra espaço para 2 linhas quando a frase é longa).
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                val topPadding = 8.dp
-                val lyricsMinHeight = 72.dp
-                val side = maxOf(minOf(maxWidth, maxHeight - lyricsMinHeight - topPadding), 120.dp)
+                val topPadding = if (layout.compact) 4.dp else 8.dp
+                val lyricsMinHeight = if (layout.compact) 48.dp else 72.dp
+                // Em telas baixas limita a capa para sobrar espaço a título/controles
+                val maxArt = if (layout.compact) maxHeight * 0.42f else maxHeight - lyricsMinHeight - topPadding
+                val side = maxOf(minOf(maxWidth, maxArt), if (layout.compact) 96.dp else 120.dp)
 
                 Column(
                     Modifier.fillMaxSize(),
@@ -1019,8 +1033,9 @@ fun NowPlayingScreen(
                 track.title,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp),
-                fontSize = 24.sp,
+                    .padding(top = if (layout.compact) 2.dp else 4.dp)
+                    .clickable { onOpenContainingFolder() },
+                fontSize = titleSp,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,
                 maxLines = 2,
@@ -1084,7 +1099,7 @@ fun NowPlayingScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 12.dp)
+                    .padding(bottom = if (layout.compact) 6.dp else 12.dp)
                     .clickable(onClick = onOpenAlbum),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
@@ -1146,7 +1161,7 @@ fun NowPlayingScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(iconSm)) {
                     Icon(
                         painter = painterResource(if (shuffle) R.drawable.ic_random_on else R.drawable.ic_random_off),
                         contentDescription = if (shuffle) "Aleatório ligado" else "Aleatório desligado",
@@ -1154,7 +1169,7 @@ fun NowPlayingScreen(
                         modifier = Modifier.size(24.dp)
                     )
                 }
-                IconButton(onClick = onCycleRepeat, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = onCycleRepeat, modifier = Modifier.size(iconSm)) {
                     val repeatIcon = when (repeatMode) {
                         Player.REPEAT_MODE_ONE -> R.drawable.ic_repeat_once
                         Player.REPEAT_MODE_ALL -> R.drawable.ic_repeat_all
@@ -1171,17 +1186,17 @@ fun NowPlayingScreen(
                         modifier = Modifier.size(24.dp)
                     )
                 }
-                IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(52.dp)) {
+                IconButton(onClick = { artNavForward = false; onPrevious() }, modifier = Modifier.size(sideBtn)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_previous),
                         contentDescription = "Anterior",
                         tint = Color.White,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(sideBtn * 0.65f)
                     )
                 }
                 Box(
                     Modifier
-                        .size(64.dp)
+                        .size(playBtn)
                         .clip(CircleShape)
                         .background(Color.White)
                         .clickable(onClick = onToggle),
@@ -1191,18 +1206,18 @@ fun NowPlayingScreen(
                         painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
                         contentDescription = if (isPlaying) "Pausar" else "Tocar",
                         tint = Color.Unspecified,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(playBtn * 0.56f)
                     )
                 }
-                IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(52.dp)) {
+                IconButton(onClick = { artNavForward = true; onNext() }, modifier = Modifier.size(sideBtn)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_next),
                         contentDescription = "Próxima",
                         tint = Color.White,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(sideBtn * 0.65f)
                     )
                 }
-                IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = { showEqualizer = true }, modifier = Modifier.size(iconSm)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_equalizer),
                         contentDescription = "Equalizador",
@@ -1210,7 +1225,7 @@ fun NowPlayingScreen(
                         tint = Color.White.copy(alpha = 0.9f)
                     )
                 }
-                IconButton(onClick = { showQueue = true }, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = { showQueue = true }, modifier = Modifier.size(iconSm)) {
                     Icon(
                         painter = painterResource(R.drawable.ic_queue),
                         contentDescription = "Fila",
@@ -1296,6 +1311,7 @@ fun NowPlayingScreen(
                 onDismiss = { showTechDetails = false },
                 menuBgColor = menuBgColor,
                 playCount = playCount,
+                firstPlayedAt = firstPlayedAt,
                 lastPlayedAt = lastPlayedAt
             )
         }
@@ -1418,6 +1434,7 @@ internal fun TechDetailsDialog(
     onDismiss: () -> Unit,
     menuBgColor: Int = 0xE8F2F2F7.toInt(),
     playCount: Int = 0,
+    firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L
 ) {
     AlertDialog(
@@ -1447,6 +1464,13 @@ internal fun TechDetailsDialog(
                 TechRow("Nº da faixa", track.trackNumber?.toString() ?: "—")
                 TechRow("Nº do disco", track.discNumber?.toString() ?: "—")
                 TechRow("Compositores", track.composer.ifBlank { "—" })
+                TechRow(
+                    "Primeira vez tocada",
+                    if (firstPlayedAt != null && firstPlayedAt > 0L) {
+                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
+                            .format(java.util.Date(firstPlayedAt))
+                    } else "—"
+                )
                 TechRow(
                     "Última reprodução",
                     if (lastPlayedAt > 0L) {

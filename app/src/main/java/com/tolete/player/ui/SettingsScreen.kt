@@ -82,7 +82,7 @@ import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
 
-enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, APPEARANCE, LYRICS_VIEWER, ABOUT, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER }
+enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER }
 
 internal data class SettingsEntry(
     val icon: ImageVector,
@@ -125,6 +125,17 @@ fun SettingsScreen(
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
+    lastFmUsername: String? = null,
+    onLastFmUsernameChange: (String?) -> Unit = {},
+    lastFmSyncMessage: String? = null,
+    onSyncLastFm: () -> Unit = {},
+    onClearPlaybackHistory: () -> Unit = {},
+    onClearFavorites: () -> Unit = {},
+    libraryRootPath: String? = null,
+    onPickLibraryRoot: () -> Unit = {},
+    onBulkRenameByTags: () -> Unit = {},
+    onMoveToLibraryRoot: () -> Unit = {},
+    organizeStatus: String? = null,
     allFilesMode: Boolean = false,
     onAllFilesModeChange: (Boolean) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
@@ -142,8 +153,8 @@ fun SettingsScreen(
     onLyricsBorderColorChange: (Int) -> Unit = {},
     lyricsBorderWidth: Float = 0f,
     onLyricsBorderWidthChange: (Float) -> Unit = {},
-    onExportBackup: () -> Unit = {},
-    onImportBackup: () -> Unit = {},
+    onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
+    onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     splashEnabled: Boolean = true,
     onSplashEnabledChange: (Boolean) -> Unit = {},
     splashSoundEnabled: Boolean = true,
@@ -160,10 +171,14 @@ fun SettingsScreen(
     onShareFontSelect: (String?) -> Unit = {},
     shareTextColor: Int = 0xFFF5F5FA.toInt(),
     onShareTextColorChange: (Int) -> Unit = {},
+    shareBgColor: Int = 0xFF121212.toInt(),
+    onShareBgColorChange: (Int) -> Unit = {},
     shareBrandColor: Int = 0xFFFFFFFF.toInt(),
     onShareBrandColorChange: (Int) -> Unit = {},
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
+    crossfadeMs: Int = 0,
+    onCrossfadeMsChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
@@ -185,9 +200,11 @@ fun SettingsScreen(
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
         SettingsPage.FOLDERS -> "Pastas de música"
+        SettingsPage.ORGANIZE -> "Organizar biblioteca"
         SettingsPage.APPEARANCE -> "Aparência"
         SettingsPage.LYRICS_VIEWER -> "Visualizador de legendas"
         SettingsPage.ABOUT -> "Sobre"
+        SettingsPage.FONT_CREDITS -> "Créditos das fontes"
         SettingsPage.CHANGELOG -> "Logs de atualização"
         SettingsPage.LICENSES -> "Licenças dos serviços"
         SettingsPage.PLAYER -> "Player"
@@ -245,7 +262,7 @@ fun SettingsScreen(
                 totalTracks = totalTracks,
                 settings = librarySettings,
                 allFilesMode = allFilesMode,
-                onOpenFolders = { onNavigate(SettingsPage.FOLDERS) },
+                onOpenFolders = { onNavigate(SettingsPage.ORGANIZE) },
                 onSplitArtistsChange = onSplitArtistsChange,
                 onArtistSeparatorsChange = onArtistSeparatorsChange,
                 onArtistExceptionsChange = onArtistExceptionsChange,
@@ -255,7 +272,13 @@ fun SettingsScreen(
                 onPickIgnoredFolder = onPickIgnoredFolder,
                 onMinDurationSecChange = onMinDurationSecChange,
                 onAllFilesModeChange = onAllFilesModeChange,
-                onRequestAllFilesPermission = onRequestAllFilesPermission
+                onRequestAllFilesPermission = onRequestAllFilesPermission,
+                lastFmUsername = lastFmUsername,
+                onLastFmUsernameChange = onLastFmUsernameChange,
+                lastFmSyncMessage = lastFmSyncMessage,
+                onSyncLastFm = onSyncLastFm,
+                onClearPlaybackHistory = onClearPlaybackHistory,
+                onClearFavorites = onClearFavorites
             )
             SettingsPage.PLAYER -> PlayerPage(
                 autoFetchLyrics = autoFetchLyrics,
@@ -264,12 +287,21 @@ fun SettingsScreen(
                 onShuffleTypeChange = onShuffleTypeChange,
                 fadeMs = fadeMs,
                 onFadeMsChange = onFadeMsChange,
+                crossfadeMs = crossfadeMs,
+                onCrossfadeMsChange = onCrossfadeMsChange,
                 playCountThreshold = playCountThreshold,
                 onPlayCountThresholdChange = onPlayCountThresholdChange,
                 seekBarStyle = seekBarStyle,
                 onSeekBarStyleChange = onSeekBarStyleChange,
                 immersiveNowPlaying = immersiveNowPlaying,
                 onImmersiveNowPlayingChange = onImmersiveNowPlayingChange
+            )
+            SettingsPage.ORGANIZE -> OrganizeLibraryPage(
+                libraryRootPath = libraryRootPath,
+                onPickLibraryRoot = onPickLibraryRoot,
+                onBulkRenameByTags = onBulkRenameByTags,
+                onMoveToLibraryRoot = onMoveToLibraryRoot,
+                organizeStatus = organizeStatus
             )
             SettingsPage.FOLDERS -> FoldersPage(
                 folders, totalTracks, isScanning, scanCount, onAddFolder, onRemoveFolder, onRefresh
@@ -302,6 +334,8 @@ fun SettingsScreen(
                 onPickShareFont = onPickUiFont,
                 shareTextColor = shareTextColor,
                 onShareTextColorChange = onShareTextColorChange,
+                shareBgColor = shareBgColor,
+                onShareBgColorChange = onShareBgColorChange,
                 shareBrandColor = shareBrandColor,
                 onShareBrandColorChange = onShareBrandColorChange
             )
@@ -340,8 +374,10 @@ fun SettingsScreen(
             )
             SettingsPage.ABOUT -> AboutPage(
                 onOpenChangelog = { onNavigate(SettingsPage.CHANGELOG) },
-                onOpenLicenses = { onNavigate(SettingsPage.LICENSES) }
+                onOpenLicenses = { onNavigate(SettingsPage.LICENSES) },
+                onOpenFontCredits = { onNavigate(SettingsPage.FONT_CREDITS) }
             )
+            SettingsPage.FONT_CREDITS -> FontCreditsPage()
             SettingsPage.CHANGELOG -> ChangelogPage()
             SettingsPage.LICENSES -> LicensesPage()
             else -> {

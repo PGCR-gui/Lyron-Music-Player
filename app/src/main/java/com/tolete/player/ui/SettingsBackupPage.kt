@@ -1,75 +1,86 @@
 package com.tolete.player.ui
 
-import android.content.Intent
-import android.net.Uri
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.FontDownload
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.LibraryMusic
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.*
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tolete.player.data.LibrarySettings
-import com.tolete.player.data.SourceFolder
-import com.tolete.player.ui.MusicViewModel.AppThemeId
-import com.tolete.player.ui.MusicViewModel.ShuffleType
-import java.io.File
+import com.tolete.player.ui.MusicViewModel.BackupOptions
 
 @Composable
 internal fun BackupPage(
-    onExport: () -> Unit,
-    onImport: () -> Unit
+    onExport: (BackupOptions) -> Unit,
+    onImport: (BackupOptions) -> Unit
 ) {
+    var preferences by remember { mutableStateOf(true) }
+    var playlistsFavorites by remember { mutableStateOf(true) }
+    var playHistory by remember { mutableStateOf(true) }
+    var playCounts by remember { mutableStateOf(true) }
+    var librarySettings by remember { mutableStateOf(true) }
+    var appearance by remember { mutableStateOf(true) }
+    var artistPhotos by remember { mutableStateOf(true) }
+    var trackBlacklist by remember { mutableStateOf(true) }
+
+    fun current() = BackupOptions(
+        preferences = preferences,
+        playlistsFavorites = playlistsFavorites,
+        playHistory = playHistory,
+        playCounts = playCounts,
+        librarySettings = librarySettings,
+        appearance = appearance,
+        artistPhotos = artistPhotos,
+        trackBlacklist = trackBlacklist
+    )
+
     Column(
         Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
         Text(
-            "Exporta um ZIP com preferências, tema, pastas, favoritos, histórico, plays e fotos de artistas.",
+            "Escolha o que incluir na exportação ou aplicar na importação.",
             fontSize = 14.sp,
             color = Color.White.copy(0.6f),
-            modifier = Modifier.padding(bottom = 20.dp)
+            modifier = Modifier.padding(bottom = 12.dp)
         )
-        OutlinedButton(
-            onClick = onExport,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        Text("Dados", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color.White.copy(0.5f))
+        BackupCheck("Preferências gerais do player", preferences) { preferences = it }
+        BackupCheck("Playlists e favoritos", playlistsFavorites) { playlistsFavorites = it }
+        BackupCheck("Histórico de reprodução (CSV / ordem)", playHistory) { playHistory = it }
+        BackupCheck("Contagens / Mais tocadas", playCounts) { playCounts = it }
+        BackupCheck("Configurações de biblioteca", librarySettings) { librarySettings = it }
+        BackupCheck("Aparência (tema, fontes, cores)", appearance) { appearance = it }
+        BackupCheck("Fotos de artistas", artistPhotos) { artistPhotos = it }
+        BackupCheck("Blacklist de faixas", trackBlacklist) { trackBlacklist = it }
+
+        Spacer(Modifier.height(20.dp))
+        OutlinedButton(onClick = { onExport(current()) }, modifier = Modifier.fillMaxWidth()) {
             Text("Exportar backup (ZIP)")
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = onImport,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        OutlinedButton(onClick = { onImport(current()) }, modifier = Modifier.fillMaxWidth()) {
             Text("Importar backup (ZIP ou JSON)")
         }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
+@Composable
+private fun BackupCheck(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onChange)
+        Text(label, fontSize = 15.sp, modifier = Modifier.padding(start = 4.dp))
+    }
+}

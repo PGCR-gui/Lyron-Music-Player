@@ -34,77 +34,76 @@ object FavoritesBridge {
     }
 }
 
-/** Acesso direto ao playlists.json (mesmo formato do ViewModel) para quando o app está fechado. */
+/** Acesso direto a favorites.json + playlists.json em /Lyron. */
 object FavoritesFile {
 
     internal val lock = Any()
 
-    private fun file(context: Context) = File(context.filesDir, "playlists.json")
+    private fun playlistsFile(context: Context) =
+        File(LyronStorage.playlistsDir, "playlists.json")
+
+    private fun favoritesFile(context: Context) = LyronStorage.favoritesFile
 
     private fun isFavoritesPlaylist(o: JSONObject) =
         o.optBoolean("isFavorites") || o.optString("id") == Playlist.FAVORITES_ID
 
-    private fun load(context: Context): JSONArray {
-        val f = file(context)
+    private fun loadPlaylistArray(context: Context): JSONArray {
+        val f = playlistsFile(context)
         if (!f.exists()) return JSONArray()
-        return JSONObject(f.readText()).getJSONArray("playlists")
+        return try {
+            JSONObject(f.readText()).getJSONArray("playlists")
+        } catch (_: Exception) {
+            JSONArray()
+        }
     }
 
-    fun isFavorite(context: Context, trackId: String): Boolean = synchronized(lock) {
+    private fun loadFavoriteIds(context: Context): MutableList<String> {
+        val f = favoritesFile(context)
+        if (f.exists()) {
+            try {
+                val o = JSONObject(f.readText())
+                val arr = o.optJSONArray("trackIds") ?: return mutableListOf()
+                return (0 until arr.length()).map { arr.getString(it) }.toMutableList()
+            } catch (_: Exception) {}
+        }
+        // fallback playlists.json
         try {
-            val arr = load(context)
+            val arr = loadPlaylistArray(context)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 if (!isFavoritesPlaylist(o)) continue
                 val ids = o.getJSONArray("trackIds")
-                for (j in 0 until ids.length()) if (ids.getString(j) == trackId) return@synchronized true
+                return (0 until ids.length()).map { ids.getString(it) }.toMutableList()
             }
-            false
-        } catch (_: Exception) {
-            false
+        } catch (_: Exception) {}
+        return mutableListOf()
+    }
+
+    private fun writeFavorites(context: Context, ids: List<String>) {
+        val f = favoritesFile(context)
+        val tmp = File(f.parentFile, "favorites.json.tmp")
+        tmp.writeText(JSONObject().put("v", 1).put("trackIds", JSONArray(ids)).toString())
+        if (!tmp.renameTo(f)) {
+            f.writeText(JSONObject().put("v", 1).put("trackIds", JSONArray(ids)).toString())
+            tmp.delete()
         }
+    }
+
+    fun isFavorite(context: Context, trackId: String): Boolean = synchronized(lock) {
+        trackId in loadFavoriteIds(context)
     }
 
     fun toggle(context: Context, trackId: String) = synchronized(lock) {
         try {
-            val arr = load(context)
-            val out = JSONArray()
-            var done = false
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                if (!done && isFavoritesPlaylist(o)) {
-                    val old = o.getJSONArray("trackIds")
-                    val ids = ArrayList<String>(old.length() + 1)
-                    for (j in 0 until old.length()) ids.add(old.getString(j))
-                    if (!ids.remove(trackId)) ids.add(0, trackId) // novo favorito vai para o topo, como no app
-                    o.put("trackIds", JSONArray(ids))
-                    done = true
-                }
-                out.put(o)
-            }
-            if (!done) {
-                // sem playlist de favoritos ainda: cria no topo
-                val fav = JSONObject()
-                    .put("id", Playlist.FAVORITES_ID)
-                    .put("name", "Favoritos")
-                    .put("isFavorites", true)
-                    .put("trackIds", JSONArray(listOf(trackId)))
-                val withFav = JSONArray().put(fav)
-                for (i in 0 until out.length()) withFav.put(out.getJSONObject(i))
-                write(context, withFav)
-            } else {
-                write(context, out)
-            }
+            val ids = loadFavoriteIds(context)
+            if (!ids.remove(trackId)) ids.add(0, trackId)
+            writeFavorites(context, ids)
         } catch (_: Exception) { }
     }
 
-    private fun write(context: Context, playlists: JSONArray) {
-        val f = file(context)
-        val tmp = File(f.parentFile, "playlists.json.tmp")
-        tmp.writeText(JSONObject().put("v", 1).put("playlists", playlists).toString())
-        if (!tmp.renameTo(f)) {
-            f.delete()
-            tmp.renameTo(f)
-        }
+    fun clearAll(context: Context) = synchronized(lock) {
+        try {
+            writeFavorites(context, emptyList())
+        } catch (_: Exception) {}
     }
 }

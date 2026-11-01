@@ -464,11 +464,13 @@ class MainActivity : ComponentActivity() {
                         onPickMilkFiles = { pickMilkFiles.launch(arrayOf("*/*")) },
                         onDeleteTracks = { tracks -> requestPermanentDelete(tracks) },
                         onRequestAllFilesPermission = { requestAllFilesAccess() },
-                        onExportBackup = {
-                            pendingBackupJson = viewModel.exportBackup()
+                        onExportBackup = { opts ->
+                            viewModel.pendingBackupOptions = opts
+                            pendingBackupJson = viewModel.exportBackup(opts)
                             exportBackup.launch("lyron_backup.zip")
                         },
-                        onImportBackup = {
+                        onImportBackup = { opts ->
+                            viewModel.pendingBackupOptions = opts
                             importBackup.launch(arrayOf("application/zip", "application/json", "*/*"))
                         }
                     )

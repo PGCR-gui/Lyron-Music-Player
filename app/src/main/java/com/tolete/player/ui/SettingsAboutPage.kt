@@ -43,7 +43,7 @@ import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
 
 @Composable
-internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> Unit = {}) {
+internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> Unit = {}, onOpenFontCredits: () -> Unit = {}) {
     val context = LocalContext.current
     Column(
         Modifier
@@ -117,7 +117,7 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
         }
         CreditLine(label = "Desenhista do ícone do app", value = "Taci")
         CreditLine(
-            label = "Ícones Flutuantes e da Tela Inicial",
+            label = "Ícones Flutuantes, ícones do Gerenciador de Arquivos e da Tela Inicial",
             value = "Good Ware",
             isLink = true,
             onLinkClick = {
@@ -136,7 +136,26 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
         )
 
         Spacer(Modifier.height(16.dp))
+        
+        Spacer(Modifier.height(12.dp))
         Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable { onOpenFontCredits() }
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.FontDownload, contentDescription = null, tint = Color.White)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Créditos das fontes", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text("Informações legais", fontSize = 13.sp, color = Color.White.copy(0.55f))
+            }
+            Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color.White.copy(0.5f))
+        }
+
+Row(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
@@ -203,7 +222,7 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
         Spacer(Modifier.height(16.dp))
         CreditLine(
-            label = "Outras versões do app",
+            label = "Versões antigas do app",
             value = "MediaFire",
             isLink = true,
             onLinkClick = {
@@ -216,7 +235,7 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
         Column(Modifier.padding(vertical = 8.dp)) {
             Text("Splash Screen", fontSize = 13.sp, color = Color.White.copy(0.55f))
             Text(
-                "Foto tirada por PGCR Gui e música extraída de Diamond Rush",
+                "Fotos tiradas por PGCR Gui e música extraída de Diamond Rush",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(top = 2.dp)
@@ -250,6 +269,30 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 
 internal val changelogEntries = listOf(
+    ChangelogEntry(
+        code = "227",
+        version = "0.67",
+        changes = listOf(
+            "Nova tela de ajuda",
+            "Backup revisado: agora você pode escolher o que exportar ou importar",
+            "Função de importar favoritos do Last.fm",
+            "Função de exportar foto das Mais Tocadas (personalizável em Aparência)",
+            "Função de adicionar música à blacklist (pelo Now Playing)",
+            "Retorno de fontes embutidas — agora 100% gratuitas (espero não arranjar problemas)",
+            "Mudança no contador de plays — primeira vez tocada nas informações da música",
+            "Fotos geradas agora podem ser salvas no dispositivo",
+            "Gerenciador de arquivos integrado",
+            "Organizar arquivos (renomear em massa e mover por tags)",
+            "Arquivos salvos em emulated/0/Lyron",
+            "Backup seletivo",
+            "Novas fotos de Splash Screen",
+            "Corrigido Fade in/out fora do app",
+            "CrossFade",
+            "DPI adaptável (ainda pode falhar em DPI muito baixa)",
+            "Correções no gerador de fotos de letras"
+        )
+    ),
+
         ChangelogEntry(
             "0.60",
             "220",
@@ -670,3 +713,112 @@ internal fun CreditLine(
 }
 
 
+
+
+@Composable
+internal fun FontCreditsPage() {
+    data class FontCredit(val name: String, val author: String, val license: String, val notes: String)
+    val fonts = listOf(
+        FontCredit(
+            "Shareit",
+            "Khurasan (Khurasan Studio)",
+            "Gratuita para uso pessoal e comercial (conforme pacote Creative Fabrica / autor)",
+            "Contato: khurasantype@gmail.com · khurasanstudio.com"
+        ),
+        FontCredit(
+            "JuliaMetal Regular",
+            "cormullion",
+            "Fonte gratuita (conforme readme do pacote)",
+            "Artista da comunidade Julia; materiais em cormullion/graphics no GitHub"
+        ),
+        FontCredit(
+            "Buba Outline",
+            "Genilson L. Santos",
+            "Fonte gratuita",
+            "Perfil referido: https://flic.kr/ps/2aCSKi"
+        ),
+        FontCredit(
+            "Grim Creeper",
+            "Chad Savage (Sinister Fonts)",
+            "Gratuita para uso pessoal e comercial",
+            "https://www.sinisterfonts.com · savage@sinistervisions.com"
+        ),
+        FontCredit(
+            "Pixelise",
+            "Galathée L'Escargot",
+            "Uso livre; não associar o nome do autor ao conteúdo do texto",
+            "Crédito opcional ao nome artístico Galathée L'Escargot"
+        ),
+        FontCredit(
+            "Ryga",
+            "GGBotNet",
+            "SIL Open Font License 1.1 (OFL)",
+            "Copyright © 2025 GGBotNet · https://ggbot.net · Nome reservado “Ryga”"
+        ),
+        FontCredit(
+            "Terminal 16 Unicode",
+            "artdzyk",
+            "Fonte gratuita (conforme readme do pacote)",
+            "Informações adicionais limitadas no pacote"
+        ),
+        FontCredit(
+            "Better VCR",
+            "Domínio público / comunidade",
+            "GPL / OFL (domínio público conforme readme)",
+            "Conforme readme incluso no pacote"
+        ),
+        FontCredit(
+            "Matcha Style",
+            "Khurasan (Khurasan Studio)",
+            "100% gratuita para uso pessoal e comercial",
+            "hi@khurasanstudio.com · www.khurasanstudio.com"
+        ),
+        FontCredit(
+            "Gak Tahu",
+            "Khurasan (Khurasan Studio)",
+            "100% gratuita para uso pessoal e comercial",
+            "khurasantype@gmail.com · www.khurasanstudio.com"
+        ),
+        FontCredit(
+            "Unifont Ex Mono",
+            "stgiga",
+            "Domínio público / GPL / OFL (conforme readme)",
+            "Informações adicionais limitadas no pacote"
+        ),
+    )
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+    ) {
+        Text(
+            "Fontes embutidas",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Disponíveis em Aparência → Fontes. Respeite a licença de cada autor.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        fonts.forEach { f ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(0.07f))
+                    .padding(14.dp)
+            ) {
+                Text(f.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Autor: ${f.author}", fontSize = 13.sp, color = Color.White.copy(0.8f), modifier = Modifier.padding(top = 6.dp))
+                Text("Licença: ${f.license}", fontSize = 13.sp, color = Color.White.copy(0.75f), modifier = Modifier.padding(top = 4.dp))
+                Text(f.notes, fontSize = 12.sp, color = Color.White.copy(0.5f), modifier = Modifier.padding(top = 4.dp))
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}

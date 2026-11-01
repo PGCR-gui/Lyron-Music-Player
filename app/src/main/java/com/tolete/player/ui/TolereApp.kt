@@ -100,6 +100,7 @@ import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
@@ -225,8 +226,8 @@ fun TolereApp(
     onPickMilkFiles: () -> Unit = {},
     onDeleteTracks: (List<Track>) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
-    onExportBackup: () -> Unit = {},
-    onImportBackup: () -> Unit = {}
+    onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
+    onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {}
 ) {
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val isScanning by vm.isScanning.collectAsStateWithLifecycle()
@@ -236,6 +237,7 @@ fun TolereApp(
     val nowPlaying by vm.nowPlaying.collectAsStateWithLifecycle()
     val isPlaying by vm.isPlaying.collectAsStateWithLifecycle()
     val artists by vm.artists.collectAsStateWithLifecycle()
+    val composers by vm.composers.collectAsStateWithLifecycle()
     val albums by vm.albums.collectAsStateWithLifecycle()
     val genres by vm.genres.collectAsStateWithLifecycle()
     val playlists by vm.playlists.collectAsStateWithLifecycle()
@@ -261,12 +263,24 @@ fun TolereApp(
     val uiFontPath by vm.uiFontPath.collectAsStateWithLifecycle()
     val librarySettings by vm.librarySettings.collectAsStateWithLifecycle()
     val allFilesMode by vm.allFilesMode.collectAsStateWithLifecycle()
+    // Indexa as fotos de artista uma vez (IO) e converte .url antigos em .jpg
+    LaunchedEffect(allFilesMode) {
+        withContext(Dispatchers.IO) {
+            ArtistMetaStore.rebuildPhotoIndex()
+            ArtistMetaStore.migrateLegacyUrlFiles()
+        }
+    }
     val autoFetchLyrics by vm.autoFetchLyrics.collectAsStateWithLifecycle()
     val shuffleType by vm.shuffleType.collectAsStateWithLifecycle()
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
+    val crossfadeMs by vm.crossfadeMs.collectAsStateWithLifecycle()
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
+    val lastFmUsername by vm.lastFmUsername.collectAsStateWithLifecycle()
+    val lastFmSyncMessage by vm.lastFmSyncMessage.collectAsStateWithLifecycle()
+    val libraryRootPath by vm.libraryRootPath.collectAsStateWithLifecycle()
+    val organizeStatus by vm.organizeStatus.collectAsStateWithLifecycle()
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
     val rootContext = LocalContext.current
     val milkIntervalSec by vm.milkIntervalSec.collectAsStateWithLifecycle()
@@ -286,6 +300,7 @@ fun TolereApp(
     val homeButtonColor by vm.homeButtonColor.collectAsStateWithLifecycle()
     val shareFontPath by vm.shareFontPath.collectAsStateWithLifecycle()
     val shareTextColor by vm.shareTextColor.collectAsStateWithLifecycle()
+    val shareBgColor by vm.shareBgColor.collectAsStateWithLifecycle()
     val shareBrandColor by vm.shareBrandColor.collectAsStateWithLifecycle()
     val groupSort by vm.groupSort.collectAsStateWithLifecycle()
     val groupOrder by vm.groupOrder.collectAsStateWithLifecycle()
@@ -294,14 +309,29 @@ fun TolereApp(
 
     val dynamicDefaultArgb by vm.dynamicDefaultColor.collectAsStateWithLifecycle()
     val appColors = rememberAppColors(themeId, nowPlaying?.artPath, isPlaying, dynamicDefaultArgb)
+    val layoutScale = rememberLayoutScale()
 
     val uiFontFamily = remember(uiFontPath) {
         BuiltInFonts.resolveFamily(uiFontPath)
     }
 
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+    var showFileManager by remember { mutableStateOf(false) }
+    var fileManagerMode by remember { mutableStateOf(FileManagerMode.BROWSE) }
+    var fileManagerInitialPath by remember { mutableStateOf<String?>(null) }
+    var fileManagerFolderCallback by remember { mutableStateOf<((String) -> Unit)?>(null) }
+    var artistsShowComposers by remember { mutableStateOf(false) }
+    var pendingOrganizeAction by remember { mutableStateOf<String?>(null) } // "rename" | "move"
+    var showOrganizeRenameDialog by remember { mutableStateOf(false) }
+    var organizeRenameFolder by remember { mutableStateOf<String?>(null) }
     var settingsPage by rememberSaveable { mutableStateOf(SettingsPage.NONE) }
     var showHelp by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val prefs = rootContext.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("help_onboarding_done", false)) {
+            showHelp = true
+        }
+    }
 
     // Multi-seleção / add-to-playlist state
     var selectedTrackIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -348,8 +378,9 @@ fun TolereApp(
     BackHandler(enabled = settingsPage != SettingsPage.NONE) {
         settingsPage = when (settingsPage) {
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
+                            SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
-            SettingsPage.LIBRARY, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
+            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
             SettingsPage.CHANGELOG -> SettingsPage.ABOUT
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
             else -> SettingsPage.NONE
@@ -358,6 +389,7 @@ fun TolereApp(
     BackHandler(enabled = tagEditTrack != null) { tagEditTrack = null }
     BackHandler(enabled = lyricsEditTrack != null) { lyricsEditTrack = null }
     BackHandler(enabled = showHelp) { showHelp = false }
+    BackHandler(enabled = showFileManager) { showFileManager = false }
     BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
 
     fun openAddToPlaylist(tracks: List<Track>) {
@@ -414,17 +446,19 @@ fun TolereApp(
                         .background(rememberFloatingGradient(appColors))
                         .nestedScroll(navScrollConnection)
                 ) {
-                    // Ícones flutuantes de fundo (Início, músicas, artistas, álbuns, gêneros)
-                    if (floatingIconsEnabled && filter == null) {
+                    // Ícones flutuantes de fundo (também em páginas de artista/álbum)
+                    if (floatingIconsEnabled) {
                         if (isSearching) {
                             FloatingIconsBackground(kind = "search")
                         } else {
-                            val floatTab = when (tab) {
-                                MusicViewModel.Tab.HOME -> "inicio"
-                                MusicViewModel.Tab.ALL -> "musicas"
-                                MusicViewModel.Tab.ARTISTS -> "artistas"
-                                MusicViewModel.Tab.ALBUMS -> "albuns"
-                                MusicViewModel.Tab.GENRES -> "generos"
+                            val floatTab = when {
+                                filter?.tab == MusicViewModel.Tab.ARTISTS -> "artistas"
+                                filter?.tab == MusicViewModel.Tab.ALBUMS -> "albuns"
+                                tab == MusicViewModel.Tab.HOME -> "inicio"
+                                tab == MusicViewModel.Tab.ALL -> "musicas"
+                                tab == MusicViewModel.Tab.ARTISTS -> "artistas"
+                                tab == MusicViewModel.Tab.ALBUMS -> "albuns"
+                                tab == MusicViewModel.Tab.GENRES -> "generos"
                                 else -> null
                             }
                             if (floatTab != null) {
@@ -444,14 +478,28 @@ fun TolereApp(
                                 title = when {
                                     filter != null && filter!!.tab == MusicViewModel.Tab.PLAYLISTS ->
                                         playlists.firstOrNull { it.id == filter!!.key }?.name ?: filter!!.key
-                                    filter != null -> filter!!.key
+                                    filter != null -> filter!!.key.removePrefix("composer::")
                                     else -> tabTitle(tab)
                                 },
                                 showBack = filter != null,
                                 onBack = vm::clearFilter,
                                 onOpenSearch = vm::openSearch,
                                 onOpenHelp = { showHelp = true },
-                                onOpenSettings = { settingsPage = SettingsPage.MENU }
+                                onOpenSettings = { settingsPage = SettingsPage.MENU },
+                                onPlayAllShuffled = if (filter == null && !isSearching) {
+                                    {
+                                        val list = tracks
+                                        if (list.isNotEmpty()) vm.playTracks(list.shuffled(), 0)
+                                    }
+                                } else null,
+                                onOpenFileManager = if (filter == null && !isSearching) {
+                                    {
+                                        fileManagerMode = FileManagerMode.BROWSE
+                                        fileManagerInitialPath = null
+                                        fileManagerFolderCallback = null
+                                        showFileManager = true
+                                    }
+                                } else null
                             )
                         }
 
@@ -601,21 +649,23 @@ fun TolereApp(
                                 }
 
                                 filter != null && filter!!.tab == MusicViewModel.Tab.ARTISTS -> {
-                                    val artistName = filter!!.key
+                                    val artistName = filter!!.key.removePrefix("composer::")
                                     val artistTracks = visible
-                                    val albumMap = artistTracks
-                                        .groupBy { it.album.ifBlank { "Álbum desconhecido" } }
-                                        .map { (name, ts) ->
-                                            val art = ts.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
-                                            val total = ts.sumOf { it.duration }
-                                            Triple(name, ts.size, art to total)
-                                        }
-                                        .sortedBy { it.first.lowercase() }
+                                    val albumMap = remember(artistTracks) {
+                                        artistTracks
+                                            .groupBy { it.album.ifBlank { "Álbum desconhecido" } }
+                                            .map { (name, ts) ->
+                                                val art = ts.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
+                                                val total = ts.sumOf { it.duration }
+                                                val year = ts.mapNotNull { it.year }.maxOrNull()
+                                                ArtistAlbumItem(name, ts.size, art, total, year)
+                                            }
+                                    }
                                     ArtistDetailScreen(
                                         artistName = artistName,
                                         trackCount = artistTracks.size,
                                         totalDurationMs = artistTracks.sumOf { it.duration },
-                                        albums = albumMap.map { (n, c, at) -> ArtistAlbumItem(n, c, at.first, at.second) },
+                                        albums = albumMap,
                                         tracks = artistTracks,
                                         bottomPadding = bottomPadding,
                                         nowPlayingId = nowPlaying?.id,
@@ -625,6 +675,17 @@ fun TolereApp(
                                         onOpenAlbum = { vm.openAlbum(it) },
                                         onPlayAll = { vm.playTracks(artistTracks, 0) },
                                         onShuffle = { vm.playTracks(artistTracks.shuffled(), 0) },
+                                        onPlayTracks = { list, index ->
+                                            if (selectionMode) {
+                                                val track = list.getOrNull(index)
+                                                if (track != null) {
+                                                    selectedTrackIds = if (track.id in selectedTrackIds)
+                                                        selectedTrackIds - track.id else selectedTrackIds + track.id
+                                                }
+                                            } else {
+                                                vm.playTracks(list, index)
+                                            }
+                                        },
                                         onTrackClick = { index, track ->
                                             if (selectionMode) {
                                                 selectedTrackIds = if (track.id in selectedTrackIds)
@@ -652,9 +713,11 @@ fun TolereApp(
                                     val albumName = filter!!.key
                                     val albumTracks = visible
                                     val art = albumTracks.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
-                                    val artists = albumTracks
-                                        .flatMap { vm.artistNamesOf(it) }
-                                        .distinct()
+                                    val artists = remember(albumTracks) {
+                                        albumTracks
+                                            .flatMap { vm.artistNamesOf(it) }
+                                            .distinct()
+                                    }
                                     AlbumDetailScreen(
                                         albumName = albumName,
                                         artPath = art,
@@ -836,11 +899,17 @@ fun TolereApp(
 
                                 else -> {
                                     val groups = when (tab) {
-                                        MusicViewModel.Tab.ARTISTS -> vm.sortedArtists(artists).map { artist ->
-                                            val metaKey = ArtistMetaStore.artistKey(artist.name)
-                                            val metaImg = ArtistMetaStore.load(rootContext, metaKey)?.displayImage
-                                            val art = metaImg ?: artist.artPath
-                                            GroupItem(artist.name, faixas(artist.trackCount), artist.name, art, round = true)
+                                        MusicViewModel.Tab.ARTISTS -> {
+                                            val src = if (artistsShowComposers) composers else artists
+                                            // Observa o índice de fotos (em memória) para recompor quando mudar
+                                            @Suppress("UNUSED_VARIABLE")
+                                            val photoVersion = ArtistMetaStore.photoVersion.collectAsStateWithLifecycle().value
+                                            vm.sortedArtists(src).map { artist ->
+                                                val metaImg = ArtistMetaStore.cachedPhotoPath(artist.name)
+                                                val art = metaImg ?: artist.artPath
+                                                val key = if (artistsShowComposers) "composer::${artist.name}" else artist.name
+                                                GroupItem(artist.name, faixas(artist.trackCount), key, art, round = true)
+                                            }
                                         }
                                         MusicViewModel.Tab.ALBUMS -> vm.sortedAlbums(albums).map {
                                             GroupItem(it.name, "${it.artist} · ${faixas(it.trackCount)}", it.name, it.artPath)
@@ -851,15 +920,43 @@ fun TolereApp(
                                         else -> emptyList()
                                     }
                                     Column(Modifier.fillMaxSize()) {
-                                        SortBar(
-                                            isGroup = true,
-                                            groupSort = groupSort,
-                                            groupOrder = groupOrder,
-                                            trackSort = trackSort,
-                                            trackOrder = trackOrder,
-                                            onGroupSort = { s, o -> vm.setGroupSort(s, o) },
-                                            onTrackSort = { s, o -> vm.setTrackSort(s, o) }
-                                        )
+                                        Row(
+                                            Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(Modifier.weight(1f)) {
+                                                SortBar(
+                                                    isGroup = true,
+                                                    groupSort = groupSort,
+                                                    groupOrder = groupOrder,
+                                                    trackSort = trackSort,
+                                                    trackOrder = trackOrder,
+                                                    onGroupSort = { s, o -> vm.setGroupSort(s, o) },
+                                                    onTrackSort = { s, o -> vm.setTrackSort(s, o) },
+                                                    compact = true
+                                                )
+                                            }
+                                            if (tab == MusicViewModel.Tab.ARTISTS) {
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    listOf(false to "Artistas", true to "Compositores").forEach { (comp, label) ->
+                                                        val sel = artistsShowComposers == comp
+                                                        Text(
+                                                            label,
+                                                            color = if (sel) Color.Black else Color.White.copy(0.85f),
+                                                            fontSize = 12.sp,
+                                                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                                                            modifier = Modifier
+                                                                .clip(RoundedCornerShape(20.dp))
+                                                                .background(if (sel) appColors.accent else Color.White.copy(0.12f))
+                                                                .clickable { artistsShowComposers = comp }
+                                                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                         GroupList(groups, bottomPadding, onClick = vm::openGroup)
                                     }
                                 }
@@ -923,14 +1020,23 @@ fun TolereApp(
                     onBack = {
                         settingsPage = when (settingsPage) {
                             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
+                            SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
                             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
-                            SettingsPage.CHANGELOG, SettingsPage.LICENSES -> SettingsPage.ABOUT
+                            SettingsPage.CHANGELOG, SettingsPage.LICENSES, SettingsPage.FONT_CREDITS -> SettingsPage.ABOUT
                             SettingsPage.LIBRARY, SettingsPage.APPEARANCE,
                             SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
                             else -> SettingsPage.NONE
                         }
                     },
-                    onAddFolder = onPickFolder,
+                    onAddFolder = {
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = null
+                        fileManagerFolderCallback = { path ->
+                            // Pastas de biblioteca: guarda path file://
+                            vm.addFolderPath(path)
+                        }
+                        showFileManager = true
+                    },
                     onRemoveFolder = vm::removeFolder,
                     onRefresh = vm::refreshLibrary,
                     onThemeSelected = vm::setThemeId,
@@ -948,7 +1054,20 @@ fun TolereApp(
                     onSplitGenresChange = vm::setSplitGenres,
                     onGenreSeparatorsChange = vm::setGenreSeparators,
                     onIgnoredFoldersChange = vm::setIgnoredFolders,
-                    onPickIgnoredFolder = onPickIgnoredFolder,
+                    onPickIgnoredFolder = {
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = null
+                        fileManagerFolderCallback = { path ->
+                            val label = path.removePrefix("/storage/emulated/0/").trim('/')
+                            val current = vm.librarySettings.value.ignoredFolders
+                            val lines = current.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+                            if (lines.none { it.equals(label, ignoreCase = true) }) {
+                                lines.add(label)
+                                vm.setIgnoredFolders(lines.joinToString("\n"))
+                            }
+                        }
+                        showFileManager = true
+                    },
                     onMinDurationSecChange = vm::setMinDurationSec,
                     allFilesMode = allFilesMode,
                     onAllFilesModeChange = vm::setAllFilesMode,
@@ -959,12 +1078,47 @@ fun TolereApp(
                     onShuffleTypeChange = vm::setShuffleType,
                     fadeMs = fadeMs,
                     onFadeMsChange = vm::setFadeMs,
+                    crossfadeMs = crossfadeMs,
+                    onCrossfadeMsChange = vm::setCrossfadeMs,
                     seekBarStyle = seekBarStyle,
                     onSeekBarStyleChange = vm::setSeekBarStyle,
                     immersiveNowPlaying = immersiveNowPlaying,
                     onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
                     playCountThreshold = playCountThreshold,
                     onPlayCountThresholdChange = vm::setPlayCountThreshold,
+                    lastFmUsername = lastFmUsername,
+                    onLastFmUsernameChange = vm::setLastFmUsername,
+                    lastFmSyncMessage = lastFmSyncMessage,
+                    onSyncLastFm = vm::syncFromLastFm,
+                    onClearPlaybackHistory = vm::clearPlaybackHistory,
+                    onClearFavorites = vm::clearFavorites,
+                    libraryRootPath = libraryRootPath,
+                    onPickLibraryRoot = {
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = libraryRootPath
+                        fileManagerFolderCallback = { path -> vm.setLibraryRootPath(path) }
+                        showFileManager = true
+                    },
+                    onBulkRenameByTags = {
+                        pendingOrganizeAction = "rename"
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = null
+                        fileManagerFolderCallback = { path ->
+                            organizeRenameFolder = path
+                            showOrganizeRenameDialog = true
+                        }
+                        showFileManager = true
+                    },
+                    onMoveToLibraryRoot = {
+                        pendingOrganizeAction = "move"
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = null
+                        fileManagerFolderCallback = { path ->
+                            vm.moveFolderToLibraryRoot(path)
+                        }
+                        showFileManager = true
+                    },
+                    organizeStatus = organizeStatus,
                     milkPresetCount = milkPresets.size,
                     milkIntervalSec = milkIntervalSec,
                     onPickMilkFiles = onPickMilkFiles,
@@ -1010,6 +1164,8 @@ fun TolereApp(
                     onShareFontSelect = vm::setShareFontPath,
                     shareTextColor = shareTextColor,
                     onShareTextColorChange = vm::setShareTextColor,
+                    shareBgColor = shareBgColor,
+                    onShareBgColorChange = vm::setShareBgColor,
                     shareBrandColor = shareBrandColor,
                     onShareBrandColorChange = vm::setShareBrandColor
                 )
@@ -1044,7 +1200,13 @@ fun TolereApp(
             }
 
             if (showHelp) {
-                HelpDialog(onDismiss = { showHelp = false })
+                HelpScreen(
+                    onClose = { showHelp = false },
+                    onFinishedFirstRun = {
+                        rootContext.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                            .edit().putBoolean("help_onboarding_done", true).apply()
+                    }
+                )
             }
 
             AnimatedVisibility(
@@ -1144,6 +1306,9 @@ fun TolereApp(
                         isFavoriteCheck = { id -> vm.isFavorite(id) },
                         onToggleFavorite = { vm.toggleFavorite(current.id) },
                         onAddToPlaylist = { openAddToPlaylist(listOf(current)) },
+                        onAddToBlacklist = {
+                            vm.addToTrackBlacklist(current)
+                        },
                         onEditTags = {
                             tagEditTrack = current
                             showNowPlaying = false
@@ -1188,9 +1353,20 @@ fun TolereApp(
                         lyricsBorderWidth = lyricsBorderWidth,
                         menuBgColor = menuBgColor,
                         playCount = vm.playCountOf(current.id),
+                        firstPlayedAt = vm.firstPlayedAtOf(current.id).takeIf { it > 0L },
                         lastPlayedAt = vm.lastPlayedAt(current.id),
                         seekBarStyle = seekBarStyle,
-                        immersiveNowPlaying = immersiveNowPlaying
+                        immersiveNowPlaying = immersiveNowPlaying,
+                        onOpenContainingFolder = {
+                            val path = current.path
+                            if (path.isNotBlank()) {
+                                fileManagerMode = FileManagerMode.BROWSE
+                                fileManagerInitialPath = path
+                                fileManagerFolderCallback = null
+                                showNowPlaying = false
+                                showFileManager = true
+                            }
+                        }
                     )
                 }
             }
@@ -1363,6 +1539,41 @@ fun TolereApp(
                 )
             }
 
+            if (showOrganizeRenameDialog && organizeRenameFolder != null) {
+                val dummyTracks = remember(organizeRenameFolder) {
+                    listOf(
+                        Track(
+                            id = "org_dummy",
+                            title = "Título",
+                            artist = "Artista",
+                            album = "Álbum",
+                            genre = "",
+                            duration = 0L,
+                            uri = android.net.Uri.EMPTY,
+                            path = "",
+                            folder = ""
+                        )
+                    )
+                }
+                BatchRenameDialog(
+                    tracks = dummyTracks,
+                    onDismiss = {
+                        showOrganizeRenameDialog = false
+                        organizeRenameFolder = null
+                        pendingOrganizeAction = null
+                    },
+                    onConfirm = { pattern ->
+                        val folder = organizeRenameFolder
+                        showOrganizeRenameDialog = false
+                        organizeRenameFolder = null
+                        pendingOrganizeAction = null
+                        if (folder != null) {
+                            vm.bulkRenameFolderByPattern(folder, pattern)
+                        }
+                    }
+                )
+            }
+
 
             if (showDeleteConfirm && selectedTrackIds.isNotEmpty()) {
                 val pool = remember(isSearching, searchResults, visible, favoriteTracks, history, mostPlayed, tracks) {
@@ -1465,6 +1676,23 @@ fun TolereApp(
         }
     }
     } // MaterialTheme
+
+            // Gerenciador de arquivos: tela própria (cobre nav e conteúdo)
+            if (showFileManager) {
+                FileManagerScreen(
+                    mode = fileManagerMode,
+                    initialPath = fileManagerInitialPath,
+                    floatingIconsEnabled = floatingIconsEnabled,
+                    appColors = appColors,
+                    onClose = {
+                        showFileManager = false
+                        fileManagerFolderCallback = null
+                    },
+                    onFolderPicked = fileManagerFolderCallback,
+                    onTracksMayHaveChanged = { vm.refreshLibrary() }
+                )
+            }
+
     } // CompositionLocalProvider
 }
 
@@ -1512,7 +1740,9 @@ private fun Header(
     onBack: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenHelp: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onPlayAllShuffled: (() -> Unit)? = null,
+    onOpenFileManager: (() -> Unit)? = null
 ) {
     Row(
         Modifier
@@ -1534,7 +1764,6 @@ private fun Header(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(start = if (showBack) 0.dp else 12.dp)
         )
-        // Caixa de pesquisa pequena e opaca ao lado do botão de ajuda
         Box(
             Modifier
                 .height(36.dp)
@@ -1559,40 +1788,35 @@ private fun Header(
                 )
             }
         }
-        IconButton(onClick = onOpenHelp) {
-            Icon(Icons.Rounded.HelpOutline, contentDescription = "Ajuda")
+        if (onPlayAllShuffled != null) {
+            IconButton(onClick = onPlayAllShuffled) {
+                Icon(Icons.Rounded.Shuffle, contentDescription = "Tocar todas aleatório")
+            }
         }
-        IconButton(onClick = onOpenSettings) {
-            Icon(Icons.Rounded.Settings, contentDescription = "Configurações")
-        }
-    }
-}
-
-@Composable
-private fun HelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Ajuda — Lyron Music Player") },
-        text = {
-            Column {
-                Text(
-                    "• Fontes: em Configurações → Aparência → Fontes você troca a fonte do player e das letras. " +
-                        "Para importar uma fonte personalizada, use o botão de adicionar e selecione um arquivo .ttf ou .otf.\n\n" +
-                        "• Presets .milk: o visualizador usa presets no formato ProjectM (.milk). " +
-                        "Importe novos em Configurações → Visualizador (ou pela pasta de presets). " +
-                        "Eles controlam as animações e efeitos visuais sincronizados com a música.\n\n" +
-                        "• Gestos no Now Playing: deslize horizontalmente (esquerda/direita) sobre a área do visualizador " +
-                        "para navegar entre os presets .milk. Toque no nome do preset para abrir a lista completa.\n\n" +
-                        "• Por enquanto esse texto de ajuda não passa de um placeholder. " +
-                        "Eu mesmo vou adicionar um texto escrito por mim mesmo mais tarfe (Eu acho).",
-                    fontSize = 14.sp
+        if (onOpenFileManager != null) {
+            IconButton(onClick = onOpenFileManager) {
+                Image(
+                    painter = painterResource(R.drawable.ic_header_files),
+                    contentDescription = "Gerenciador de arquivos",
+                    modifier = Modifier.size(28.dp)
                 )
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Entendi") }
         }
-    )
+        IconButton(onClick = onOpenHelp) {
+            Image(
+                painter = painterResource(R.drawable.ic_help_button),
+                contentDescription = "Ajuda",
+                modifier = Modifier.size(28.dp)
+            )
+        }
+        IconButton(onClick = onOpenSettings) {
+            Image(
+                painter = painterResource(R.drawable.ic_header_settings),
+                contentDescription = "Configurações",
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1640,8 +1864,7 @@ private fun SearchResultsPanel(
                 )
             }
             items(artists.take(20)) { a ->
-                val metaKey = ArtistMetaStore.artistKey(a.name)
-                val metaImg = ArtistMetaStore.load(searchCtx, metaKey)?.displayImage
+                val metaImg = ArtistMetaStore.cachedPhotoPath(a.name)
                 val art = metaImg ?: a.artPath
                 Row(
                     Modifier
@@ -1907,50 +2130,80 @@ private fun AlphabetFastScroller(
 ) {
     if (letterIndex.isEmpty()) return
     var activeLetter by remember { mutableStateOf<Char?>(null) }
-    Column(
-        modifier = modifier
-            .width(22.dp)
-            .pointerInput(letterIndex) {
-                detectVerticalDragGestures(
-                    onDragStart = { offset ->
-                        val letter = letterAtY(offset.y, size.height.toFloat())
-                        activeLetter = letter
-                        onLetterSelected(letter)
+    var fingerFraction by remember { mutableStateOf(0f) }
+    BoxWithConstraints(modifier = modifier) {
+        val trackHeight = maxHeight
+        Column(
+            modifier = Modifier
+                .width(22.dp)
+                .fillMaxHeight()
+                .align(Alignment.CenterEnd)
+                .pointerInput(letterIndex) {
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            val h = size.height.toFloat().coerceAtLeast(1f)
+                            fingerFraction = (offset.y / h).coerceIn(0f, 1f)
+                            val letter = letterAtY(offset.y, h)
+                            activeLetter = letter
+                            onLetterSelected(letter)
+                        },
+                        onDragEnd = { activeLetter = null },
+                        onDragCancel = { activeLetter = null },
+                        onVerticalDrag = { change, _ ->
+                            change.consume()
+                            val h = size.height.toFloat().coerceAtLeast(1f)
+                            fingerFraction = (change.position.y / h).coerceIn(0f, 1f)
+                            val letter = letterAtY(change.position.y, h)
+                            if (letter != activeLetter) {
+                                activeLetter = letter
+                                onLetterSelected(letter)
+                            }
+                        }
+                    )
+                },
+            verticalArrangement = Arrangement.SpaceEvenly,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            AlphabetLetters.forEach { letter ->
+                val present = letter in letterIndex
+                val active = activeLetter == letter
+                Text(
+                    text = letter.toString(),
+                    fontSize = if (active) 12.sp else 10.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                    color = when {
+                        active -> Color.White
+                        present -> Color.White.copy(0.75f)
+                        else -> Color.White.copy(0.28f)
                     },
-                    onDragEnd = { activeLetter = null },
-                    onDragCancel = { activeLetter = null },
-                    onVerticalDrag = { change, _ ->
-                        change.consume()
-                        val letter = letterAtY(change.position.y, size.height.toFloat())
-                        if (letter != activeLetter) {
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = present) {
                             activeLetter = letter
                             onLetterSelected(letter)
                         }
-                    }
                 )
-            },
-        verticalArrangement = Arrangement.SpaceEvenly,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        AlphabetLetters.forEach { letter ->
-            val present = letter in letterIndex
-            Text(
-                text = letter.toString(),
-                fontSize = 10.sp,
-                fontWeight = if (activeLetter == letter) FontWeight.Bold else FontWeight.Medium,
-                color = when {
-                    activeLetter == letter -> Color.White
-                    present -> Color.White.copy(0.75f)
-                    else -> Color.White.copy(0.28f)
-                },
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = present) {
-                        activeLetter = letter
-                        onLetterSelected(letter)
-                    }
-            )
+            }
+        }
+        activeLetter?.let { letter ->
+            val bubbleY = (trackHeight * fingerFraction) - 26.dp
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = (-40).dp, y = bubbleY)
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.95f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    letter.toString(),
+                    color = Color.Black,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -2477,7 +2730,8 @@ private fun SortBar(
     trackSort: MusicViewModel.TrackSort,
     trackOrder: MusicViewModel.SortOrder,
     onGroupSort: (MusicViewModel.GroupSort, MusicViewModel.SortOrder) -> Unit,
-    onTrackSort: (MusicViewModel.TrackSort, MusicViewModel.SortOrder) -> Unit
+    onTrackSort: (MusicViewModel.TrackSort, MusicViewModel.SortOrder) -> Unit,
+    compact: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(false) }
     val label = if (isGroup) {
@@ -2498,7 +2752,10 @@ private fun SortBar(
         val o = if (trackOrder == MusicViewModel.SortOrder.ASC) "↑" else "↓"
         "$s $o"
     }
-    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    Box(
+        Modifier
+            .then(if (compact) Modifier else Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
+    ) {
         Row(
             Modifier
                 .clip(RoundedCornerShape(20.dp))
@@ -2563,7 +2820,8 @@ private data class ArtistAlbumItem(
     val name: String,
     val trackCount: Int,
     val artPath: String?,
-    val totalDurationMs: Long
+    val totalDurationMs: Long,
+    val year: Int? = null
 )
 
 @Composable
@@ -2585,9 +2843,13 @@ private fun AlbumWikiInfoSection(
     var editText by remember { mutableStateOf("") }
     var textExpanded by remember { mutableStateOf(false) }
 
+
     var lastFmSummary by remember { mutableStateOf<String?>(null) }
+    var savedAlbum by remember(albumName, artistName) { mutableStateOf<ArtistMetaStore.Meta?>(null) }
     LaunchedEffect(albumName, artistName) {
         loadingWiki = true
+        val albumMetaKey = ArtistMetaStore.albumKey(albumName, artistName)
+        savedAlbum = withContext(Dispatchers.IO) { ArtistMetaStore.load(context, albumMetaKey) }
         wikiInfo = withContext(Dispatchers.IO) {
             com.tolete.player.data.WikidataClient.searchAlbum(albumName, artistName)
         }
@@ -2596,17 +2858,18 @@ private fun AlbumWikiInfoSection(
             val lfm = withContext(Dispatchers.IO) { LastFmClient.getAlbumInfo(albumName, artistName) }
             lastFmSummary = lfm?.summary
             if (!lfm?.summary.isNullOrBlank() && manualInfo.isNullOrBlank()) {
-                ArtistMetaStore.saveText(context, ArtistMetaStore.albumKey(albumName, artistName), lfm?.summary, "lastfm")
+                withContext(Dispatchers.IO) {
+                    ArtistMetaStore.saveText(context, albumMetaKey, lfm?.summary, "lastfm")
+                }
             }
         } else if (manualInfo.isNullOrBlank()) {
-            ArtistMetaStore.saveText(context, ArtistMetaStore.albumKey(albumName, artistName), txt, "wikidata")
+            withContext(Dispatchers.IO) {
+                ArtistMetaStore.saveText(context, albumMetaKey, txt, "wikidata")
+            }
         }
         loadingWiki = false
     }
 
-    val savedAlbum = remember(albumName, artistName) {
-        ArtistMetaStore.load(context, ArtistMetaStore.albumKey(albumName, artistName))
-    }
     val displayInfo = manualInfo ?: savedAlbum?.text ?: wikiInfo?.extract ?: wikiInfo?.description ?: lastFmSummary
 
     Column(Modifier.padding(top = 10.dp)) {
@@ -2700,23 +2963,14 @@ private fun ArtistDetailScreen(
     onShuffle: () -> Unit = {},
     onTrackClick: (Int, Track) -> Unit = { _, _ -> },
     onTrackLongClick: (Track) -> Unit = {},
-    onRefreshTags: (() -> Unit)? = null
+    onRefreshTags: (() -> Unit)? = null,
+    onPlayTracks: ((List<Track>, Int) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val metaKey = remember(artistName) { ArtistMetaStore.artistKey(artistName) }
-    var savedMeta by remember(artistName) {
-        mutableStateOf(ArtistMetaStore.load(context, metaKey))
-    }
-    LaunchedEffect(artistName) {
-        if (savedMeta?.text == null) {
-            val old = context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
-                .getString("artist_info_$artistName", null)
-            if (!old.isNullOrBlank()) {
-                ArtistMetaStore.saveText(context, metaKey, old, "manual")
-                savedMeta = ArtistMetaStore.load(context, metaKey)
-            }
-        }
-    }
+    // Carregado em IO dentro do LaunchedEffect abaixo (nada de disco na composição)
+    var savedMeta by remember(artistName) { mutableStateOf<ArtistMetaStore.Meta?>(null) }
 
     var remoteImage by remember { mutableStateOf<String?>(null) }
     var remoteText by remember { mutableStateOf<String?>(null) }
@@ -2725,38 +2979,106 @@ private fun ArtistDetailScreen(
     var editText by remember { mutableStateOf("") }
     var textExpanded by remember { mutableStateOf(false) }
 
+    // Ordenação dos álbuns do artista: nome ou ano, crescente/decrescente
+    var albumSortBy by remember { mutableStateOf("name") } // "name" | "year"
+    var albumSortAsc by remember { mutableStateOf(true) }
+    // Ordenação das músicas do artista: album | year | title | duration
+    var trackSortMode by remember { mutableStateOf("album") }
+    var trackSortAsc by remember { mutableStateOf(true) }
+    val sortedArtistTracks = remember(tracks, trackSortMode, trackSortAsc) {
+        val base = when (trackSortMode) {
+            "year" -> tracks.sortedWith(compareBy<Track> { it.year ?: Int.MAX_VALUE }.thenBy { it.album.lowercase() }.thenBy { it.trackNumber ?: Int.MAX_VALUE })
+            "title" -> tracks.sortedBy { it.title.lowercase() }
+            "duration" -> tracks.sortedBy { it.duration }
+            else -> tracks.sortedWith(compareBy<Track> { it.album.lowercase() }.thenBy { it.trackNumber ?: Int.MAX_VALUE }.thenBy { it.title.lowercase() })
+        }
+        if (trackSortAsc) base else base.reversed()
+    }
+    var mbYears by remember(artistName) { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    LaunchedEffect(artistName, albums) {
+        val missing = albums.filter { it.year == null }.map { it.name }.distinct().take(8)
+        if (missing.isEmpty()) return@LaunchedEffect
+        val map = mutableMapOf<String, Int>()
+        for (name in missing) {
+            try {
+                val y = withContext(Dispatchers.IO) {
+                    com.tolete.player.data.MusicBrainzClient.releaseYear(name, artistName)
+                }
+                if (y != null) map[name] = y
+            } catch (_: Exception) {}
+        }
+        if (map.isNotEmpty()) mbYears = map
+    }
+    val albumsWithYear = remember(albums, mbYears) {
+        albums.map { a ->
+            if (a.year != null) a else a.copy(year = mbYears[a.name])
+        }
+    }
+    val sortedAlbums = remember(albumsWithYear, albumSortBy, albumSortAsc) {
+        val albums = albumsWithYear
+        val base = when (albumSortBy) {
+            "year" -> albums.sortedWith(
+                compareBy<ArtistAlbumItem> { it.year ?: Int.MAX_VALUE }.thenBy { it.name.lowercase() }
+            )
+            else -> albums.sortedBy { it.name.lowercase() }
+        }
+        if (albumSortAsc) base else base.reversed()
+    }
+
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            val path = ArtistMetaStore.saveLocalPhoto(context, metaKey, uri)
-            if (path != null) {
-                savedMeta = ArtistMetaStore.load(context, metaKey)
-                Toast.makeText(context, "Foto do artista salva", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(context, "Falha ao salvar foto", Toast.LENGTH_SHORT).show()
+            scope.launch {
+                val newMeta = withContext(Dispatchers.IO) {
+                    val path = ArtistMetaStore.saveLocalPhoto(context, metaKey, uri)
+                    if (path != null) ArtistMetaStore.load(context, metaKey) else null
+                }
+                if (newMeta != null) {
+                    savedMeta = newMeta
+                    Toast.makeText(context, "Foto do artista salva", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Falha ao salvar foto", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
 
     LaunchedEffect(artistName) {
         loading = true
-        val needImage = savedMeta?.displayImage == null
-        val needText = savedMeta?.text.isNullOrBlank()
+        // 1) Cache local (disco sempre fora da thread principal)
+        val meta = withContext(Dispatchers.IO) {
+            var m = ArtistMetaStore.load(context, metaKey)
+            if (m?.text == null) {
+                val old = context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
+                    .getString("artist_info_$artistName", null)
+                if (!old.isNullOrBlank()) {
+                    ArtistMetaStore.saveText(context, metaKey, old, "manual")
+                    m = ArtistMetaStore.load(context, metaKey)
+                }
+            }
+            m
+        }
+        savedMeta = meta
+
+        // 2) Só vai à rede se faltar foto ou texto; download/gravação também em IO
+        val needImage = meta?.displayImage == null
+        val needText = meta?.text.isNullOrBlank()
         if (needImage || needText) {
             val resolved = withContext(Dispatchers.IO) {
-                com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+                val r = com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+                if (needImage && !r.imageUrl.isNullOrBlank()) {
+                    ArtistMetaStore.saveRemoteImage(context, metaKey, r.imageUrl, r.source)
+                }
+                if (needText && !r.bio.isNullOrBlank()) {
+                    ArtistMetaStore.saveText(context, metaKey, r.bio, r.source)
+                }
+                r
             }
-            if (needImage && !resolved.imageUrl.isNullOrBlank()) {
-                remoteImage = resolved.imageUrl
-                ArtistMetaStore.saveRemoteImage(context, metaKey, resolved.imageUrl, resolved.source)
-            }
-            if (needText && !resolved.bio.isNullOrBlank()) {
-                remoteText = resolved.bio
-                ArtistMetaStore.saveText(context, metaKey, resolved.bio, resolved.source)
-            }
+            if (needImage && !resolved.imageUrl.isNullOrBlank()) remoteImage = resolved.imageUrl
+            if (needText && !resolved.bio.isNullOrBlank()) remoteText = resolved.bio
+            savedMeta = withContext(Dispatchers.IO) { ArtistMetaStore.load(context, metaKey) }
         }
-        savedMeta = ArtistMetaStore.load(context, metaKey)
         loading = false
     }
 
@@ -2773,11 +3095,6 @@ private fun ArtistDetailScreen(
         onRefresh = {
             if (onRefreshTags == null || refreshing) return@PullToRefreshBox
             refreshing = true
-            try { ArtistMetaStore.clear(context, metaKey) } catch (_: Exception) {}
-            try {
-                context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
-                    .edit().remove("artist_info_$artistName").apply()
-            } catch (_: Exception) {}
             savedMeta = null
             remoteImage = null
             remoteText = null
@@ -2867,7 +3184,10 @@ private fun ArtistDetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Button(
-                            onClick = onPlayAll,
+                            onClick = {
+                                if (onPlayTracks != null) onPlayTracks.invoke(sortedArtistTracks, 0)
+                                else onPlayAll()
+                            },
                             modifier = Modifier.weight(1f).height(48.dp),
                             shape = RoundedCornerShape(50),
                             colors = ButtonDefaults.buttonColors(
@@ -2880,7 +3200,10 @@ private fun ArtistDetailScreen(
                             Text("Tocar todas", fontWeight = FontWeight.SemiBold)
                         }
                         Button(
-                            onClick = onShuffle,
+                            onClick = {
+                                if (onPlayTracks != null) onPlayTracks.invoke(sortedArtistTracks.shuffled(), 0)
+                                else onShuffle()
+                            },
                             modifier = Modifier.weight(1f).height(48.dp),
                             shape = RoundedCornerShape(50),
                             colors = ButtonDefaults.buttonColors(
@@ -2960,7 +3283,50 @@ private fun ArtistDetailScreen(
                 }
             }
         }
-        lazyGridItems(albums, key = { it.name }) { album ->
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(
+                    "Álbuns",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(0.9f)
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    listOf("name" to "A–Z", "year" to "Ano").forEach { (key, label) ->
+                        val sel = albumSortBy == key
+                        Text(
+                            label,
+                            color = if (sel) Color.Black else Color.White.copy(0.85f),
+                            fontSize = 13.sp,
+                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (sel) accent else Color.White.copy(0.12f))
+                                .clickable { albumSortBy = key }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (albumSortAsc) "↑ Crescente" else "↓ Decrescente",
+                        color = Color.White.copy(0.9f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color.White.copy(0.12f))
+                            .clickable { albumSortAsc = !albumSortAsc }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+            }
+        }
+        lazyGridItems(sortedAlbums, key = { it.name }) { album ->
             Column(
                 Modifier
                     .padding(horizontal = 6.dp)
@@ -2994,7 +3360,10 @@ private fun ArtistDetailScreen(
                     color = Color.White
                 )
                 Text(
-                    "${faixas(album.trackCount)} · ${formatTotalDuration(album.totalDurationMs)}",
+                    buildString {
+                        album.year?.let { append("$it · ") }
+                        append("${faixas(album.trackCount)} · ${formatTotalDuration(album.totalDurationMs)}")
+                    },
                     fontSize = 12.sp,
                     color = Color.White.copy(0.55f),
                     maxLines = 1
@@ -3011,8 +3380,54 @@ private fun ArtistDetailScreen(
                     modifier = Modifier.padding(start = 6.dp, top = 20.dp, bottom = 8.dp)
                 )
             }
-            items(tracks.size, key = { tracks[it].id }, span = { GridItemSpan(maxLineSpan) }) { index ->
-                val track = tracks[index]
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        "Ordenar músicas",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.55f),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(
+                            "album" to "Álbum",
+                            "year" to "Ano",
+                            "title" to "Nome",
+                            "duration" to "Duração"
+                        ).forEach { (key, label) ->
+                            val sel = trackSortMode == key
+                            Text(
+                                label,
+                                color = if (sel) Color.Black else Color.White.copy(0.85f),
+                                fontSize = 12.sp,
+                                fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(if (sel) accent else Color.White.copy(0.12f))
+                                    .clickable { trackSortMode = key }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            if (trackSortAsc) "↑" else "↓",
+                            color = Color.White.copy(0.9f),
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(Color.White.copy(0.12f))
+                                .clickable { trackSortAsc = !trackSortAsc }
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+            }
+            items(sortedArtistTracks.size, key = { sortedArtistTracks[it].id }, span = { GridItemSpan(maxLineSpan) }) { index ->
+                val track = sortedArtistTracks[index]
                 val active = track.id == nowPlayingId
                 val selected = track.id in selectedIds
                 Row(
@@ -3020,7 +3435,10 @@ private fun ArtistDetailScreen(
                         .fillMaxWidth()
                         .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
                         .combinedClickable(
-                            onClick = { onTrackClick(index, track) },
+                            onClick = {
+                                if (onPlayTracks != null) onPlayTracks.invoke(sortedArtistTracks, index)
+                                else onTrackClick(index, track)
+                            },
                             onLongClick = { onTrackLongClick(track) }
                         )
                         .padding(horizontal = 6.dp, vertical = 10.dp),
@@ -3076,17 +3494,23 @@ private fun ArtistDetailScreen(
         if (!refreshing) return@LaunchedEffect
         loading = true
         val resolved = withContext(Dispatchers.IO) {
-            com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+            try { ArtistMetaStore.clear(context, metaKey) } catch (_: Exception) {}
+            try {
+                context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
+                    .edit().remove("artist_info_$artistName").apply()
+            } catch (_: Exception) {}
+            val r = com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+            if (!r.imageUrl.isNullOrBlank()) {
+                ArtistMetaStore.saveRemoteImage(context, metaKey, r.imageUrl, r.source)
+            }
+            if (!r.bio.isNullOrBlank()) {
+                ArtistMetaStore.saveText(context, metaKey, r.bio, r.source)
+            }
+            r
         }
         remoteImage = resolved.imageUrl
         remoteText = resolved.bio
-        if (!resolved.imageUrl.isNullOrBlank()) {
-            ArtistMetaStore.saveRemoteImage(context, metaKey, resolved.imageUrl, resolved.source)
-        }
-        if (!resolved.bio.isNullOrBlank()) {
-            ArtistMetaStore.saveText(context, metaKey, resolved.bio, resolved.source)
-        }
-        savedMeta = ArtistMetaStore.load(context, metaKey)
+        savedMeta = withContext(Dispatchers.IO) { ArtistMetaStore.load(context, metaKey) }
         loading = false
         refreshing = false
     }
@@ -3419,7 +3843,7 @@ private fun AlbumDetailScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    Box(Modifier.fillMaxSize().background(Color(0xFF2A2A32)))
+                    Box(Modifier.fillMaxSize().background(Color.White.copy(0.06f)))
                 }
                 Box(
                     Modifier
@@ -3709,7 +4133,7 @@ fun applyRenamePattern(pattern: String, track: Track): String {
 }
 
 @Composable
-private fun BatchRenameDialog(
+internal fun BatchRenameDialog(
     tracks: List<Track>,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
@@ -4009,30 +4433,50 @@ private fun LysPlaceHome(
                             ) {
                                 items(ranked.size) { index ->
                                     val item = ranked[index]
+                                    val isTracks = mostKind == MusicViewModel.MostPlayedKind.TRACKS
+                                    val trackForRow = if (isTracks) mostPlayed.find { it.id == item.key } else null
+                                    val selected = trackForRow != null && trackForRow.id in selectedIds
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
-                                            .clickable {
-                                                if (mostKind == MusicViewModel.MostPlayedKind.TRACKS && item.trackIds.isNotEmpty()) {
-                                                    val list = ranked.mapNotNull { r ->
-                                                        mostPlayed.find { it.id == r.key }
-                                                    }.ifEmpty {
-                                                        // fallback: usa mostPlayed global filtrado
-                                                        mostPlayed.filter { t -> ranked.any { it.key == t.id } }
+                                            .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+                                            .then(
+                                                if (isTracks && trackForRow != null) {
+                                                    Modifier.combinedClickable(
+                                                        onClick = {
+                                                            val list = ranked.mapNotNull { r -> mostPlayed.find { it.id == r.key } }
+                                                            val idx = list.indexOfFirst { it.id == trackForRow.id }.coerceAtLeast(0)
+                                                            if (list.isNotEmpty()) onTrackClick(list, idx, trackForRow)
+                                                        },
+                                                        onLongClick = { onTrackLongClick(trackForRow) }
+                                                    )
+                                                } else {
+                                                    Modifier.clickable {
+                                                        if (item.trackIds.isNotEmpty()) {
+                                                            val pool = mostPlayed.filter { it.id in item.trackIds.toSet() }
+                                                                .ifEmpty { mostPlayed }
+                                                            if (pool.isNotEmpty()) onPlayTracks(pool, 0)
+                                                        }
                                                     }
-                                                    val idx = list.indexOfFirst { it.id == item.key }.coerceAtLeast(0)
-                                                    if (list.isNotEmpty()) {
-                                                        onTrackClick(list, idx, list[idx])
-                                                    }
-                                                } else if (item.trackIds.isNotEmpty()) {
-                                                    val pool = mostPlayed.filter { it.id in item.trackIds.toSet() }
-                                                        .ifEmpty { mostPlayed }
-                                                    if (pool.isNotEmpty()) onPlayTracks(pool, 0)
                                                 }
-                                            }
+                                            )
                                             .padding(vertical = 10.dp, horizontal = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        if (selectionMode && isTracks) {
+                                            Box(
+                                                Modifier
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (selected) {
+                                                    Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                                }
+                                            }
+                                            Spacer(Modifier.width(10.dp))
+                                        }
                                         Text(
                                             "${index + 1}",
                                             color = Color.White.copy(0.45f),
@@ -4255,6 +4699,16 @@ internal fun FloatingIconsBackground(kind: String) {
             R.drawable.ic_float_search_2,
             R.drawable.ic_float_search_3
         )
+        "files" -> listOf(
+            R.drawable.ic_float_files_1,
+            R.drawable.ic_float_files_2,
+            R.drawable.ic_float_files_3
+        )
+        "help" -> listOf(
+            R.drawable.ic_float_help_1,
+            R.drawable.ic_float_help_2,
+            R.drawable.ic_float_help_3
+        )
         else -> emptyList()
     }
     if (baseIcons.isEmpty()) return
@@ -4285,8 +4739,8 @@ internal fun FloatingIconsBackground(kind: String) {
                 bmp = bitmaps[i % bitmaps.size],
                 xFrac = rnd.nextFloat(),
                 yFrac = rnd.nextFloat(),
-                sizeDp = 20f + rnd.nextFloat() * 14f,                   // 20–34 dp (pequenos)
-                baseAlpha = 0.14f + rnd.nextFloat() * 0.14f,
+                sizeDp = if (kind == "files") 28f + rnd.nextFloat() * 16f else 20f + rnd.nextFloat() * 14f,
+                baseAlpha = if (kind == "files") 0.34f + rnd.nextFloat() * 0.24f else 0.14f + rnd.nextFloat() * 0.14f,
                 vxDp = kotlin.math.cos(ang) * speed,
                 vyDp = kotlin.math.sin(ang) * speed,
                 rot0 = rnd.nextFloat() * 360f,

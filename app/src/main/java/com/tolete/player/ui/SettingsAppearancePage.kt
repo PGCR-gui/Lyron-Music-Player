@@ -87,6 +87,8 @@ internal fun AppearancePage(
     onPickShareFont: () -> Unit = {},
     shareTextColor: Int = 0xFFF5F5FA.toInt(),
     onShareTextColorChange: (Int) -> Unit = {},
+    shareBgColor: Int = 0xFF121212.toInt(),
+    onShareBgColorChange: (Int) -> Unit = {},
     shareBrandColor: Int = 0xFFFFFFFF.toInt(),
     onShareBrandColorChange: (Int) -> Unit = {}
 ) {
@@ -213,8 +215,28 @@ internal fun AppearancePage(
                 Spacer(Modifier.height(8.dp))
                 FontOptionRow(
                     label = "Padrão do sistema",
-                    selected = uiFontPath.isNullOrBlank() || uiFontPath == "system" || uiFontPath?.startsWith("builtin:") == true,
+                    selected = uiFontPath.isNullOrBlank() || uiFontPath == "system",
                     onClick = onClearUiFont
+                )
+                Text(
+                    "Embutidas",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+                )
+                BuiltInFonts.EMBEDDED.forEach { emb ->
+                    val key = BuiltInFonts.builtinKey(emb.id)
+                    FontOptionRow(
+                        label = emb.label,
+                        selected = uiFontPath == key,
+                        onClick = { onSelectUiFont(key) }
+                    )
+                }
+                Text(
+                    "Personalizadas",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
                 )
                 userFonts.forEach { file ->
                     FontOptionRow(
@@ -382,6 +404,14 @@ internal fun AppearancePage(
                 selected = homeButtonFontPath.isNullOrBlank() || homeButtonFontPath == "system",
                 onClick = { onHomeButtonFontSelect(null) }
             )
+            BuiltInFonts.EMBEDDED.forEach { emb ->
+                val key = BuiltInFonts.builtinKey(emb.id)
+                FontOptionRow(
+                    label = emb.label,
+                    selected = homeButtonFontPath == key,
+                    onClick = { onHomeButtonFontSelect(key) }
+                )
+            }
             homeUserFonts.forEach { file ->
                 FontOptionRow(
                     label = file.name,
@@ -414,17 +444,17 @@ internal fun AppearancePage(
                 modifier = Modifier.fillMaxWidth()
             )
 
-            // --- Foto gerada (trecho de letra) ---
+            // --- Foto gerada (letra + mais tocadas) ---
             Spacer(Modifier.height(24.dp))
             Text(
-                "Foto gerada (trecho de letra)",
+                "Fotos geradas (letra e Mais Tocadas)",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White.copy(0.55f),
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             Text(
-                "Fonte da letra e cor do texto / logo na imagem compartilhada",
+                "Fonte, cor do texto/logo e cor de fundo (Mais Tocadas) nas imagens exportadas",
                 fontSize = 12.sp,
                 color = Color.White.copy(0.5f),
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -436,6 +466,14 @@ internal fun AppearancePage(
                 selected = shareFontPath.isNullOrBlank() || shareFontPath == "system",
                 onClick = { onShareFontSelect(null) }
             )
+            BuiltInFonts.EMBEDDED.forEach { emb ->
+                val key = BuiltInFonts.builtinKey(emb.id)
+                FontOptionRow(
+                    label = emb.label,
+                    selected = shareFontPath == key,
+                    onClick = { onShareFontSelect(key) }
+                )
+            }
             shareUserFonts.forEach { file ->
                 FontOptionRow(
                     label = file.name,
@@ -464,7 +502,15 @@ internal fun AppearancePage(
                 color = shareTextColor,
                 onColorChange = onShareTextColorChange,
                 showAlpha = false,
-                label = "Cor do texto (letra)",
+                label = "Cor do texto",
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            ColorPickerButton(
+                color = shareBgColor,
+                onColorChange = onShareBgColorChange,
+                showAlpha = false,
+                label = "Cor de fundo (Mais Tocadas)",
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(10.dp))
@@ -603,8 +649,28 @@ internal fun LyricsViewerPage(
         val lyricsUserFonts = remember { BuiltInFonts.listUserFonts(lyricsCtx) }
         FontOptionRow(
             label = "Padrão do sistema",
-            selected = lyricsFontPath.isNullOrBlank() || lyricsFontPath == "system" || lyricsFontPath?.startsWith("builtin:") == true,
+            selected = lyricsFontPath.isNullOrBlank() || lyricsFontPath == "system",
             onClick = onClearFont
+        )
+        Text(
+            "Embutidas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+        )
+        BuiltInFonts.EMBEDDED.forEach { emb ->
+            val key = BuiltInFonts.builtinKey(emb.id)
+            FontOptionRow(
+                label = emb.label,
+                selected = lyricsFontPath == key,
+                onClick = { onSelectFont(key) }
+            )
+        }
+        Text(
+            "Personalizadas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
         )
         lyricsUserFonts.forEach { file ->
             FontOptionRow(

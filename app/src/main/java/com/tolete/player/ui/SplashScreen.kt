@@ -80,17 +80,10 @@ fun SplashScreen(
         onFinished()
     }
 
-    // Rotação entre fontes carregadas pelo usuário (filesDir/fonts); fallback sistema
+    // Rotação entre fontes embutidas + personalizadas
     val splashFont = remember {
-        val pool = BuiltInFonts.splashPool(context)
-        if (pool.isNotEmpty()) {
-            val chosen = pool[Random.nextInt(pool.size)]
-            try {
-                FontFamily(Font(chosen))
-            } catch (_: Exception) {
-                null
-            }
-        } else null
+        val pool = BuiltInFonts.splashFontFamilies(context)
+        if (pool.isNotEmpty()) pool[Random.nextInt(pool.size)] else null
     }
     val splashColor = remember {
         SplashTextColors[Random.nextInt(SplashTextColors.size)]
@@ -134,8 +127,20 @@ fun SplashScreen(
             .clickable { finishSplash() },
         contentAlignment = Alignment.Center
     ) {
+        // Fundo aleatório a cada abertura (Crop como a imagem original)
+        // Um fundo por abertura do processo (não sobrescrever com remember se já existir id salvo)
+        val splashBackgrounds = listOf(
+            R.drawable.splash_bg,
+            R.drawable.splash_bg_1,
+            R.drawable.splash_bg_2,
+            R.drawable.splash_bg_3,
+            R.drawable.splash_bg_4
+        )
+        val splashBgRes = remember {
+            splashBackgrounds[Random.nextInt(splashBackgrounds.size)]
+        }
         Image(
-            painter = painterResource(R.drawable.splash_bg),
+            painter = painterResource(splashBgRes),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()

@@ -49,6 +49,8 @@ internal fun PlayerPage(
     onShuffleTypeChange: (ShuffleType) -> Unit,
     fadeMs: Int = 300,
     onFadeMsChange: (Int) -> Unit = {},
+    crossfadeMs: Int = 0,
+    onCrossfadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
@@ -136,6 +138,22 @@ internal fun PlayerPage(
             onValueChange = { onFadeMsChange(it.toInt()) },
             valueRange = 0f..2000f,
             steps = 39
+        )
+
+        Spacer(Modifier.height(16.dp))
+        Text("Crossfade entre faixas", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        Text(
+            if (crossfadeMs == 0) "Desligado"
+            else "Duração: ${crossfadeMs} ms (fade no fim da faixa e no início da próxima)",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        androidx.compose.material3.Slider(
+            value = crossfadeMs.toFloat(),
+            onValueChange = { onCrossfadeMsChange(it.toInt()) },
+            valueRange = 0f..5000f,
+            steps = 49
         )
 
         Spacer(Modifier.height(24.dp))

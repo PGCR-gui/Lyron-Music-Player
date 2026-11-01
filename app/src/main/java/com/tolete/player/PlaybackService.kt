@@ -15,6 +15,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -44,6 +45,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -126,6 +128,35 @@ class PlaybackService : MediaSessionService() {
     private val toggleFavoriteCommand = SessionCommand(ACTION_TOGGLE_FAVORITE, Bundle.EMPTY)
     private val closeAppCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
     private val setSpeedCommand = SessionCommand(ACTION_SET_SPEED, Bundle.EMPTY)
+
+    private var fadeVolumeJob: Job? = null
+    private var endCrossfadeStarted = false
+
+    private fun prefs() = getSharedPreferences("tolete", MODE_PRIVATE)
+    private fun fadeMs(): Int = prefs().getInt("fade_ms", 300).coerceIn(0, 3000)
+    private fun crossfadeMs(): Int = prefs().getInt("crossfade_ms", 0).coerceIn(0, 5000)
+
+    private fun rampVolume(player: Player, from: Float, to: Float, ms: Int, onEnd: (() -> Unit)? = null) {
+        fadeVolumeJob?.cancel()
+        if (ms <= 0) {
+            player.volume = to
+            onEnd?.invoke()
+            return
+        }
+        fadeVolumeJob = scope.launch {
+            val steps = (ms / 30).coerceIn(4, 80)
+            val start = from.coerceIn(0f, 1f)
+            val end = to.coerceIn(0f, 1f)
+            for (i in 0..steps) {
+                if (!isActive) return@launch
+                val f = i.toFloat() / steps
+                player.volume = start + (end - start) * f
+                delay(ms.toLong() / steps)
+            }
+            player.volume = end
+            onEnd?.invoke()
+        }
+    }
 
     private val sessionCallback = object : MediaSession.Callback {
         // Aceita qualquer controlador (shade do sistema, Bluetooth, outros apps, Android Auto…)
@@ -370,6 +401,15 @@ class PlaybackService : MediaSessionService() {
                 refreshCustomButtons()
                 val sid = player.audioSessionId
                 if (sid != 0) currentAudioSessionId = sid
+                endCrossfadeStarted = false
+                val cf = crossfadeMs()
+                if (cf > 0 && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    // Nova faixa: fade in (simula crossfade na transição automática)
+                    player.volume = 0f
+                    rampVolume(player, 0f, 1f, cf)
+                } else if (player.volume < 0.99f) {
+                    player.volume = 1f
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -387,7 +427,44 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        mediaSession = MediaSession.Builder(this, player)
+        // Player com fade play/pause (notificação, Bluetooth, UI via MediaController)
+        val fadingPlayer = object : ForwardingPlayer(player) {
+            override fun play() {
+                val ms = fadeMs()
+                if (ms <= 0) {
+                    player.volume = 1f
+                    super.play()
+                    return
+                }
+                player.volume = 0f
+                super.play()
+                rampVolume(player, 0f, 1f, ms)
+            }
+
+            override fun pause() {
+                val ms = fadeMs()
+                if (ms <= 0) {
+                    super.pause()
+                    player.volume = 1f
+                    return
+                }
+                val start = player.volume.coerceIn(0.01f, 1f)
+                rampVolume(player, start, 0f, ms) {
+                    super.pause()
+                    player.volume = 1f
+                }
+            }
+
+            override fun setPlayWhenReady(playWhenReady: Boolean) {
+                if (playWhenReady == this.playWhenReady) {
+                    super.setPlayWhenReady(playWhenReady)
+                    return
+                }
+                if (playWhenReady) play() else pause()
+            }
+        }
+
+        mediaSession = MediaSession.Builder(this, fadingPlayer)
             .setCallback(sessionCallback)
             .setSessionActivity(sessionActivity)
             .build()
@@ -395,6 +472,29 @@ class PlaybackService : MediaSessionService() {
         // Qualquer mudança nos favoritos (no app ou aqui) redesenha o ícone
         scope.launch {
             FavoritesBridge.version.collect { refreshCustomButtons() }
+        }
+
+        // end-crossfade watcher: fade out no final da faixa
+        scope.launch {
+            while (true) {
+                delay(200)
+                val p = exoPlayerRef ?: continue
+                val cf = crossfadeMs()
+                if (cf <= 0 || !p.isPlaying) {
+                    endCrossfadeStarted = false
+                    continue
+                }
+                val dur = p.duration
+                val pos = p.currentPosition
+                if (dur > 0 && dur != android.media.AudioTrack.ERROR_BAD_VALUE.toLong()) {
+                    val remain = dur - pos
+                    if (remain in 1 until cf.toLong() && !endCrossfadeStarted) {
+                        endCrossfadeStarted = true
+                        val start = p.volume.coerceIn(0.05f, 1f)
+                        rampVolume(p, start, 0f, remain.toInt().coerceAtLeast(50))
+                    }
+                }
+            }
         }
     }
 

@@ -9,6 +9,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -230,4 +235,40 @@ fun rememberAppColors(
         surface = surface,
         isLight = target.isLight
     )
+}
+
+
+/**
+ * Escala de layout relativa a um telefone de referência (~400dp de largura, ~800dp de altura).
+ * DPI/tamanho de tela diferentes encolhem ou expandem paddings, capas e controles
+ * para evitar overflow em telas compactas e vazios excessivos em telas grandes.
+ */
+@Immutable
+data class LayoutScale(
+    val widthDp: Int,
+    val heightDp: Int,
+    /** 1f = referência; <1 = tela menor. */
+    val factor: Float,
+    val compact: Boolean
+) {
+    fun dp(value: Float): Dp = (value * factor).dp
+    fun dp(value: Int): Dp = (value * factor).dp
+    fun sp(value: Float): TextUnit = (value * factor.coerceIn(0.85f, 1.1f)).sp
+    fun sp(value: Int): TextUnit = (value * factor.coerceIn(0.85f, 1.1f)).sp
+}
+
+@Composable
+fun rememberLayoutScale(): LayoutScale {
+    val cfg = LocalConfiguration.current
+    val w = cfg.screenWidthDp.coerceAtLeast(1)
+    val h = cfg.screenHeightDp.coerceAtLeast(1)
+    // Referência confortável (~DPI 420 em muitos celulares médios)
+    val refW = 400f
+    val refH = 820f
+    val wf = (w / refW).coerceIn(0.72f, 1.2f)
+    val hf = (h / refH).coerceIn(0.68f, 1.2f)
+    // Altura costuma ser o gargalo no Now Playing
+    val factor = minOf(wf, hf)
+    val compact = h < 720 || w < 340
+    return remember(w, h) { LayoutScale(w, h, factor, compact) }
 }

@@ -29,7 +29,7 @@ import java.io.FileOutputStream
  */
 object LyricsShareHelper {
 
-    private const val MAX_LINES = 15
+    private const val MAX_LINES = 24
 
     // Foto em 9:16 (1080x1920)
     private const val CARD_W = 1080
@@ -76,35 +76,15 @@ object LyricsShareHelper {
                     return@Thread
                 }
 
-                val authority = appCtx.packageName + ".updates"
-                val uri = try {
-                    FileProvider.getUriForFile(appCtx, authority, outFile)
-                } catch (e: Exception) {
-                    android.util.Log.e(TAG, "FileProvider falhou ($authority): ${e.message}", e)
-                    null
-                }
-
-                if (uri == null) {
-                    postToast(appCtx, "FileProvider falhou — enviando só texto")
-                    shareTextOnly(appCtx, track, clipped)
-                    return@Thread
-                }
-
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(
-                        Intent.EXTRA_TEXT,
-                        "${track.title} — ${track.artist}\n\n${clipped.joinToString("\n")}"
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    ShareImageActions.offerSaveOrShare(
+                        context = context,
+                        cacheFile = outFile,
+                        subdir = "Lyrics Cards",
+                        shareTitle = "Compartilhar foto do trecho",
+                        shareText = track.title + " — " + track.artist + "\n\n" + clipped.joinToString("\n")
                     )
-                    clipData = ClipData.newRawUri("lyrics", uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                val chooser = Intent.createChooser(intent, "Compartilhar foto do trecho").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                appCtx.startActivity(chooser)
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Falha ao gerar/compartilhar foto", e)
                 postToast(appCtx, "Erro: ${e.javaClass.simpleName}")
@@ -184,9 +164,9 @@ object LyricsShareHelper {
 
             // ---- Medidas gerais (ajustadas para 1080x1920) ----
             val pillH = 120f
-            val pillCenterY = h - 200f
-            val topMargin = 140f
-            val availBottom = pillCenterY - pillH / 2f - 70f
+            val pillCenterY = h - 160f
+            val topMargin = 100f
+            val availBottom = pillCenterY - pillH / 2f - 48f
             val maxCardH = availBottom - topMargin
 
             val cardLeft = 56f
@@ -197,7 +177,7 @@ object LyricsShareHelper {
             val contentLeft = cardLeft + pad
             val contentWidth = cardRight - cardLeft - pad * 2
 
-            // ---- Paints de texto (fonte da letra um pouco maior) ----
+            // ---- Paints de texto ----
             val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = textColorArgb
                 textSize = 44f
@@ -211,37 +191,67 @@ object LyricsShareHelper {
                 textSize = 32f
                 if (customTypeface != null) typeface = customTypeface
             }
+
+            // Card central expansível: usa quase toda a altura disponível até a pílula
+            // Fonte da letra reduz quando há muito texto para caber sem cortar.
+            val headerH = pad + coverSize + 32f + 52f // topo do card -> 1ª linha de letra
+            val paraGapBase = 10f
+            val minFont = 30f
+            val maxFont = 48f
             val lyricPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = textColorArgb
-                textSize = 48f
                 if (customTypeface != null) typeface = customTypeface
             }
             val lyricStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0xFF000000.toInt()
-                textSize = 48f
                 style = Paint.Style.STROKE
-                strokeWidth = 4.5f
                 strokeJoin = Paint.Join.ROUND
                 if (customTypeface != null) typeface = customTypeface
             }
 
-            // ---- Layout das letras (altura do card acompanha o conteúdo) ----
-            val lineHeight = 64f
-            val paraGap = 10f
-            val headerH = pad + coverSize + 32f + 52f // topo do card -> 1ª linha de letra
-            val laidOut = ArrayList<Pair<String, Float>>() // texto, baseline relativa ao topo do card
-            var yRel = headerH
-            outer@ for (line in lines) {
-                for (wline in wrapText(line, lyricPaint, contentWidth)) {
-                    if (yRel + lineHeight > maxCardH - pad) break@outer
-                    laidOut.add(wline to yRel)
-                    yRel += lineHeight
+            data class LyricLayout(
+                val lines: ArrayList<Pair<String, Float>>,
+                val neededH: Float,
+                val allFit: Boolean
+            )
+
+            fun layoutLyrics(fontSize: Float): LyricLayout {
+                lyricPaint.textSize = fontSize
+                lyricStrokePaint.textSize = fontSize
+                lyricStrokePaint.strokeWidth = (fontSize / 48f * 4.5f).coerceIn(2.5f, 4.5f)
+                val lineHeight = fontSize * 1.35f
+                val paraGap = paraGapBase * (fontSize / maxFont).coerceIn(0.7f, 1f)
+                val laid = ArrayList<Pair<String, Float>>()
+                var yRel = headerH
+                var allFit = true
+                outer@ for (line in lines) {
+                    for (wline in wrapText(line, lyricPaint, contentWidth)) {
+                        if (yRel + lineHeight > maxCardH - pad) {
+                            allFit = false
+                            break@outer
+                        }
+                        laid.add(wline to yRel)
+                        yRel += lineHeight
+                    }
+                    yRel += paraGap
                 }
-                yRel += paraGap
+                val last = laid.lastOrNull()?.second ?: headerH
+                return LyricLayout(laid, last + 24f + pad, allFit)
             }
-            val lastBaseline = laidOut.lastOrNull()?.second ?: headerH
-            val minCardH = 760f
-            val cardH = (lastBaseline + 24f + pad).coerceIn(minCardH, maxCardH)
+
+            // Fonte maior → menor até o texto inteiro caber no card expansível
+            var chosen = layoutLyrics(maxFont)
+            var font = maxFont
+            while (!chosen.allFit && font > minFont) {
+                font = (font - 2f).coerceAtLeast(minFont)
+                chosen = layoutLyrics(font)
+            }
+            val laidOut = chosen.lines
+            val neededH = chosen.neededH
+
+            val minCardH = 560f
+            // Card cresce com o conteúdo até maxCardH e fica centralizado na área útil
+            val cardH = neededH.coerceIn(minCardH, maxCardH)
             val cardTop = topMargin + (maxCardH - cardH) / 2f
             val cardBottom = cardTop + cardH
             val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
