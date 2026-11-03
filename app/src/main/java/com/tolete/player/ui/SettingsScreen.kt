@@ -49,6 +49,7 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -82,7 +83,7 @@ import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
 
-enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER }
+enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED }
 
 internal data class SettingsEntry(
     val icon: ImageVector,
@@ -195,7 +196,8 @@ fun SettingsScreen(
     changePresetOnSongChange: Boolean = true,
     onChangePresetOnSongChange: (Boolean) -> Unit = {},
     onManageMilkPresets: () -> Unit = {},
-    onOpenRecommendedPresets: () -> Unit = {}
+    onOpenRecommendedPresets: () -> Unit = {},
+    onPickDataFolder: () -> Unit = {}
 ) {
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
@@ -210,6 +212,7 @@ fun SettingsScreen(
         SettingsPage.PLAYER -> "Player"
         SettingsPage.BACKUP -> "Backup"
         SettingsPage.VISUALIZER -> "Visualizador (.milk)"
+        SettingsPage.ADVANCED -> "Avançado"
         else -> "Configurações"
     }
 
@@ -372,6 +375,9 @@ fun SettingsScreen(
                 onExport = onExportBackup,
                 onImport = onImportBackup
             )
+            SettingsPage.ADVANCED -> AdvancedPage(
+                onPickCustomFolder = onPickDataFolder
+            )
             SettingsPage.ABOUT -> AboutPage(
                 onOpenChangelog = { onNavigate(SettingsPage.CHANGELOG) },
                 onOpenLicenses = { onNavigate(SettingsPage.LICENSES) },
@@ -408,6 +414,11 @@ fun SettingsScreen(
                         "Backup",
                         "Exportar ou importar dados"
                     ) { onNavigate(SettingsPage.BACKUP) },
+                    SettingsEntry(
+                        Icons.Rounded.Settings,
+                        "Avançado",
+                        "Pasta de dados e opções avançadas"
+                    ) { onNavigate(SettingsPage.ADVANCED) },
                     SettingsEntry(
                         Icons.Rounded.Info,
                         "Sobre",
@@ -469,3 +480,108 @@ internal fun EntryRow(e: SettingsEntry) {
     }
 }
 
+
+@Composable
+private fun AdvancedPage(
+    onPickCustomFolder: () -> Unit
+) {
+    val context = LocalContext.current
+    var mode by remember {
+        mutableStateOf(com.tolete.player.data.LyronStorage.getMode())
+    }
+    val customPath = com.tolete.player.data.LyronStorage.getCustomRootPath()
+
+    fun applyMode(m: com.tolete.player.data.LyronStorage.Mode, path: String? = null) {
+        com.tolete.player.data.LyronStorage.setMode(context, m, path)
+        mode = m
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+    ) {
+        Text(
+            "Pasta de dados",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Escolha onde o app salva playlists, favoritos, histórico, fotos de artistas e infos.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.6f),
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        DataFolderOption(
+            selected = mode == com.tolete.player.data.LyronStorage.Mode.DEFAULT,
+            title = "Padrão",
+            subtitle = "emulated/0/Lyron",
+            onClick = { applyMode(com.tolete.player.data.LyronStorage.Mode.DEFAULT) }
+        )
+        DataFolderOption(
+            selected = mode == com.tolete.player.data.LyronStorage.Mode.INTERNAL,
+            title = "Interno",
+            subtitle = "Salva internamente no app. Imagens de letras → Pictures/Lyron · Vídeos → Movies/Lyron",
+            onClick = { applyMode(com.tolete.player.data.LyronStorage.Mode.INTERNAL) }
+        )
+        DataFolderOption(
+            selected = mode == com.tolete.player.data.LyronStorage.Mode.CUSTOM,
+            title = "Personalizado",
+            subtitle = customPath ?: "Toque para escolher uma pasta",
+            onClick = {
+                onPickCustomFolder()
+            }
+        )
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Ao mudar a pasta, dados existentes na pasta anterior não são movidos automaticamente. Use Backup se precisar transferir.",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f)
+        )
+    }
+}
+
+@Composable
+private fun DataFolderOption(
+    selected: Boolean,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (selected) Color.White.copy(0.12f) else Color.White.copy(0.05f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(if (selected) Color(0xFF7C5CFF) else Color.White.copy(0.2f)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (selected) {
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                )
+            }
+        }
+        Column(Modifier.padding(start = 14.dp).weight(1f)) {
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Color.White)
+            Text(subtitle, fontSize = 12.sp, color = Color.White.copy(0.55f))
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+}

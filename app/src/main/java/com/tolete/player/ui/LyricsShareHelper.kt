@@ -352,7 +352,7 @@ object LyricsShareHelper {
      * Desenha a pílula transparente (vidro) com o ícone da lira + "LYRON".
      * Tudo em Canvas — sem PNG pronto de marca d'água. Retorna false se o ícone não carregar.
      */
-    private fun drawBrandPill(
+    internal fun drawBrandPill(
         canvas: Canvas,
         context: Context,
         centerX: Float,
@@ -518,7 +518,7 @@ object LyricsShareHelper {
         return true
     }
 
-    private fun loadCoverBitmap(track: Track): Bitmap? {
+    internal fun loadCoverBitmap(track: Track): Bitmap? {
         val path = track.artPath ?: return null
         return try {
             val file = File(path)
@@ -542,7 +542,7 @@ object LyricsShareHelper {
      * aplica blur de caixa (3 passadas) e devolve o bitmap pequeno; quem desenha escala com filtro.
      * Blur real em resolução menor evita os "blocos" do antigo downscale/upscale.
      */
-    private fun buildBlurredBackground(src: Bitmap, w: Int, h: Int): Bitmap {
+    internal fun buildBlurredBackground(src: Bitmap, w: Int, h: Int): Bitmap {
         val dstRatio = w.toFloat() / h
         val srcRatio = src.width.toFloat() / src.height
         val cropW: Int

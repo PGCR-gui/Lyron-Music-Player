@@ -412,6 +412,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        com.tolete.player.data.LyronStorage.init(this)
         handleIncomingIntent(intent)
 
         if (Build.VERSION.SDK_INT >= 33 &&

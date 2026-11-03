@@ -450,8 +450,15 @@ class MusicScanner(private val context: Context) {
      */
     private fun saveArt(bytes: ByteArray): String? {
         return try {
-            val hash = MessageDigest.getInstance("SHA-1").digest(bytes)
-                .joinToString("") { "%02x".format(it) }
+            val digest = MessageDigest.getInstance("SHA-1").digest(bytes)
+            val hexChars = "0123456789abcdef"
+            val out = CharArray(digest.size * 2)
+            for (i in digest.indices) {
+                val v = digest[i].toInt() and 0xFF
+                out[i * 2] = hexChars[v ushr 4]
+                out[i * 2 + 1] = hexChars[v and 0x0F]
+            }
+            val hash = String(out)
             val file = File(artDir, "$hash.jpg")
 
             if (!file.exists()) {

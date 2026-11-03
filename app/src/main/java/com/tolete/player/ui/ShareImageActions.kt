@@ -33,18 +33,20 @@ object ShareImageActions {
         cacheFile: File,
         subdir: String,
         shareTitle: String,
-        shareText: String = ""
+        shareText: String = "",
+        mime: String = "image/png",
+        dialogTitle: String = "Foto gerada"
     ) {
         val act = findActivity(context)
         val appCtx = context.applicationContext
         val run = Runnable {
             val builder = if (act != null) AlertDialog.Builder(act) else AlertDialog.Builder(context)
             builder
-                .setTitle("Foto gerada")
+                .setTitle(dialogTitle)
                 .setItems(arrayOf("Salvar", "Compartilhar")) { _, which ->
                     when (which) {
                         0 -> saveToLyron(appCtx, cacheFile, subdir)
-                        1 -> shareFile(appCtx, cacheFile, shareTitle, shareText)
+                        1 -> shareFile(appCtx, cacheFile, shareTitle, shareText, mime)
                     }
                 }
                 .setNegativeButton("Cancelar", null)
@@ -68,15 +70,15 @@ object ShareImageActions {
         }
     }
 
-    fun shareFile(context: Context, file: File, title: String, text: String) {
+    fun shareFile(context: Context, file: File, title: String, text: String, mime: String = "image/png") {
         try {
             val authority = context.packageName + ".updates"
             val uri = FileProvider.getUriForFile(context, authority, file)
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "image/png"
+                type = mime
                 putExtra(Intent.EXTRA_STREAM, uri)
                 if (text.isNotBlank()) putExtra(Intent.EXTRA_TEXT, text)
-                clipData = ClipData.newRawUri("image", uri)
+                clipData = ClipData.newRawUri(if (mime.startsWith("video")) "video" else "image", uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

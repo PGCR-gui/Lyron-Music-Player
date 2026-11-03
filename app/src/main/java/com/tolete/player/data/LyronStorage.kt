@@ -1,13 +1,83 @@
 package com.tolete.player.data
 
+import android.content.Context
 import java.io.File
 
 /**
- * Dados persistentes em /storage/emulated/0/Lyron — fonte de verdade do app.
+ * Dados persistentes do app.
+ * Suporta três modos: Padrão (/storage/emulated/0/Lyron), Interno (filesDir/Lyron)
+ * e Personalizado (pasta escolhida pelo usuário).
  */
 object LyronStorage {
+    enum class Mode {
+        DEFAULT,   // /storage/emulated/0/Lyron
+        INTERNAL,  // context.filesDir/Lyron
+        CUSTOM     // pasta personalizada
+    }
+
+    @Volatile
+    private var appContext: Context? = null
+
+    @Volatile
+    private var currentMode: Mode = Mode.DEFAULT
+
+    @Volatile
+    private var customRootPath: String? = null
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        val prefs = context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+        currentMode = try {
+            Mode.valueOf(prefs.getString(KEY_DATA_MODE, Mode.DEFAULT.name) ?: Mode.DEFAULT.name)
+        } catch (_: Exception) {
+            Mode.DEFAULT
+        }
+        customRootPath = prefs.getString(KEY_CUSTOM_ROOT, null)
+    }
+
+    fun getMode(): Mode = currentMode
+
+    fun getCustomRootPath(): String? = customRootPath
+
+    fun setMode(context: Context, mode: Mode, customPath: String? = null) {
+        currentMode = mode
+        if (mode == Mode.CUSTOM && !customPath.isNullOrBlank()) {
+            customRootPath = customPath
+        }
+        context.getSharedPreferences("tolete", Context.MODE_PRIVATE).edit()
+            .putString(KEY_DATA_MODE, mode.name)
+            .apply {
+                if (mode == Mode.CUSTOM && !customPath.isNullOrBlank()) {
+                    putString(KEY_CUSTOM_ROOT, customPath)
+                }
+            }
+            .apply()
+        // Garante pastas
+        root
+        artistPhotos
+        artistInfos
+        albumInfos
+        playlistsDir
+    }
+
     val root: File
-        get() = File("/storage/emulated/0/Lyron").also { it.mkdirs() }
+        get() {
+            val dir = when (currentMode) {
+                Mode.DEFAULT -> File("/storage/emulated/0/Lyron")
+                Mode.INTERNAL -> {
+                    val ctx = appContext
+                    if (ctx != null) File(ctx.filesDir, "Lyron")
+                    else File("/storage/emulated/0/Lyron")
+                }
+                Mode.CUSTOM -> {
+                    val path = customRootPath
+                    if (!path.isNullOrBlank()) File(path)
+                    else File("/storage/emulated/0/Lyron")
+                }
+            }
+            dir.mkdirs()
+            return dir
+        }
 
     val artistPhotos: File
         get() = File(root, "artist_photos").also { ensureDir(it) }
@@ -26,6 +96,24 @@ object LyronStorage {
 
     val playbackHistory: File
         get() = File(root, "playback history.csv")
+
+    /** Pasta para imagens de letras geradas (share). Quando INTERNAL, usa Pictures/Lyron. */
+    fun lyricsImagesDir(context: Context): File {
+        return if (currentMode == Mode.INTERNAL) {
+            File("/storage/emulated/0/Pictures/Lyron").also { it.mkdirs() }
+        } else {
+            File(root, "Lyrics Images").also { it.mkdirs() }
+        }
+    }
+
+    /** Pasta para vídeos de letras gerados. Quando INTERNAL, usa Movies/Lyron. */
+    fun lyricsVideosDir(context: Context): File {
+        return if (currentMode == Mode.INTERNAL) {
+            File("/storage/emulated/0/Movies/Lyron").also { it.mkdirs() }
+        } else {
+            File(root, "Lyrics Videos").also { it.mkdirs() }
+        }
+    }
 
     private fun ensureDir(dir: File) {
         dir.mkdirs()
@@ -62,4 +150,7 @@ object LyronStorage {
         val safe = sanitizeFileName(playlistName)
         return File(playlistsDir, "${sanitizeFileName(playlistId)}_$safe.json")
     }
+
+    private const val KEY_DATA_MODE = "data_storage_mode"
+    private const val KEY_CUSTOM_ROOT = "data_storage_custom_root"
 }

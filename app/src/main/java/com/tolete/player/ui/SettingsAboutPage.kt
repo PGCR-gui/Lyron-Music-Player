@@ -270,6 +270,16 @@ Row(
 
 internal val changelogEntries = listOf(
     ChangelogEntry(
+        code = "229",
+        version = "0.69",
+        changes = listOf(
+            "Função nova: exportar vídeo",
+            "Tentativa de correção em gestos de voltar",
+            "Corrigido erro que impedia o uso da barra de navegação/mini-player na aba de Início",
+            "Nova configuração de escolha de onde os dados são salvos"
+        )
+    ),
+    ChangelogEntry(
         code = "227",
         version = "0.67",
         changes = listOf(

@@ -316,6 +316,10 @@ fun TolereApp(
     }
 
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+    // Pilha simples para o botão voltar do sistema restaurar a tela anterior
+    // (ex.: NowPlaying → Artista → voltar restaura NowPlaying)
+    var returnToNowPlaying by remember { mutableStateOf(false) }
+    var previousFilter by remember { mutableStateOf<MusicViewModel.Filter?>(null) }
     var showFileManager by remember { mutableStateOf(false) }
     var fileManagerMode by remember { mutableStateOf(FileManagerMode.BROWSE) }
     var fileManagerInitialPath by remember { mutableStateOf<String?>(null) }
@@ -369,18 +373,49 @@ fun TolereApp(
                 else if (available.y > 6f) navBarVisible = true
                 return Offset.Zero
             }
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // Se ainda sobra scroll para baixo no pós (chegou no topo), mostra a barra
+                if (available.y > 0f) navBarVisible = true
+                return Offset.Zero
+            }
+        }
+    }
+    // Na aba Início o conteúdo não rola o suficiente; garante barra visível
+    LaunchedEffect(tab, filter) {
+        if (tab == MusicViewModel.Tab.HOME && filter == null) {
+            navBarVisible = true
         }
     }
 
     BackHandler(enabled = selectionMode) { selectedTrackIds = emptySet() }
     BackHandler(enabled = isSearching) { vm.closeSearch() }
-    BackHandler(enabled = filter != null && !isSearching) { vm.clearFilter() }
+    BackHandler(enabled = filter != null && !isSearching) {
+        val prev = previousFilter
+        if (prev != null) {
+            previousFilter = null
+            when (prev.tab) {
+                MusicViewModel.Tab.ARTISTS -> vm.openArtist(prev.key)
+                MusicViewModel.Tab.ALBUMS -> vm.openAlbum(prev.key)
+                MusicViewModel.Tab.PLAYLISTS -> vm.openPlaylist(prev.key)
+                else -> {
+                    vm.clearFilter()
+                    if (prev.tab != null) vm.setTab(prev.tab)
+                }
+            }
+        } else if (returnToNowPlaying) {
+            returnToNowPlaying = false
+            vm.clearFilter()
+            showNowPlaying = true
+        } else {
+            vm.clearFilter()
+        }
+    }
     BackHandler(enabled = settingsPage != SettingsPage.NONE) {
         settingsPage = when (settingsPage) {
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
                             SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
-            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
+            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.ADVANCED, SettingsPage.VISUALIZER -> SettingsPage.MENU
             SettingsPage.CHANGELOG -> SettingsPage.ABOUT
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
             else -> SettingsPage.NONE
@@ -482,7 +517,27 @@ fun TolereApp(
                                     else -> tabTitle(tab)
                                 },
                                 showBack = filter != null,
-                                onBack = vm::clearFilter,
+                                onBack = {
+                                    val prev = previousFilter
+                                    if (prev != null) {
+                                        previousFilter = null
+                                        when (prev.tab) {
+                                            MusicViewModel.Tab.ARTISTS -> vm.openArtist(prev.key)
+                                            MusicViewModel.Tab.ALBUMS -> vm.openAlbum(prev.key)
+                                            MusicViewModel.Tab.PLAYLISTS -> vm.openPlaylist(prev.key)
+                                            else -> {
+                                                vm.clearFilter()
+                                                if (prev.tab != null) vm.setTab(prev.tab)
+                                            }
+                                        }
+                                    } else if (returnToNowPlaying) {
+                                        returnToNowPlaying = false
+                                        vm.clearFilter()
+                                        showNowPlaying = true
+                                    } else {
+                                        vm.clearFilter()
+                                    }
+                                },
                                 onOpenSearch = vm::openSearch,
                                 onOpenHelp = { showHelp = true },
                                 onOpenSettings = { settingsPage = SettingsPage.MENU },
@@ -672,7 +727,11 @@ fun TolereApp(
                                         accent = appColors.accent,
                                         selectedIds = selectedTrackIds,
                                         selectionMode = selectionMode,
-                                        onOpenAlbum = { vm.openAlbum(it) },
+                                        onOpenAlbum = {
+                                            previousFilter = filter
+                                            returnToNowPlaying = false
+                                            vm.openAlbum(it)
+                                        },
                                         onPlayAll = { vm.playTracks(artistTracks, 0) },
                                         onShuffle = { vm.playTracks(artistTracks.shuffled(), 0) },
                                         onPlayTracks = { list, index ->
@@ -733,7 +792,11 @@ fun TolereApp(
                                         onShuffle = {
                                             vm.playTracks(albumTracks.shuffled(), 0)
                                         },
-                                        onOpenArtist = { name -> vm.openArtist(name) },
+                                        onOpenArtist = { name ->
+                                            previousFilter = filter
+                                            returnToNowPlaying = false
+                                            vm.openArtist(name)
+                                        },
                                         onTrackClick = { index, track ->
                                             if (selectionMode) {
                                                 selectedTrackIds = if (track.id in selectedTrackIds)
@@ -994,7 +1057,11 @@ fun TolereApp(
 
                 LiquidGlassNavigation(
                     currentTab = tab,
-                    onTabSelected = vm::setTab,
+                    onTabSelected = { t ->
+                        previousFilter = null
+                        returnToNowPlaying = false
+                        vm.setTab(t)
+                    },
                     backdrop = backdrop
                 )
             }
@@ -1167,7 +1234,20 @@ fun TolereApp(
                     shareBgColor = shareBgColor,
                     onShareBgColorChange = vm::setShareBgColor,
                     shareBrandColor = shareBrandColor,
-                    onShareBrandColorChange = vm::setShareBrandColor
+                    onShareBrandColorChange = vm::setShareBrandColor,
+                    onPickDataFolder = {
+                        fileManagerMode = FileManagerMode.PICK_FOLDER
+                        fileManagerInitialPath = com.tolete.player.data.LyronStorage.getCustomRootPath()
+                            ?: "/storage/emulated/0"
+                        fileManagerFolderCallback = { path ->
+                            com.tolete.player.data.LyronStorage.setMode(
+                                rootContext,
+                                com.tolete.player.data.LyronStorage.Mode.CUSTOM,
+                                path
+                            )
+                        }
+                        showFileManager = true
+                    }
                 )
             }
 
@@ -1319,10 +1399,14 @@ fun TolereApp(
                         },
                         artistNames = remember(current.artist, librarySettings) { vm.artistNamesOf(current) },
                         onOpenArtist = { name ->
+                            returnToNowPlaying = true
+                            previousFilter = null
                             showNowPlaying = false
                             vm.openArtist(name)
                         },
                         onOpenAlbum = {
+                            returnToNowPlaying = true
+                            previousFilter = null
                             showNowPlaying = false
                             vm.openAlbum(current.album)
                         },

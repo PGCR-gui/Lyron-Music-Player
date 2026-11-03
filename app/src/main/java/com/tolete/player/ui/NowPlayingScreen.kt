@@ -113,6 +113,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -159,6 +160,8 @@ import coil.request.ImageRequest
 import com.tolete.player.R
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
+import com.tolete.player.video.LyricsVideoGenerator
+import com.tolete.player.video.LyricsVideoStyle
 import com.tolete.player.visualizer.MilkVisualizer
 import com.tolete.player.visualizer.ProjectMNative
 import kotlinx.coroutines.delay
@@ -391,6 +394,8 @@ fun NowPlayingScreen(
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
     var showLyricsSearch by remember { mutableStateOf(false) }
     var showFullLyrics by remember { mutableStateOf(false) }
+    var showVideoDialog by remember { mutableStateOf(false) }
+    var videoProgressHidden by remember { mutableStateOf(false) }
 
     // Troca de preset ao mudar de música
     LaunchedEffect(track.id, changePresetOnSongChange, showVisualizer) {
@@ -675,6 +680,30 @@ fun NowPlayingScreen(
                                         android.widget.Toast.LENGTH_SHORT
                                     ).show()
                                     LyricsShareHelper.shareSnippet(context, track, linesToShare)
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Gerar vídeo com letra", color = MenuDarkText)
+                            },
+                            onClick = {
+                                showMenu = false
+                                when {
+                                    LyricsVideoGenerator.isRunning() -> {
+                                        videoProgressHidden = false
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Já existe um vídeo sendo gerado",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                    synced.isEmpty() -> android.widget.Toast.makeText(
+                                        context,
+                                        "O vídeo precisa de uma letra sincronizada",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                    else -> showVideoDialog = true
                                 }
                             }
                         )
@@ -1233,6 +1262,81 @@ fun NowPlayingScreen(
                         modifier = Modifier.size(24.dp)
                     )
                 }
+            }
+        }
+
+        // ---- Vídeo com letra ----
+        DisposableEffect(Unit) {
+            LyricsVideoGenerator.attachUi()
+            onDispose { LyricsVideoGenerator.detachUi() }
+        }
+        val videoState by LyricsVideoGenerator.state.collectAsState()
+        LaunchedEffect(videoState) {
+            when (val vs = videoState) {
+                is LyricsVideoGenerator.State.Done -> {
+                    ShareImageActions.offerSaveOrShare(
+                        context = context,
+                        cacheFile = vs.file,
+                        subdir = "Lyrics Videos",
+                        shareTitle = "Compartilhar vídeo",
+                        shareText = vs.trackTitle + " — " + vs.artist,
+                        mime = "video/mp4",
+                        dialogTitle = "Vídeo gerado"
+                    )
+                    LyricsVideoGenerator.consume()
+                }
+                is LyricsVideoGenerator.State.Saved -> {
+                    android.widget.Toast.makeText(
+                        context, "Vídeo salvo em Lyron/Lyrics Videos", android.widget.Toast.LENGTH_LONG
+                    ).show()
+                    LyricsVideoGenerator.consume()
+                }
+                is LyricsVideoGenerator.State.Failed -> {
+                    android.widget.Toast.makeText(context, vs.message, android.widget.Toast.LENGTH_LONG).show()
+                    LyricsVideoGenerator.consume()
+                }
+                else -> Unit
+            }
+        }
+
+        if (showVideoDialog) {
+            LyricsVideoDialog(
+                track = track,
+                currentPositionMs = position,
+                onDismiss = { showVideoDialog = false },
+                onGenerate = { startMs, endMs, shortSide, aspect, fps ->
+                    showVideoDialog = false
+                    videoProgressHidden = false
+                    LyricsVideoGenerator.start(
+                        context = context,
+                        track = track,
+                        lyrics = synced,
+                        options = LyricsVideoGenerator.Options(
+                            startMs = startMs,
+                            endMs = endMs,
+                            shortSide = shortSide,
+                            aspect = aspect,
+                            fps = fps,
+                            style = LyricsVideoStyle(
+                                fontPath = lyricsFontPath,
+                                primaryColor = lyricsPrimaryColor,
+                                secondaryColor = lyricsSecondaryColor,
+                                borderColor = lyricsBorderColor,
+                                borderWidth = lyricsBorderWidth
+                            )
+                        )
+                    )
+                }
+            )
+        }
+
+        (videoState as? LyricsVideoGenerator.State.Running)?.let { running ->
+            if (!videoProgressHidden) {
+                LyricsVideoProgressDialog(
+                    running = running,
+                    onCancel = { LyricsVideoGenerator.cancel() },
+                    onHide = { videoProgressHidden = true }
+                )
             }
         }
 

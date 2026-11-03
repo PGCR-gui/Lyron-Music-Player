@@ -46,7 +46,7 @@ fun HelpScreen(
     onFinishedFirstRun: (() -> Unit)? = null
 ) {
     var page by remember { mutableIntStateOf(0) }
-    val totalPages = 14
+    val totalPages = 15
 
     Box(
         Modifier
@@ -79,13 +79,14 @@ fun HelpScreen(
             9 -> HelpPageTagEditor(onNext = { page = 10 }, onBack = { page = 8 })
             10 -> HelpPageLibrarySettings(onNext = { page = 11 }, onBack = { page = 9 })
             11 -> HelpPageOrganize(onNext = { page = 12 }, onBack = { page = 10 })
-            12 -> HelpPageClosingNote(onNext = { page = 13 }, onBack = { page = 11 })
-            13 -> HelpPageFinal(
+            12 -> HelpPageLyricsVideo(onNext = { page = 13 }, onBack = { page = 11 })
+            13 -> HelpPageClosingNote(onNext = { page = 14 }, onBack = { page = 12 })
+            14 -> HelpPageFinal(
                 onDone = {
                     onFinishedFirstRun?.invoke()
                     onClose()
                 },
-                onBack = { page = 12 }
+                onBack = { page = 13 }
             )
         }
 
@@ -507,7 +508,7 @@ private fun HelpPageNowPlaying(onNext: () -> Unit, onBack: () -> Unit) {
                 )
                 OptionalHelpDrawable("help_foto_1")
                 Text(
-                    "1° - A parte de cima. Da esquerda pra direita, um botão de minimiza a tela, o nome dela e do menu de três pontos. Logo abaixo, um mini-card com algumas informações sobre o arquivo de Música, que ao clicar abre mais informações.\n\n" +
+                    "1° - A parte de cima. Da esquerda pra direita, um botão de minimiza a tela, o nome da tela e o botão do menu de três pontos. Logo abaixo, um mini-card com algumas informações sobre o arquivo de Música, que ao clicar abre mais informações.\n\n" +
                     "2° - A exibição da imagem da capa da música, com um botão de favoritar e desfavoritar. Clicar diretamente na imagem ativa o Visualizador.\n\n" +
                     "3° - Abaixo da capa, há o mostrador de letras, que quando clicado abre o visualizador de letras em tela cheia.\n\n" +
                     "4° - Controles padrão de um reprodutor de música. Acima a seekbar, e abaixo da esquerda para a direita: Aleatório, Repetir (Quando colorido: Repete 1 Música, Quando cinza: repete a fila inteira), voltar Música, play/pausa, pular música, Equalizador e Fila de Reprodução.",
@@ -693,6 +694,58 @@ private fun HelpPageOrganize(onNext: () -> Unit, onBack: () -> Unit) {
                 Text(
                     "Uma das funções mais interessantes. Aqui você pode renomear todas as músicas de uma pasta e suas subpastas para o padrão que você escolher e também pode mover todas as músicas de uma pasta escolhida e suas subpastas para uma pasta que o usuário escolher.",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HelpPageLyricsVideo(onNext: () -> Unit, onBack: () -> Unit) {
+    var show by remember { mutableStateOf(false) }
+    var nav by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
+    val matcha = helpFont(R.font.matcha_style)
+    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+        AnimatedVisibility(show, enter = fadeIn(tween(500)) + scaleIn(tween(500), initialScale = 0.9f)) {
+            Column {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    Text(
+                        "Gerador de vídeo com letras",
+                        fontFamily = matcha,
+                        fontSize = 24.sp,
+                        color = Color.White,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF7C5CFF))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text("Novo", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Text(
+                    "Agora você pode gerar vídeos de letras diretamente do app! E é muito simples, tudo que você precisa fazer é:",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                OptionalHelpDrawable("help_video")
+                Text(
+                    "Abrir o menu de três pontos e clicar em gerar vídeo com letra. Ao clicar, abrirá essa tela:",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+                OptionalHelpDrawable("help_generate")
+                Text(
+                    "Aqui você poderá escolher entre gerar o vídeo de um trecho ou da Música inteira, a proporção, fps e resolução do vídeo.\n\n(Taxas de frame e resoluções maiores podem causar maior demora para gerar vídeo, principalmente em dispositivos mais fracos. Celulares mais antigos ou mais fracos podem não ser compatíveis com a geração de vídeo em 1440p)",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
             }
         }
