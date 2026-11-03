@@ -525,7 +525,7 @@ private fun AdvancedPage(
         DataFolderOption(
             selected = mode == com.tolete.player.data.LyronStorage.Mode.INTERNAL,
             title = "Interno",
-            subtitle = "Salva internamente no app. Imagens de letras → Pictures/Lyron · Vídeos → Movies/Lyron",
+            subtitle = "Salva internamente no app. Trechos de letra exportados continuam sendo salvos em Lyron/Lyrics Cards e vídeos em Lyron/Lyrics Videos.",
             onClick = { applyMode(com.tolete.player.data.LyronStorage.Mode.INTERNAL) }
         )
         DataFolderOption(
