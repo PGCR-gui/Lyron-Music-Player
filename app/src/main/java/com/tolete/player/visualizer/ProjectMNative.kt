@@ -24,5 +24,8 @@ object ProjectMNative {
     external fun nativeAddPcm(handle: Long, interleavedStereo: FloatArray, frames: Int)
     external fun nativeLoadPreset(handle: Long, path: String, smooth: Boolean)
     external fun nativeRender(handle: Long)
+
+    /** Define o tempo do frame (s) para renderização offline. false = a lib não tem essa função. */
+    external fun nativeSetFrameTime(handle: Long, seconds: Double): Boolean
     external fun nativeDestroy(handle: Long)
 }

@@ -48,7 +48,7 @@ fun EqualizerSheet(
     val bands by EqualizerManager.bands.collectAsState()
     val presetName by EqualizerManager.presetName.collectAsState()
 
-    val accent = Color(0xFF69F0AE)
+    val accent = menuPalette(LocalAppColors.current).accent
     val glassBg = Brush.verticalGradient(
         listOf(
             Color.White.copy(alpha = 0.14f),
@@ -60,9 +60,10 @@ fun EqualizerSheet(
         listOf(Color.White.copy(0.45f), Color.White.copy(0.10f), Color.White.copy(0.03f))
     )
 
-    ModalBottomSheet(
+    AppMenuTheme {
+ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF0A0A0F).copy(alpha = 0.97f),
+        containerColor = LocalMenuPalette.current.container,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         dragHandle = {
             Box(
@@ -71,7 +72,7 @@ fun EqualizerSheet(
                     .width(40.dp)
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Color.White.copy(0.35f))
+                    .background(LocalMenuPalette.current.content.copy(0.35f))
             )
         }
     ) {
@@ -97,21 +98,21 @@ fun EqualizerSheet(
                     "Equalizador",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White,
+                    color = LocalMenuPalette.current.content,
                     modifier = Modifier.padding(start = 10.dp).weight(1f)
                 )
                 Switch(
                     checked = enabled,
                     onCheckedChange = { EqualizerManager.setEnabled(it, context) },
                     colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
+                        checkedThumbColor = LocalMenuPalette.current.content,
                         checkedTrackColor = accent,
-                        uncheckedThumbColor = Color.White.copy(0.7f),
-                        uncheckedTrackColor = Color.White.copy(0.2f)
+                        uncheckedThumbColor = LocalMenuPalette.current.content.copy(0.7f),
+                        uncheckedTrackColor = LocalMenuPalette.current.content.copy(0.2f)
                     )
                 )
                 IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = Color.White.copy(0.7f))
+                    Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = LocalMenuPalette.current.content.copy(0.7f))
                 }
             }
 
@@ -119,7 +120,7 @@ fun EqualizerSheet(
             Text(
                 if (enabled) "Preset: $presetName" else "Desligado",
                 fontSize = 13.sp,
-                color = Color.White.copy(0.55f)
+                color = LocalMenuPalette.current.content.copy(0.55f)
             )
 
             Spacer(Modifier.height(16.dp))
@@ -129,7 +130,7 @@ fun EqualizerSheet(
                 "Presets",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Color.White.copy(0.55f),
+                color = LocalMenuPalette.current.content.copy(0.55f),
                 modifier = Modifier.padding(bottom = 8.dp)
             )
             Row(
@@ -143,10 +144,10 @@ fun EqualizerSheet(
                     Box(
                         Modifier
                             .clip(RoundedCornerShape(20.dp))
-                            .background(if (selected) accent.copy(0.25f) else Color.White.copy(0.08f))
+                            .background(if (selected) accent.copy(0.25f) else LocalMenuPalette.current.content.copy(0.08f))
                             .border(
                                 width = 1.dp,
-                                color = if (selected) accent else Color.White.copy(0.12f),
+                                color = if (selected) accent else LocalMenuPalette.current.content.copy(0.12f),
                                 shape = RoundedCornerShape(20.dp)
                             )
                             .clickable { EqualizerManager.applyPreset(name, context) }
@@ -155,7 +156,7 @@ fun EqualizerSheet(
                         Text(
                             name,
                             fontSize = 13.sp,
-                            color = if (selected) accent else Color.White.copy(0.85f),
+                            color = if (selected) accent else LocalMenuPalette.current.content.copy(0.85f),
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                         )
                     }
@@ -169,7 +170,7 @@ fun EqualizerSheet(
                 "Bandas",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = Color.White.copy(0.55f),
+                color = LocalMenuPalette.current.content.copy(0.55f),
                 modifier = Modifier.padding(bottom = 12.dp)
             )
 
@@ -218,10 +219,11 @@ fun EqualizerSheet(
                 onClick = { EqualizerManager.applyPreset("Flat", context) },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
-                Text("Resetar (Flat)", color = Color.White.copy(0.75f))
+                Text("Resetar (Flat)", color = LocalMenuPalette.current.content.copy(0.75f))
             }
         }
     }
+}
 }
 
 @Composable
@@ -244,7 +246,7 @@ private fun BandBar(
         Text(
             String.format("%+.0f", labelDb),
             fontSize = 10.sp,
-            color = if (enabled) accent else Color.White.copy(0.4f),
+            color = if (enabled) accent else LocalMenuPalette.current.content.copy(0.4f),
             fontWeight = FontWeight.Medium
         )
         Spacer(Modifier.height(6.dp))
@@ -254,8 +256,8 @@ private fun BandBar(
                 .weight(1f)
                 .width(24.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color.White.copy(0.10f))
-                .border(1.dp, Color.White.copy(0.12f), RoundedCornerShape(12.dp))
+                .background(LocalMenuPalette.current.content.copy(0.10f))
+                .border(1.dp, LocalMenuPalette.current.content.copy(0.12f), RoundedCornerShape(12.dp))
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
                     // Posição ABSOLUTA do dedo: o slider acompanha o toque/arrasto sem acumular erro
@@ -286,7 +288,7 @@ private fun BandBar(
                             )
                         } else {
                             Brush.verticalGradient(
-                                listOf(Color.White.copy(0.22f), Color.White.copy(0.08f))
+                                listOf(LocalMenuPalette.current.content.copy(0.22f), LocalMenuPalette.current.content.copy(0.08f))
                             )
                         }
                     )
@@ -297,7 +299,7 @@ private fun BandBar(
         Text(
             freqLabel,
             fontSize = 10.sp,
-            color = Color.White.copy(0.5f),
+            color = LocalMenuPalette.current.content.copy(0.5f),
             textAlign = TextAlign.Center,
             maxLines = 1
         )

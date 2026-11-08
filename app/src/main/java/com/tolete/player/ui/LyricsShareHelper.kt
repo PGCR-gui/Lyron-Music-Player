@@ -19,6 +19,8 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import androidx.core.content.res.ResourcesCompat
 import com.tolete.player.R
+import com.tolete.player.data.LyricAnimation
+import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
 import java.io.File
 import java.io.FileOutputStream
@@ -31,14 +33,22 @@ object LyricsShareHelper {
 
     private const val MAX_LINES = 24
 
+    /** Escala da palavra com efeito {des} na foto (mesmo valor do player e do vídeo). */
+    private const val DES_SCALE = 1.24f
+
     // Foto em 9:16 (1080x1920)
     private const val CARD_W = 1080
     private const val CARD_H = 1920
     private const val TAG = "LyricsShareHelper"
 
-    fun shareSnippet(context: Context, track: Track, lines: List<String>) {
+    /**
+     * Recebe as linhas completas (não só o texto) para a foto poder aplicar os efeitos de palavra:
+     * hoje o destaque {des} (palavra maior, com a fonte de ênfase). Vale também para linhas de tradução.
+     */
+    fun shareSnippet(context: Context, track: Track, lines: List<LyricLine>) {
         val appCtx = context.applicationContext
-        val clipped = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_LINES)
+        val clippedLines = lines.filter { it.text.isNotBlank() }.take(MAX_LINES)
+        val clipped = clippedLines.map { it.text.trim() }
         if (clipped.isEmpty()) {
             Toast.makeText(appCtx, "Nenhuma linha para compartilhar", Toast.LENGTH_SHORT).show()
             return
@@ -49,11 +59,13 @@ object LyricsShareHelper {
         val fontPath = prefs.getString("share_font_path", null)
         val textColor = prefs.getInt("share_text_color", 0xFFF5F5FA.toInt())
         val brandColor = prefs.getInt("share_brand_color", 0xFFFFFFFF.toInt())
+        // Fonte de ênfase configurada em Aparência (usada nas palavras com {des})
+        val emphasisFontPath = prefs.getString("lyrics_emphasis_font_path", null)
 
         // Render + I/O em thread de fundo; UI callback na main
         Thread {
             try {
-                val bmp = renderCard(appCtx, track, clipped, fontPath, textColor, brandColor)
+                val bmp = renderCard(appCtx, track, clippedLines, fontPath, textColor, brandColor, emphasisFontPath)
                 if (bmp == null) {
                     postToast(appCtx, "Falha ao gerar a imagem")
                     shareTextOnly(appCtx, track, clipped)
@@ -121,10 +133,11 @@ object LyricsShareHelper {
     private fun renderCard(
         context: Context,
         track: Track,
-        lines: List<String>,
+        lines: List<LyricLine>,
         fontPath: String? = null,
         textColorArgb: Int = 0xFFF5F5FA.toInt(),
-        brandColorArgb: Int = 0xFFFFFFFF.toInt()
+        brandColorArgb: Int = 0xFFFFFFFF.toInt(),
+        emphasisFontPath: String? = null
     ): Bitmap? {
         return try {
             val w = CARD_W
@@ -208,34 +221,107 @@ object LyricsShareHelper {
                 strokeJoin = Paint.Join.ROUND
                 if (customTypeface != null) typeface = customTypeface
             }
+            // Palavras com {des}: fonte de ênfase (ou a da foto, se não houver) em tamanho maior
+            val emphasisTypeface: Typeface? = resolveTypeface(context, emphasisFontPath) ?: customTypeface
+            val emphasisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = textColorArgb
+                if (emphasisTypeface != null) typeface = emphasisTypeface
+            }
+            val emphasisStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFF000000.toInt()
+                style = Paint.Style.STROKE
+                strokeJoin = Paint.Join.ROUND
+                if (emphasisTypeface != null) typeface = emphasisTypeface
+            }
 
+            // Trecho de uma linha na foto: [x] relativo ao início do texto; des = palavra em destaque
+            class PhotoSeg(val text: String, val x: Float, val des: Boolean)
+            class PhotoRow(val segs: List<PhotoSeg>, val yRel: Float)
             data class LyricLayout(
-                val lines: ArrayList<Pair<String, Float>>,
+                val rows: ArrayList<PhotoRow>,
                 val neededH: Float,
                 val allFit: Boolean
             )
+
+            /**
+             * Quebra uma linha que tem palavra {des} em linhas visuais, medindo a palavra em destaque
+             * com a fonte de ênfase ampliada para que ela não encoste nas vizinhas.
+             */
+            fun wrapWithEmphasis(line: LyricLine): List<List<PhotoSeg>> {
+                val out = ArrayList<List<PhotoSeg>>()
+                var cur = ArrayList<PhotoSeg>()
+                var x = 0f
+                // devolve (largura do espaço inicial, largura total) do trecho
+                fun measureSeg(t: String, des: Boolean): Pair<Float, Float> {
+                    if (!des) return 0f to lyricPaint.measureText(t)
+                    val core = t.trim()
+                    val lead = t.substring(0, t.length - t.trimStart().length)
+                    val trail = t.substring(t.trimEnd().length)
+                    val leadW = if (lead.isEmpty()) 0f else lyricPaint.measureText(lead)
+                    val trailW = if (trail.isEmpty() || core.isEmpty()) 0f else lyricPaint.measureText(trail)
+                    return leadW to (leadW + emphasisPaint.measureText(core) + trailW)
+                }
+                for ((i, w) in line.words.withIndex()) {
+                    var t = w.text
+                    if (i > 0 && !w.isSyllable) {
+                        val prev = line.words[i - 1].text
+                        val needSpace = prev.isNotEmpty() && t.isNotEmpty() &&
+                            !prev.last().isWhitespace() && !t.first().isWhitespace() &&
+                            !",.;:!?)]}".contains(t.first())
+                        if (needSpace) t = " $t"
+                    }
+                    val des = w.animation == LyricAnimation.DES
+                    if (cur.isEmpty()) t = t.trimStart()
+                    var (lead, total) = measureSeg(t, des)
+                    if (cur.isNotEmpty() && x + total > contentWidth) {
+                        out.add(cur)
+                        cur = ArrayList()
+                        x = 0f
+                        t = t.trimStart()
+                        val m = measureSeg(t, des)
+                        lead = m.first
+                        total = m.second
+                    }
+                    cur.add(PhotoSeg(if (des) t.trim() else t, x + lead, des))
+                    x += total
+                }
+                if (cur.isNotEmpty()) out.add(cur)
+                return out.ifEmpty { listOf(listOf(PhotoSeg(line.text, 0f, false))) }
+            }
 
             fun layoutLyrics(fontSize: Float): LyricLayout {
                 lyricPaint.textSize = fontSize
                 lyricStrokePaint.textSize = fontSize
                 lyricStrokePaint.strokeWidth = (fontSize / 48f * 4.5f).coerceIn(2.5f, 4.5f)
+                emphasisPaint.textSize = fontSize * DES_SCALE
+                emphasisStrokePaint.textSize = fontSize * DES_SCALE
+                emphasisStrokePaint.strokeWidth = lyricStrokePaint.strokeWidth * 1.15f
                 val lineHeight = fontSize * 1.35f
                 val paraGap = paraGapBase * (fontSize / maxFont).coerceIn(0.7f, 1f)
-                val laid = ArrayList<Pair<String, Float>>()
+                val laid = ArrayList<PhotoRow>()
                 var yRel = headerH
                 var allFit = true
                 outer@ for (line in lines) {
-                    for (wline in wrapText(line, lyricPaint, contentWidth)) {
-                        if (yRel + lineHeight > maxCardH - pad) {
+                    val visualRows: List<List<PhotoSeg>> =
+                        if (line.words.any { it.animation == LyricAnimation.DES }) {
+                            wrapWithEmphasis(line)
+                        } else {
+                            wrapText(line.text.trim(), lyricPaint, contentWidth)
+                                .map { listOf(PhotoSeg(it, 0f, false)) }
+                        }
+                    for (segs in visualRows) {
+                        // Linha com destaque ganha um respiro extra acima, porque o texto cresce
+                        val extraTop = if (segs.any { it.des }) fontSize * (DES_SCALE - 1f) * 0.9f else 0f
+                        if (yRel + extraTop + lineHeight > maxCardH - pad) {
                             allFit = false
                             break@outer
                         }
-                        laid.add(wline to yRel)
-                        yRel += lineHeight
+                        laid.add(PhotoRow(segs, yRel + extraTop))
+                        yRel += extraTop + lineHeight
                     }
                     yRel += paraGap
                 }
-                val last = laid.lastOrNull()?.second ?: headerH
+                val last = laid.lastOrNull()?.yRel ?: headerH
                 return LyricLayout(laid, last + 24f + pad, allFit)
             }
 
@@ -246,7 +332,7 @@ object LyricsShareHelper {
                 font = (font - 2f).coerceAtLeast(minFont)
                 chosen = layoutLyrics(font)
             }
-            val laidOut = chosen.lines
+            val laidOut = chosen.rows
             val neededH = chosen.neededH
 
             val minCardH = 560f
@@ -317,10 +403,18 @@ object LyricsShareHelper {
             canvas.drawLine(contentLeft, divY, cardRight - pad, divY, divPaint)
 
             // ---- Letras (borda preta + preenchimento) ----
-            for ((text, rel) in laidOut) {
-                val y = cardTop + rel
-                canvas.drawText(text, contentLeft, y, lyricStrokePaint)
-                canvas.drawText(text, contentLeft, y, lyricPaint)
+            for (row in laidOut) {
+                val y = cardTop + row.yRel
+                for (seg in row.segs) {
+                    val x = contentLeft + seg.x
+                    if (seg.des) {
+                        canvas.drawText(seg.text, x, y, emphasisStrokePaint)
+                        canvas.drawText(seg.text, x, y, emphasisPaint)
+                    } else {
+                        canvas.drawText(seg.text, x, y, lyricStrokePaint)
+                        canvas.drawText(seg.text, x, y, lyricPaint)
+                    }
+                }
             }
 
             if (coverSrc != null && !coverSrc.isRecycled) coverSrc.recycle()
@@ -344,6 +438,24 @@ object LyricsShareHelper {
             bmp
         } catch (e: Exception) {
             android.util.Log.e(TAG, "renderCard falhou", e)
+            null
+        }
+    }
+
+    /** Fonte embutida (builtin:...) ou arquivo; null = padrão do sistema. */
+    private fun resolveTypeface(context: Context, key: String?): Typeface? {
+        if (key.isNullOrBlank() || key == "system") return null
+        BuiltInFonts.findEmbedded(key)?.let { emb ->
+            return try {
+                ResourcesCompat.getFont(context, emb.resId)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return try {
+            val f = File(key)
+            if (f.isFile) Typeface.createFromFile(f) else null
+        } catch (_: Exception) {
             null
         }
     }

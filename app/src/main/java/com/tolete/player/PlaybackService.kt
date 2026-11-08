@@ -27,8 +27,7 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
-import androidx.media3.exoplayer.audio.TeeAudioProcessor
-import com.tolete.player.visualizer.AudioTap
+import com.tolete.player.visualizer.AudioTapSink
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -39,6 +38,14 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.tolete.player.data.FavoritesBridge
 import com.tolete.player.data.FavoritesFile
+import com.tolete.player.data.LastFmScrobbler
+import com.tolete.player.data.LibraryCache
+import com.tolete.player.data.Track
+import com.tolete.player.data.ScrobbleEdits
+import com.tolete.player.scrobble.ScrobbleNotifier
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -124,26 +131,44 @@ class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     /** Cancela notificação/serviço após 7 min seguidos sem reprodução. */
     private var idleStopJob: Job? = null
+    /** Incrementado quando o estado do player muda, para redesenhar a notificação do scrobbler. */
+    private val scrobbleTick = MutableStateFlow(0)
+    /** Índice id -> Track (do cache da biblioteca) para o serviço saber qual faixa está tocando sem depender da UI. */
+    @Volatile private var trackIndex: Map<String, Track> = emptyMap()
+    private var scrobbleSyncJob: Job? = null
 
     private val toggleFavoriteCommand = SessionCommand(ACTION_TOGGLE_FAVORITE, Bundle.EMPTY)
     private val closeAppCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
     private val setSpeedCommand = SessionCommand(ACTION_SET_SPEED, Bundle.EMPTY)
 
+    /** Fade de play/pause e fade-in de faixa nova. */
     private var fadeVolumeJob: Job? = null
+    /** Fade de saída no fim da faixa (crossfade). Separado para poder ser cancelado em seek/repetição/troca. */
+    private var endFadeJob: Job? = null
     private var endCrossfadeStarted = false
 
     private fun prefs() = getSharedPreferences("tolete", MODE_PRIVATE)
     private fun fadeMs(): Int = prefs().getInt("fade_ms", 300).coerceIn(0, 3000)
     private fun crossfadeMs(): Int = prefs().getInt("crossfade_ms", 0).coerceIn(0, 5000)
 
-    private fun rampVolume(player: Player, from: Float, to: Float, ms: Int, onEnd: (() -> Unit)? = null) {
+    private fun rampVolume(
+        player: Player,
+        from: Float,
+        to: Float,
+        ms: Int,
+        isEndFade: Boolean = false,
+        onEnd: (() -> Unit)? = null
+    ) {
+        // Só um fade escreve em player.volume por vez; senão um fade antigo (ex.: o de saída
+        // do fim da faixa) termina depois e deixa o volume em 0 -> reprodução muda.
         fadeVolumeJob?.cancel()
+        endFadeJob?.cancel()
         if (ms <= 0) {
             player.volume = to
             onEnd?.invoke()
             return
         }
-        fadeVolumeJob = scope.launch {
+        val job = scope.launch {
             val steps = (ms / 30).coerceIn(4, 80)
             val start = from.coerceIn(0f, 1f)
             val end = to.coerceIn(0f, 1f)
@@ -156,6 +181,14 @@ class PlaybackService : MediaSessionService() {
             player.volume = end
             onEnd?.invoke()
         }
+        if (isEndFade) endFadeJob = job else fadeVolumeJob = job
+    }
+
+    /** Cancela o fade de saída do crossfade (seek, repetição, troca de faixa, pausa do sistema). */
+    private fun cancelEndFade() {
+        endFadeJob?.cancel()
+        endFadeJob = null
+        endCrossfadeStarted = false
     }
 
     private val sessionCallback = object : MediaSession.Callback {
@@ -234,8 +267,8 @@ class PlaybackService : MediaSessionService() {
             "Áudio: backend=$backendName preferredSr=${preferredSr}Hz float=$wantFloat bitPerfect=$bitPerfect"
         )
 
-        // Visualizador .milk: o TeeAudioProcessor só "espia" o PCM (repassa os bytes idênticos,
-        // então não altera o áudio nem o bit-perfect). Custa ~zero enquanto AudioTap.active == false.
+        // Visualizador .milk: o AudioTapSink (em buildAudioSink) só "espia" o PCM, sem alterar
+        // o áudio nem o bit-perfect. Custa ~zero enquanto AudioTap.active == false.
         // Extensão FFmpeg (AAR local): decodifica codecs que o MediaCodec do aparelho
         // não cobre (ex.: alguns FLAC/Opus/WMA). Preferência: software FFmpeg antes do decoder nativo.
         if (FfmpegLibrary.isAvailable()) {
@@ -267,17 +300,17 @@ class PlaybackService : MediaSessionService() {
                 val builder = DefaultAudioSink.Builder(context)
                     .setEnableFloatOutput(useFloat)
                     .setEnableAudioTrackPlaybackParams(true)
-                    .setAudioProcessors(arrayOf(TeeAudioProcessor(AudioTap)))
                 android.util.Log.i(
                     "PlaybackService",
                     "AudioSink: usbExclusive=$usbExclusive device=${appliedUsbDeviceLabel.ifBlank { "-" }} float=$useFloat"
                 )
                 val sink = builder.build()
-                if (!usbExclusive) return sink
+                // AudioTapSink (visualizador .milk) fica por fora de tudo e só espia o PCM.
+                if (!usbExclusive) return AudioTapSink(sink)
                 // USB exclusivo: antes de cada AudioTrack ser criado, pede ao Android 14+ que
                 // reabra a saída USB na taxa da faixa (senão o DAC fica preso em 48 kHz).
                 val appCtx = context.applicationContext
-                return object : ForwardingAudioSink(sink) {
+                return AudioTapSink(object : ForwardingAudioSink(sink) {
                     override fun configure(
                         inputFormat: Format,
                         specifiedBufferSize: Int,
@@ -311,7 +344,7 @@ class PlaybackService : MediaSessionService() {
                         }
                         super.configure(inputFormat, specifiedBufferSize, outputChannels)
                     }
-                }
+                })
             }
 
             // Media3 1.3.x: (context, extensionRendererMode, mediaCodecSelector,
@@ -390,25 +423,57 @@ class PlaybackService : MediaSessionService() {
                     currentAudioSessionId = sid
                 }
                 scheduleIdleStopIfNeeded(isPlaying)
+                // Trocou de faixa durante a pausa? Garante que a notificação mostre a faixa certa ao voltar.
+                syncScrobbleCurrent(newPlay = false)
+                scrobbleTick.value++
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 val playing = player.isPlaying
                 scheduleIdleStopIfNeeded(playing)
+                scrobbleTick.value++
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                scrobbleTick.value++
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 refreshCustomButtons()
+                // Nova faixa (ou repetição): atualiza a faixa atual do scrobbler agora, tocando ou pausado.
+                syncScrobbleCurrent(newPlay = true)
+                scrobbleTick.value++
                 val sid = player.audioSessionId
                 if (sid != 0) currentAudioSessionId = sid
-                endCrossfadeStarted = false
+                // O fade de saída da faixa anterior NÃO pode continuar rodando na faixa nova
+                // (nem ao repetir a mesma faixa): ele terminava em volume 0 e deixava tudo mudo.
+                cancelEndFade()
                 val cf = crossfadeMs()
-                if (cf > 0 && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                    // Nova faixa: fade in (simula crossfade na transição automática)
+                if (cf > 0 &&
+                    (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                        reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
+                ) {
+                    // Nova faixa (ou repetição): fade in (simula crossfade na transição automática)
                     player.volume = 0f
                     rampVolume(player, 0f, 1f, cf)
-                } else if (player.volume < 0.99f) {
+                } else if (player.volume < 0.99f && fadeVolumeJob?.isActive != true) {
                     player.volume = 1f
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                // Voltou/avançou a faixa com o fade de saída em andamento: cancela e restaura o volume.
+                if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                ) {
+                    if (endFadeJob?.isActive == true || endCrossfadeStarted) {
+                        cancelEndFade()
+                        if (fadeVolumeJob?.isActive != true) player.volume = 1f
+                    }
                 }
             }
 
@@ -474,29 +539,103 @@ class PlaybackService : MediaSessionService() {
             FavoritesBridge.version.collect { refreshCustomButtons() }
         }
 
-        // end-crossfade watcher: fade out no final da faixa
+        // Notificação persistente do scrobbler (música/artista + pular, editar tags, favoritar)
+        LastFmScrobbler.init(this)
+        scope.launch {
+            combine(
+                LastFmScrobbler.current,
+                LastFmScrobbler.enabled,
+                ScrobbleEdits.version,
+                FavoritesBridge.version,
+                LastFmScrobbler.loveVersion
+            ) { _, _, _, _, _ -> }
+                .combine(LastFmScrobbler.scrobbledId) { _, _ -> }
+                .combine(scrobbleTick) { _, _ -> }
+                .collectLatest {
+                    val before = LastFmScrobbler.current.value
+                    val fav = if (before != null) withContext(Dispatchers.IO) { isFavorite(before.id) } else false
+                    // Tudo abaixo é lido DEPOIS do acesso ao disco, para nunca mostrar estado velho.
+                    val track = LastFmScrobbler.current.value
+                    val p = exoPlayerRef
+                    ScrobbleNotifier.show(
+                        applicationContext,
+                        track,
+                        p != null && effectivelyPlaying(p),
+                        if (track?.id == before?.id) fav else false,
+                        scrobbled = track != null && LastFmScrobbler.scrobbledId.value == track.id
+                    )
+                }
+        }
+        // Estado inicial (serviço recriado com o player já numa faixa)
+        scope.launch {
+            syncScrobbleCurrent(newPlay = false)
+        }
+
+        // end-crossfade watcher: fade out no final da faixa (+ rede de segurança contra volume preso em 0)
         scope.launch {
             while (true) {
                 delay(200)
                 val p = exoPlayerRef ?: continue
                 val cf = crossfadeMs()
-                if (cf <= 0 || !p.isPlaying) {
+                if (!p.isPlaying) {
+                    // Pausa por foco de áudio/sistema no meio do fade: não deixa terminar em 0,
+                    // senão ao retomar a faixa toca muda.
+                    if (endFadeJob?.isActive == true) endFadeJob?.cancel()
+                    endFadeJob = null
                     endCrossfadeStarted = false
                     continue
                 }
                 val dur = p.duration
-                val pos = p.currentPosition
-                if (dur > 0 && dur != android.media.AudioTrack.ERROR_BAD_VALUE.toLong()) {
-                    val remain = dur - pos
-                    if (remain in 1 until cf.toLong() && !endCrossfadeStarted) {
-                        endCrossfadeStarted = true
-                        val start = p.volume.coerceIn(0.05f, 1f)
-                        rampVolume(p, start, 0f, remain.toInt().coerceAtLeast(50))
-                    }
+                val remain = if (dur > 0) dur - p.currentPosition else Long.MAX_VALUE
+                val inEndZone = cf > 0 && remain in 1 until cf.toLong()
+                val fading = fadeVolumeJob?.isActive == true || endFadeJob?.isActive == true
+                // Rede de segurança: tocando, sem nenhum fade ativo, fora do trecho final -> volume 100%.
+                if (!fading && p.volume < 0.99f && (!endCrossfadeStarted || !inEndZone)) {
+                    p.volume = 1f
+                    if (!inEndZone) endCrossfadeStarted = false
+                }
+                if (cf <= 0) {
+                    endCrossfadeStarted = false
+                    continue
+                }
+                if (inEndZone && !endCrossfadeStarted) {
+                    endCrossfadeStarted = true
+                    val start = p.volume.coerceIn(0.05f, 1f)
+                    rampVolume(p, start, 0f, remain.toInt().coerceAtLeast(50), isEndFade = true)
                 }
             }
         }
     }
+
+    // ---------- Faixa atual do scrobbler (fonte da verdade = player do serviço) ----------
+
+    private suspend fun resolveTrack(id: String): Track? {
+        trackIndex[id]?.let { return it }
+        // Não achou: recarrega o cache da biblioteca (pode ter sido atualizado por um novo scan).
+        val list = withContext(Dispatchers.IO) { LibraryCache(applicationContext).load() }
+        if (list != null) trackIndex = list.associateBy { it.id }
+        return trackIndex[id]
+    }
+
+    /**
+     * Mantém LastFmScrobbler.current igual à faixa que o player está tocando, mesmo com o player
+     * pausado e mesmo com a tela do app fechada. [newPlay] = nova reprodução (zera o "Enviado").
+     */
+    private fun syncScrobbleCurrent(newPlay: Boolean) {
+        val id = exoPlayerRef?.currentMediaItem?.mediaId
+        if (!newPlay && id == LastFmScrobbler.current.value?.id) return
+        scrobbleSyncJob?.cancel()
+        scrobbleSyncJob = scope.launch {
+            val track = if (id == null) null else resolveTrack(id)
+            LastFmScrobbler.setCurrent(track, newPlay)
+            if (track != null && exoPlayerRef?.isPlaying == true) LastFmScrobbler.nowPlaying(track)
+            scrobbleTick.value++
+        }
+    }
+
+    /** "Tocando" de verdade: inclui o buffering logo após play/troca (isPlaying fica false nesse instante). */
+    private fun effectivelyPlaying(p: ExoPlayer): Boolean =
+        p.isPlaying || (p.playWhenReady && p.playbackState == Player.STATE_BUFFERING)
 
     // ---------- Botões personalizados na notificação (estilo sistema) ----------
     // Ordem visual típica: [♡] [⏮] [⏯] [⏭] [✕]  — secundários nas pontas
@@ -632,6 +771,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        ScrobbleNotifier.cancel(applicationContext)
         idleStopJob?.cancel()
         idleStopJob = null
         scope.cancel()

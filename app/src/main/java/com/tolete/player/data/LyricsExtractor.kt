@@ -10,8 +10,11 @@ import java.nio.charset.Charset
 
 /**
  * Extrai letras de:
- *  - arquivo .lrc ao lado da faixa
+ *  - arquivo .lrc / .elrc / .ttml ao lado da faixa (prioridade na reprodução)
  *  - tags embutidas (ID3v2 USLT/SYLT em MP3, comentários Vorbis em FLAC/OGG/Opus)
+ *
+ * Sem cache do app. Na reprodução o .lrc externo vence se existir; senão usa tags.
+ * O editor permite escolher explicitamente a fonte.
  *
  * IMPORTANTE: nunca carrega o arquivo de áudio inteiro na memória. Um FLAC 24 bit/96 kHz
  * passa fácil de 100 MB, e ler tudo (+ cópia em String + regex) estourava o heap com
@@ -33,20 +36,24 @@ object LyricsExtractor {
     }
 
     private fun loadInternal(context: Context, track: Track): List<LyricLine> {
-        // 1) .lrc externo
+        // Reprodução: .lrc externo tem prioridade (fonte explícita do usuário).
+        // Sem .lrc, usa tags embutidas. Sem cache.
+
         externalLrc(track)?.let { if (it.isNotEmpty()) return it }
 
-        // 1b) cache do app (quando embutimos sem permissão de escrita na pasta da música)
-        LyricsEmbedder.loadFromCache(context, track)?.let { if (it.isNotEmpty()) return it }
+        loadEmbedded(context, track).let { if (it.isNotEmpty()) return it }
 
-        // 2) tags embutidas, lendo só o cabeçalho via content resolver
+        return emptyList()
+    }
+
+    /** Só tags embutidas (para o editor quando o usuário escolhe essa fonte). */
+    fun loadEmbedded(context: Context, track: Track): List<LyricLine> {
         try {
             context.contentResolver.openInputStream(track.uri)?.use { stream ->
                 readEmbedded(stream)?.let { if (it.isNotEmpty()) return it }
             }
         } catch (_: Exception) { }
 
-        // 3) caminho absoluto legado
         if (track.path.startsWith("/")) {
             try {
                 val f = File(track.path)
@@ -58,18 +65,17 @@ object LyricsExtractor {
             } catch (_: Exception) { }
         }
 
-        // 4) tentativa via MediaMetadataRetriever (alguns builds expõem)
         try {
             val r = MediaMetadataRetriever()
             r.setDataSource(context, track.uri)
-            // Chaves não oficiais / OEM às vezes usam "lyrics" no extrator
             @Suppress("DEPRECATION")
             val raw = try {
-                r.extractMetadata(1000) // alguns firmwares
+                r.extractMetadata(1000)
             } catch (_: Exception) { null }
             r.release()
             if (!raw.isNullOrBlank()) {
-                return parseLyricsContent(raw)
+                val parsed = parseLyricsContent(raw)
+                if (parsed.isNotEmpty()) return parsed
             }
         } catch (_: Exception) { }
 
@@ -246,44 +252,107 @@ object LyricsExtractor {
         // Word/syllable timestamp inside line (eLRC): <mm:ss.xx>
         val wordRegex = Regex("""<(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?>""")
         val lines = mutableListOf<LyricLine>()
-        for (raw in text.lines()) {
+        val rawLines = text.lines()
+        val hasTimestampedLine = rawLines.any { lineRegex.containsMatchIn(it.trim()) }
+        for (raw in rawLines) {
             val trimmed = raw.trim()
             if (trimmed.isEmpty() || trimmed.startsWith("[ti:") || trimmed.startsWith("[ar:") ||
                 trimmed.startsWith("[al:") || trimmed.startsWith("[by:") || trimmed.startsWith("[offset:")) continue
-            val m = lineRegex.find(trimmed) ?: continue
-            val time = parseTimestamp(m.groupValues[1], m.groupValues[2], m.groupValues[3])
-            val lyricPart = m.groupValues[4]
+            val m = lineRegex.find(trimmed)
+            if (m == null && hasTimestampedLine &&
+                !trimmed.startsWith("{tr}", ignoreCase = true) &&
+                !wordMarkerRegex.containsMatchIn(trimmed)) continue
+            val time = m?.let { parseTimestamp(it.groupValues[1], it.groupValues[2], it.groupValues[3]) } ?: -1L
+            var lyricPart = m?.groupValues?.get(4) ?: trimmed
+            // Marcador de tradução {tr} no início da linha
+            val isTranslation = lyricPart.trimStart().startsWith("{tr}", ignoreCase = true)
+            if (isTranslation) {
+                lyricPart = lyricPart.trimStart().drop("{tr}".length).trimStart()
+            }
             val words = mutableListOf<LyricWord>()
             if (wordRegex.containsMatchIn(lyricPart)) {
                 val parts = wordRegex.split(lyricPart)
                 val tags = wordRegex.findAll(lyricPart).toList()
                 // parts[0] = text before first tag; parts[i+1] = text after tags[i]
                 if (parts.isNotEmpty() && parts[0].isNotEmpty()) {
-                    words.add(LyricWord(time, parts[0]))
+                    appendWordSegment(words, parts[0], time)
                 }
                 for (i in tags.indices) {
                     val wTime = parseTimestamp(tags[i].groupValues[1], tags[i].groupValues[2], tags[i].groupValues[3])
-                    val wText = if (i + 1 < parts.size) parts[i + 1] else ""
-                    if (wText.isNotEmpty()) words.add(LyricWord(wTime, wText))
+                    val rawText = if (i + 1 < parts.size) parts[i + 1] else ""
+                    appendWordSegment(words, rawText, wTime)
                 }
                 // Preenche endMs de cada palavra com o início da próxima
                 for (i in words.indices) {
                     val end = if (i < words.lastIndex) words[i + 1].timeMs else -1L
                     if (end > 0) words[i] = words[i].copy(endMs = end)
                 }
+            } else if (wordMarkerRegex.containsMatchIn(lyricPart)) {
+                // Mantém animações/sílabas em linhas simples, sem timestamps de palavra.
+                appendWordSegment(words, lyricPart, time)
             }
-            val plainText = lyricPart.replace(wordRegex, "").trim()
+            val plainText = lyricPart.replace(wordRegex, "").replace(wordMarkerRegex, "").trim()
             if (plainText.isNotEmpty() || words.isNotEmpty()) {
                 lines.add(
                     LyricLine(
-                        time,
-                        if (plainText.isNotEmpty()) plainText else words.joinToString("") { it.text },
-                        words
+                        timeMs = time,
+                        text = if (plainText.isNotEmpty()) plainText else words.joinToString("") { it.text },
+                        words = words,
+                        isTranslation = isTranslation
                     )
                 )
             }
         }
-        return lines.sortedBy { it.timeMs }
+        return if (lines.all { it.timeMs >= 0 }) lines.sortedBy { it.timeMs } else lines
+    }
+
+    private val wordMarkerRegex = Regex("\\{(sil|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE)
+
+    /** Converte um trecho e seus marcadores em palavras, sem criar timestamps artificiais. */
+    private fun appendWordSegment(words: MutableList<LyricWord>, raw: String, timeMs: Long) {
+        val markers = wordMarkerRegex.findAll(raw).toList()
+        var cursor = 0
+        var firstWord = true
+        var nextIsSyllable = false
+        fun appendChunk(chunk: String) {
+            val trimmed = chunk.trim()
+            val pieces = if (markers.isEmpty()) listOf(trimmed).filter { it.isNotEmpty() }
+            else trimmed.split(Regex("\\s+")).filter { it.isNotEmpty() }
+            pieces.forEach { piece ->
+                words.add(
+                    LyricWord(
+                        timeMs = if (firstWord) timeMs else -1L,
+                        text = piece,
+                        isSyllable = nextIsSyllable
+                    )
+                )
+                firstWord = false
+                nextIsSyllable = false
+            }
+        }
+        markers.forEach { match ->
+            appendChunk(raw.substring(cursor, match.range.first))
+            when (match.groupValues[1].lowercase()) {
+                "sil" -> nextIsSyllable = true
+                "glo" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.GLO)
+                "pop" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.POP)
+                "des" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.DES)
+                "ded" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.DED)
+                "eco" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.ECO)
+                "zou" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.ZOU)
+                "zin" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.ZIN)
+                "sli" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.SLI)
+                "typ" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.TYP)
+                "fla" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.FLA)
+                "vib" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.VIB)
+                "rnb" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.RNB)
+                "frz" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.FRZ)
+                "shd" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.SHD)
+                "wav" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.WAV)
+            }
+            cursor = match.range.last + 1
+        }
+        appendChunk(raw.substring(cursor))
     }
 
     private fun parseTimestamp(minStr: String, secStr: String, frac: String): Long {
@@ -371,8 +440,19 @@ object LyricsExtractor {
                 ).trim()
                 // Preserva espaços entre palavras quando o span não traz espaço
                 if (wText.isNotEmpty()) {
-                    words.add(LyricWord(wBegin, wText, wEnd))
+                    val parsedSpan = mutableListOf<LyricWord>()
+                    appendWordSegment(parsedSpan, wText, wBegin)
+                    parsedSpan.forEach { parsedWord ->
+                        words.add(parsedWord.copy(endMs = wEnd))
+                    }
                 }
+            }
+            val rawPlain = decodeXmlEntities(body.replace(Regex("<[^>]+>"), "")).trim()
+                .replace(Regex("\\s+"), " ")
+            val isTranslation = rawPlain.trimStart().startsWith("{tr}", ignoreCase = true)
+            if (words.isEmpty() && wordMarkerRegex.containsMatchIn(rawPlain)) {
+                val content = if (isTranslation) rawPlain.trimStart().drop("{tr}".length).trimStart() else rawPlain
+                appendWordSegment(words, content, begin)
             }
             // Se spans existem mas o join ficou colado, tenta reinserir espaço entre palavras
             // que terminam em letra e a seguinte começa em letra maiúscula/minúscula sem pontuação.
@@ -393,8 +473,10 @@ object LyricsExtractor {
                 }
             } else ""
 
-            val plain = decodeXmlEntities(body.replace(Regex("<[^>]+>"), "")).trim()
-                .replace(Regex("\\s+"), " ")
+            val plain = rawPlain
+                .let { if (isTranslation) it.trimStart().drop("{tr}".length).trimStart() else it }
+                .replace(wordMarkerRegex, "")
+                .trim()
             val display = when {
                 plain.isNotEmpty() -> plain
                 joinedWords.isNotEmpty() -> joinedWords
@@ -408,7 +490,8 @@ object LyricsExtractor {
                         words = words,
                         endMs = endMs,
                         agent = agent,
-                        isBackground = isBg
+                        isBackground = isBg,
+                        isTranslation = isTranslation
                     )
                 )
             }

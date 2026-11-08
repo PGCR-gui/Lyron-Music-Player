@@ -11,6 +11,16 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.rounded.List
+import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -40,84 +50,231 @@ import kotlinx.coroutines.delay
 
 private val HelpBg = Color(0xFF0E1014)
 
+
+private val helpPageTitles = listOf(
+    "Bem-vindo",
+    "Agradecimentos",
+    "Aviso importante",
+    "Guia rápido",
+    "Tela tocando agora",
+    "Menu de três pontos",
+    "O Visualizador",
+    "Letras em tela cheia",
+    "Fila de Reprodução",
+    "Editor de Tags e Letras",
+    "Configurações de biblioteca",
+    "Organizar biblioteca",
+    "Scrobbling (Last.fm)",
+    "Vídeo de letras",
+    "Nota final",
+    "Conclusão"
+)
+
 @Composable
 fun HelpScreen(
     onClose: () -> Unit,
     onFinishedFirstRun: (() -> Unit)? = null
 ) {
     var page by remember { mutableIntStateOf(0) }
-    val totalPages = 15
+    val totalPages = 16
+    var showIndex by remember { mutableStateOf(false) }
+
+    fun skipTutorial() {
+        onFinishedFirstRun?.invoke()
+        onClose()
+    }
+
+    fun goNext() {
+        if (page < totalPages - 1) page++
+        else skipTutorial()
+    }
+
+    fun goBack() {
+        if (page > 0) page--
+        else skipTutorial()
+    }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(HelpBg)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() }
+            ) { /* consome cliques */ }
     ) {
         FloatingIconsBackground(kind = "help")
         Box(Modifier.fillMaxSize().background(Color(0xFF0E1014).copy(alpha = 0.55f)))
 
-        when (page) {
-            0 -> HelpPageWelcome(
-                onSkip = {
-                    onFinishedFirstRun?.invoke()
-                    onClose()
-                },
-                onNext = { page = 1 }
-            )
-            1 -> HelpPageThanks(onNext = { page = 2 }, onBack = { page = 0 })
-            2 -> HelpPageWarning(onNext = { page = 3 }, onBack = { page = 1 })
-            3 -> HelpPageGuide(
-                onDone = { page = 4 },
-                onBack = { page = 2 },
-                doneLabel = "Próximo"
-            )
-            4 -> HelpPageNowPlaying(onNext = { page = 5 }, onBack = { page = 3 })
-            5 -> HelpPageThreeDots(onNext = { page = 6 }, onBack = { page = 4 })
-            6 -> HelpPageVisualizer(onNext = { page = 7 }, onBack = { page = 5 })
-            7 -> HelpPageFullLyrics(onNext = { page = 8 }, onBack = { page = 6 })
-            8 -> HelpPageQueue(onNext = { page = 9 }, onBack = { page = 7 })
-            9 -> HelpPageTagEditor(onNext = { page = 10 }, onBack = { page = 8 })
-            10 -> HelpPageLibrarySettings(onNext = { page = 11 }, onBack = { page = 9 })
-            11 -> HelpPageOrganize(onNext = { page = 12 }, onBack = { page = 10 })
-            12 -> HelpPageLyricsVideo(onNext = { page = 13 }, onBack = { page = 11 })
-            13 -> HelpPageClosingNote(onNext = { page = 14 }, onBack = { page = 12 })
-            14 -> HelpPageFinal(
-                onDone = {
-                    onFinishedFirstRun?.invoke()
-                    onClose()
-                },
-                onBack = { page = 13 }
-            )
-        }
-
-        // indicador de página
-        Row(
+        // Conteúdo da página (sem os botões Voltar/Próximo internos nas páginas que usam HelpNavScaffold)
+        Box(
             Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                .fillMaxSize()
+                .padding(bottom = 100.dp) // espaço para a barra de vidro inferior
         ) {
-            repeat(totalPages) { i ->
-                Box(
-                    Modifier
-                        .size(if (i == page) 10.dp else 7.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(
-                            if (i == page) Color.White else Color.White.copy(0.35f)
-                        )
+            when (page) {
+                0 -> HelpPageWelcome(
+                    onSkip = { skipTutorial() },
+                    onNext = { page = 1 },
+                    hideBottomButtons = true
+                )
+                1 -> HelpPageThanks(onNext = { page = 2 }, onBack = { page = 0 }, hideBottomButtons = true)
+                2 -> HelpPageWarning(onNext = { page = 3 }, onBack = { page = 1 }, hideBottomButtons = true)
+                3 -> HelpPageGuide(
+                    onDone = { page = 4 },
+                    onBack = { page = 2 },
+                    doneLabel = "Próximo",
+                    hideBottomButtons = true
+                )
+                4 -> HelpPageNowPlaying(onNext = { page = 5 }, onBack = { page = 3 }, hideBottomButtons = true)
+                5 -> HelpPageThreeDots(onNext = { page = 6 }, onBack = { page = 4 }, hideBottomButtons = true)
+                6 -> HelpPageVisualizer(onNext = { page = 7 }, onBack = { page = 5 }, hideBottomButtons = true)
+                7 -> HelpPageFullLyrics(onNext = { page = 8 }, onBack = { page = 6 }, hideBottomButtons = true)
+                8 -> HelpPageQueue(onNext = { page = 9 }, onBack = { page = 7 }, hideBottomButtons = true)
+                9 -> HelpPageTagEditor(onNext = { page = 10 }, onBack = { page = 8 }, hideBottomButtons = true)
+                10 -> HelpPageLibrarySettings(onNext = { page = 11 }, onBack = { page = 9 }, hideBottomButtons = true)
+                11 -> HelpPageOrganize(onNext = { page = 12 }, onBack = { page = 10 }, hideBottomButtons = true)
+                12 -> HelpPageScrobbler(onNext = { page = 13 }, onBack = { page = 11 }, hideBottomButtons = true)
+                13 -> HelpPageLyricsVideo(onNext = { page = 14 }, onBack = { page = 12 }, hideBottomButtons = true)
+                14 -> HelpPageClosingNote(onNext = { page = 15 }, onBack = { page = 13 }, hideBottomButtons = true)
+                15 -> HelpPageFinal(
+                    onDone = { skipTutorial() },
+                    onBack = { page = 14 },
+                    hideBottomButtons = true
                 )
             }
+        }
+
+        // Barra inferior de vidro: Pular | Índice | Voltar | Próximo
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
+            // Indicador de página
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                repeat(totalPages) { i ->
+                    Box(
+                        Modifier
+                            .padding(horizontal = 3.dp)
+                            .size(if (i == page) 9.dp else 6.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(
+                                if (i == page) Color.White else Color.White.copy(0.35f)
+                            )
+                    )
+                }
+            }
+
+            // Glass bar
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(Color.White.copy(alpha = 0.12f))
+                    .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(28.dp))
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Pular
+                    TextButton(
+                        onClick = { skipTutorial() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Pular", color = Color.White.copy(0.9f), fontSize = 14.sp)
+                    }
+                    // Índice
+                    IconButton(
+                        onClick = { showIndex = true },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color.White.copy(0.10f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.List,
+                            contentDescription = "Índice",
+                            tint = Color.White
+                        )
+                    }
+                    // Voltar
+                    TextButton(
+                        onClick = { goBack() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            if (page == 0) "Fechar" else "Voltar",
+                            color = Color.White.copy(0.9f),
+                            fontSize = 14.sp
+                        )
+                    }
+                    // Próximo / Concluir
+                    Button(
+                        onClick = { goNext() },
+                        modifier = Modifier.weight(1.2f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(22.dp)
+                    ) {
+                        Text(
+                            if (page == totalPages - 1) "Concluir" else "Próximo",
+                            color = Color.Black,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showIndex) {
+            AppAlertDialog(
+                onDismissRequest = { showIndex = false },
+                title = { Text("Índice do tutorial") },
+                text = {
+                    LazyColumn {
+                        itemsIndexed(helpPageTitles) { index, title ->
+                            Text(
+                                text = "${index + 1}. $title",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        page = index
+                                        showIndex = false
+                                    }
+                                    .padding(vertical = 10.dp),
+                                color = if (index == page) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                                fontWeight = if (index == page) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showIndex = false }) {
+                        Text("Fechar")
+                    }
+                }
+            )
         }
     }
 }
 
-@Composable
+
 private fun helpFont(resId: Int): FontFamily =
     FontFamily(Font(resId))
 
 @Composable
-private fun HelpPageWelcome(onSkip: () -> Unit, onNext: () -> Unit) {
+private fun HelpPageWelcome(onSkip: () -> Unit, onNext: () -> Unit, hideBottomButtons: Boolean = false) {
     var showWelcome by remember { mutableStateOf(false) }
     var showLogo by remember { mutableStateOf(false) }
     var showTitle by remember { mutableStateOf(false) }
@@ -186,32 +343,34 @@ private fun HelpPageWelcome(onSkip: () -> Unit, onNext: () -> Unit) {
             }
         }
 
-        AnimatedVisibility(
-            visible = showButtons,
-            enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 40 },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp)
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+        if (!hideBottomButtons) {
+            AnimatedVisibility(
+                visible = showButtons,
+                enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 40 },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 48.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
             ) {
-                TextButton(
-                    onClick = onSkip,
-                    modifier = Modifier.weight(1f)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Pular", color = Color.White.copy(0.85f), fontSize = 16.sp)
-                }
-                Button(
-                    onClick = onNext,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(28.dp)
-                ) {
-                    Text("Próximo", color = Color.Black, fontWeight = FontWeight.SemiBold)
+                    TextButton(
+                        onClick = onSkip,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Pular", color = Color.White.copy(0.85f), fontSize = 16.sp)
+                    }
+                    Button(
+                        onClick = onNext,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(28.dp)
+                    ) {
+                        Text("Próximo", color = Color.Black, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
@@ -219,7 +378,7 @@ private fun HelpPageWelcome(onSkip: () -> Unit, onNext: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageThanks(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageThanks(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var showTitle by remember { mutableStateOf(false) }
     var showBody by remember { mutableStateOf(false) }
     var showNav by remember { mutableStateOf(false) }
@@ -234,7 +393,8 @@ private fun HelpPageThanks(onNext: () -> Unit, onBack: () -> Unit) {
         onBack = onBack,
         onNext = onNext,
         nextLabel = "Próximo"
-    ) {
+    ,
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(
             visible = showTitle,
             enter = fadeIn(tween(500)) + slideInHorizontally(tween(550)) { -80 }
@@ -263,7 +423,7 @@ private fun HelpPageThanks(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageWarning(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageWarning(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var showTitle by remember { mutableStateOf(false) }
     var showBody by remember { mutableStateOf(false) }
     var showNav by remember { mutableStateOf(false) }
@@ -278,7 +438,8 @@ private fun HelpPageWarning(onNext: () -> Unit, onBack: () -> Unit) {
         onBack = onBack,
         onNext = onNext,
         nextLabel = "Próximo"
-    ) {
+    ,
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(
             visible = showTitle,
             enter = fadeIn(tween(450)) + scaleIn(tween(500), initialScale = 0.7f)
@@ -307,7 +468,7 @@ private fun HelpPageWarning(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageGuide(onDone: () -> Unit, onBack: () -> Unit, doneLabel: String = "Concluir") {
+private fun HelpPageGuide(onDone: () -> Unit, onBack: () -> Unit, doneLabel: String = "Concluir", hideBottomButtons: Boolean = false) {
     var showText by remember { mutableStateOf(false) }
     var showImage by remember { mutableStateOf(false) }
     var showNav by remember { mutableStateOf(false) }
@@ -322,7 +483,8 @@ private fun HelpPageGuide(onDone: () -> Unit, onBack: () -> Unit, doneLabel: Str
         onBack = onBack,
         onNext = onDone,
         nextLabel = "Concluir"
-    ) {
+    ,
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(
             visible = showText,
             enter = fadeIn(tween(550)) + slideInVertically(tween(550)) { -30 }
@@ -395,6 +557,7 @@ private fun HelpScrollPage(
     onBack: () -> Unit,
     onNext: () -> Unit,
     nextLabel: String,
+    hideBottomButtons: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(
@@ -403,7 +566,7 @@ private fun HelpScrollPage(
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(horizontal = 24.dp)
-            .padding(top = 20.dp, bottom = 56.dp)
+            .padding(top = 20.dp, bottom = if (hideBottomButtons) 8.dp else 56.dp)
     ) {
         Column(
             Modifier
@@ -412,24 +575,26 @@ private fun HelpScrollPage(
                 .padding(bottom = 12.dp),
             content = content
         )
-        AnimatedVisibility(
-            visible = showNav,
-            enter = fadeIn(tween(400)) + slideInVertically(tween(400)) { 30 }
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+        if (!hideBottomButtons) {
+            AnimatedVisibility(
+                visible = showNav,
+                enter = fadeIn(tween(400)) + slideInVertically(tween(400)) { 30 }
             ) {
-                TextButton(onClick = onBack, modifier = Modifier.weight(1f)) {
-                    Text("Voltar", color = Color.White.copy(0.85f))
-                }
-                Button(
-                    onClick = onNext,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(28.dp)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(nextLabel, color = Color.Black, fontWeight = FontWeight.SemiBold)
+                    TextButton(onClick = onBack, modifier = Modifier.weight(1f)) {
+                        Text("Voltar", color = Color.White.copy(0.85f))
+                    }
+                    Button(
+                        onClick = onNext,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(28.dp)
+                    ) {
+                        Text(nextLabel, color = Color.Black, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
@@ -493,11 +658,16 @@ private fun OptionalHelpVideo(resName: String = "help_video_1") {
 }
 
 @Composable
-private fun HelpPageNowPlaying(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageNowPlaying(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(550)) { 40 }) {
             Column {
                 Text(
@@ -522,12 +692,17 @@ private fun HelpPageNowPlaying(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageThreeDots(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageThreeDots(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val better = helpFont(R.font.better_vcr)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + scaleIn(tween(500), initialScale = 0.9f)) {
             Column {
                 Text("O menu de três pontos", fontFamily = better, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))
@@ -544,12 +719,17 @@ private fun HelpPageThreeDots(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageVisualizer(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageVisualizer(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val better = helpFont(R.font.better_vcr)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(550)) + slideInHorizontally(tween(550)) { 60 }) {
             Column {
                 Text("O Visualizador", fontFamily = better, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))
@@ -573,12 +753,17 @@ private fun HelpPageVisualizer(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageFullLyrics(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageFullLyrics(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val better = helpFont(R.font.better_vcr)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { -35 }) {
             Column {
                 Text("Letras em tela cheia", fontFamily = better, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))
@@ -596,12 +781,17 @@ private fun HelpPageFullLyrics(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageQueue(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageQueue(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val better = helpFont(R.font.better_vcr)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + scaleIn(tween(550), initialScale = 0.88f)) {
             Column {
                 Text("Fila de Reprodução", fontFamily = better, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 12.dp))
@@ -626,12 +816,17 @@ private fun HelpPageQueue(onNext: () -> Unit, onBack: () -> Unit) {
 
 
 @Composable
-private fun HelpPageTagEditor(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageTagEditor(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val julia = helpFont(R.font.juliametal_regular)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 30 }) {
             Column {
                 Text("Editor de Tags", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
@@ -642,7 +837,7 @@ private fun HelpPageTagEditor(onNext: () -> Unit, onBack: () -> Unit) {
                 )
                 Text("Editor de Letras", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
                 Text(
-                    "Aqui você cola letras manualmente ou edita letras já pesquisadas. Existem três modos,",
+                    "Aqui você cola letras manualmente ou edita letras já pesquisadas. Existem quatro abas:",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
                 Text("Texto", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
@@ -652,7 +847,23 @@ private fun HelpPageTagEditor(onNext: () -> Unit, onBack: () -> Unit) {
                 Text("Palavras", color = Color.White, fontWeight = FontWeight.SemiBold)
                 OptionalHelpDrawable("help_foto_04")
                 Text(
-                    "Nos modos linhas e palavras, basta clicar no ícone de relógio no momento certo para sincronizar.\nNos botões - e + você pode controlar a velocidade da música.",
+                    "Nos modos linhas e palavras, basta clicar no ícone de relógio no momento certo para sincronizar.\nNos botões - e + você controla a velocidade da música.",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
+                )
+                Text("Tradução", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 16.dp))
+                OptionalHelpDrawable("help_foto_traducao")
+                Text(
+                    "Na aba Tradução você escreve a versão traduzida de cada linha. O botão FX aplica efeitos de animação em palavras específicas da tradução.",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+                Text("Efeitos de legenda (FX)", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                OptionalHelpDrawable("help_foto_fx_palavra")
+                OptionalHelpDrawable("help_foto_fx_efeito")
+                Text(
+                    "Fluxo: toque em FX → escolha a palavra → escolha o efeito (Piscar, Agitar, Destacar, Sumir, Eco, Zoom, Deslizar, Digitar, Flash, Tremor, Arco-íris, Congelar, Sombra, Onda…).\n\n" +
+                        "Na tradução, se a letra principal já tiver palavras com efeito na mesma linha, o app pede para sincronizar o tempo (ex.: des1, des2). Assim a animação da tradução dispara no mesmo instante da palavra da letra.\n\n" +
+                        "Os marcadores ({des}, {ded}, {eco}…) e os tempos ficam salvos no LRC ou nas tags embutidas. Na tradução, só as palavras com efeito animam — o resto da linha não faz karaokê palavra a palavra.",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
             }
@@ -661,12 +872,17 @@ private fun HelpPageTagEditor(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageLibrarySettings(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageLibrarySettings(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val julia = helpFont(R.font.juliametal_regular)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInHorizontally(tween(500)) { -40 }) {
             Column {
                 Text("Configurações de biblioteca", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
@@ -681,12 +897,17 @@ private fun HelpPageLibrarySettings(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageOrganize(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageOrganize(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val julia = helpFont(R.font.juliametal_regular)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + scaleIn(tween(500), initialScale = 0.9f)) {
             Column {
                 Text("Organizar biblioteca", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
@@ -700,13 +921,66 @@ private fun HelpPageOrganize(onNext: () -> Unit, onBack: () -> Unit) {
     }
 }
 
+
 @Composable
-private fun HelpPageLyricsVideo(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageScrobbler(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
+    var show by remember { mutableStateOf(false) }
+    var nav by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
+    val julia = helpFont(R.font.juliametal_regular)
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons
+    ) {
+        AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 30 }) {
+            Column {
+                Text(
+                    "Scrobbling (Last.fm)",
+                    fontFamily = julia,
+                    fontSize = 26.sp,
+                    color = Color.White,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                OptionalHelpDrawable("help_foto_scrobble_api")
+                Text(
+                    "Em Configurações → Scrobbling você conecta sua conta do Last.fm. Cadastre um app em last.fm/api/account/create e cole a API Key e o Shared Secret (do mesmo app). Os dados ficam só neste aparelho.",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+                Text(
+                    "Com \"Enviar scrobbles\" ativo, o app envia \"ouvindo agora\" e, quando o play é contado (veja Player → Histórico / Mais tocadas), envia o scrobble com a hora em que a faixa começou. Faixas com menos de 30 s não são enviadas.",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                OptionalHelpDrawable("help_foto_scrobble_edits")
+                Text(
+                    "Edições automáticas (só no envio ao Last.fm, não alteram as tags do arquivo):\n" +
+                        "• Só o primeiro artista — em faixas com vários artistas, usa o primeiro (mesmos separadores da Biblioteca).\n" +
+                        "• Remover texto entre parênteses — tira trechos como (Ao Vivo), (Remastered) e [Bonus] do título, artista e álbum antes de scrobblar.\n\n" +
+                        "Faixas com edição manual salva são ignoradas pelas regras automáticas. Você ainda pode editar qualquer faixa pela notificação do scrobbler.\n\n" +
+                        "Edições manuais ficam em Lyron/scrobble_edits.json. Use \"Editar tags\" na notificação ou importe um arquivo no mesmo formato.",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HelpPageLyricsVideo(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val matcha = helpFont(R.font.matcha_style)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + scaleIn(tween(500), initialScale = 0.9f)) {
             Column {
                 Row(
@@ -737,15 +1011,24 @@ private fun HelpPageLyricsVideo(onNext: () -> Unit, onBack: () -> Unit) {
                 )
                 OptionalHelpDrawable("help_video")
                 Text(
-                    "Abrir o menu de três pontos e clicar em gerar vídeo com letra. Ao clicar, abrirá essa tela:",
+                    "Abrir o menu de três pontos e clicar em gerar vídeo. Ao clicar, abrirá essa tela:",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
                     modifier = Modifier.padding(vertical = 8.dp)
                 )
                 OptionalHelpDrawable("help_generate")
                 Text(
-                    "Aqui você poderá escolher entre gerar o vídeo de um trecho ou da Música inteira, a proporção, fps e resolução do vídeo.\n\n(Taxas de frame e resoluções maiores podem causar maior demora para gerar vídeo, principalmente em dispositivos mais fracos. Celulares mais antigos ou mais fracos podem não ser compatíveis com a geração de vídeo em 1440p)",
+                    "Nesta tela você define:",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp,
-                    modifier = Modifier.padding(top = 8.dp)
+                    modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)
+                )
+                Text(
+                    "• Fonte da letra: arquivo .lrc ao lado da música, tags embutidas, ou Sem letra (só capa/preset + título e artista).\n" +
+                        "• Trecho: intervalo livre, música inteira, ou por linhas da letra sincronizada (do início da linha inicial até o fim da linha final).\n" +
+                        "• Fundo: capa borrada ou preset milk (reage à música; demora mais para gerar).\n" +
+                        "• Proporção, FPS e resolução do vídeo.\n\n" +
+                        "Animações de legenda ({des}, {ded}, zoom, eco…) também aparecem no vídeo gerado, na letra e na tradução.\n\n" +
+                        "(Taxas de frame e resoluções maiores demoram mais, principalmente em aparelhos mais fracos. 1440p pode não ser compatível com celulares antigos.)",
+                    color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
             }
         }
@@ -753,11 +1036,16 @@ private fun HelpPageLyricsVideo(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageClosingNote(onNext: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageClosingNote(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onNext, nextLabel = "Próximo") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(600))) {
             Text(
                 "Isso é tudo que eu acho que deveria explicar aqui. As outras funções já tem explicações o bastante em suas próprias páginas. Se no futuro eu adicionar novas funções complexas, terão mais explicações por aqui.",
@@ -768,12 +1056,17 @@ private fun HelpPageClosingNote(onNext: () -> Unit, onBack: () -> Unit) {
 }
 
 @Composable
-private fun HelpPageFinal(onDone: () -> Unit, onBack: () -> Unit) {
+private fun HelpPageFinal(onDone: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
     var show by remember { mutableStateOf(false) }
     var nav by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
     val buba = helpFont(R.font.buba_outline)
-    HelpScrollPage(showNav = nav, onBack = onBack, onNext = onDone, nextLabel = "Concluir") {
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onDone,
+        nextLabel = "Concluir",
+        hideBottomButtons = hideBottomButtons) {
         AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 40 }) {
             Column {
                 Text(

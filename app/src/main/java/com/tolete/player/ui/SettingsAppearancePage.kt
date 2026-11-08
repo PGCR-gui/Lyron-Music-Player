@@ -75,8 +75,6 @@ internal fun AppearancePage(
     onSplashSoundChange: (Boolean) -> Unit = {},
     floatingIconsEnabled: Boolean = true,
     onFloatingIconsChange: (Boolean) -> Unit = {},
-    menuBgColor: Int = 0xE8F2F2F7.toInt(),
-    onMenuBgColorChange: (Int) -> Unit = {},
     homeButtonFontPath: String? = null,
     onHomeButtonFontSelect: (String?) -> Unit = {},
     onPickHomeButtonFont: () -> Unit = {},
@@ -344,44 +342,6 @@ internal fun AppearancePage(
                 )
             }
 
-            Spacer(Modifier.height(20.dp))
-            Text(
-                "Menus claros (pop-ups)",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White.copy(0.55f),
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            val menuColor = Color(menuBgColor)
-            Text(
-                "Cor e transparência dos menus (Now Playing, seleção, etc.)",
-                fontSize = 12.sp,
-                color = Color.White.copy(0.5f),
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(menuColor)
-                    .border(1.dp, Color.White.copy(0.25f), RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Prévia do menu", color = Color(0xFF1A1A1A), fontWeight = FontWeight.Medium)
-            }
-            Spacer(Modifier.height(10.dp))
-            ColorPickerButton(
-                color = menuBgColor,
-                onColorChange = onMenuBgColorChange,
-                showAlpha = true,
-                label = "Cor do menu",
-                modifier = Modifier.fillMaxWidth()
-            )
-            TextButton(onClick = { onMenuBgColorChange(0xE8F2F2F7.toInt()) }) {
-                Text("Restaurar padrão", color = Color(0xFF82B1FF))
-            }
-
             // --- Botões da tela Início ---
             Spacer(Modifier.height(20.dp))
             Text(
@@ -612,19 +572,29 @@ internal fun AppearancePage(
 @Composable
 internal fun LyricsViewerPage(
     lyricsFontPath: String?,
+    lyricsTranslationFontPath: String? = null,
     lyricsFontSize: Float,
     lyricsPrimaryColor: Int,
     lyricsSecondaryColor: Int,
     lyricsBorderColor: Int,
     lyricsBorderWidth: Float,
+    lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
+    lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
     onPickFont: () -> Unit,
     onClearFont: () -> Unit,
     onSelectFont: (String?) -> Unit = {},
+    onPickTranslationFont: () -> Unit = {},
+    onClearTranslationFont: () -> Unit = {},
+    onSelectTranslationFont: (String?) -> Unit = {},
     onFontSizeChange: (Float) -> Unit,
     onPrimaryColorChange: (Int) -> Unit,
     onSecondaryColorChange: (Int) -> Unit,
     onBorderColorChange: (Int) -> Unit,
-    onBorderWidthChange: (Float) -> Unit
+    onBorderWidthChange: (Float) -> Unit,
+    onTranslationColorChange: (Int) -> Unit = {},
+    onBackingColorChange: (Int) -> Unit = {},
+    lyricsEmphasisFontPath: String? = null,
+    onSelectLyricsEmphasisFont: (String?) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -731,6 +701,119 @@ internal fun LyricsViewerPage(
             Text("48", fontSize = 12.sp, color = Color.White.copy(0.5f))
         }
 
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "Fonte da tradução ({tr})",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Selecionada: ${BuiltInFonts.displayLabel(lyricsTranslationFontPath)}",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.5f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        FontOptionRow(
+            label = "Mesma da letra",
+            selected = lyricsTranslationFontPath.isNullOrBlank() || lyricsTranslationFontPath == "system",
+            onClick = onClearTranslationFont
+        )
+        Text(
+            "Embutidas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+        )
+        BuiltInFonts.EMBEDDED.forEach { emb ->
+            val key = BuiltInFonts.builtinKey(emb.id)
+            FontOptionRow(
+                label = emb.label,
+                selected = lyricsTranslationFontPath == key,
+                onClick = { onSelectTranslationFont(key) }
+            )
+        }
+        Text(
+            "Personalizadas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+        )
+        lyricsUserFonts.forEach { file ->
+            FontOptionRow(
+                label = file.name,
+                selected = lyricsTranslationFontPath == file.absolutePath,
+                onClick = { onSelectTranslationFont(file.absolutePath) }
+            )
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable(onClick = onPickTranslationFont)
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.FontDownload, contentDescription = null)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Carregar fonte da tradução", fontSize = 16.sp)
+                Text(
+                    "Opcional — se vazio, usa a mesma fonte da letra",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f)
+                )
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "Fonte de destaque ({des})",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Selecionada: ${lyricsEmphasisFontPath?.let { BuiltInFonts.displayLabel(it) } ?: "Mesma da letra / sistema"}",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.5f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        FontOptionRow(
+            label = "Mesma da letra / sistema",
+            selected = lyricsEmphasisFontPath.isNullOrBlank() || lyricsEmphasisFontPath == "system",
+            onClick = { onSelectLyricsEmphasisFont(null) }
+        )
+        Text(
+            "Embutidas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+        )
+        BuiltInFonts.EMBEDDED.forEach { emb ->
+            val key = BuiltInFonts.builtinKey(emb.id)
+            FontOptionRow(
+                label = emb.label,
+                selected = lyricsEmphasisFontPath == key,
+                onClick = { onSelectLyricsEmphasisFont(key) }
+            )
+        }
+        Text(
+            "Personalizadas",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 4.dp)
+        )
+        lyricsUserFonts.forEach { file ->
+            FontOptionRow(
+                label = file.name,
+                selected = lyricsEmphasisFontPath == file.absolutePath,
+                onClick = { onSelectLyricsEmphasisFont(file.absolutePath) }
+            )
+        }
+
         Spacer(Modifier.height(16.dp))
         ColorPickerButton(
             color = lyricsPrimaryColor,
@@ -746,6 +829,23 @@ internal fun LyricsViewerPage(
             onColorChange = onSecondaryColorChange,
             showAlpha = true,
             label = "Cor secundária (inativa / sílabas restantes)",
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(Modifier.height(12.dp))
+        ColorPickerButton(
+            color = lyricsTranslationColor,
+            onColorChange = onTranslationColorChange,
+            showAlpha = true,
+            label = "Cor da tradução ({tr})",
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(12.dp))
+        ColorPickerButton(
+            color = lyricsBackingColor,
+            onColorChange = onBackingColorChange,
+            showAlpha = true,
+            label = "Cor do backing vocal / harmonia",
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -808,6 +908,5 @@ internal fun FontOptionRow(label: String, selected: Boolean, onClick: () -> Unit
         }
     }
 }
-
 
 

@@ -79,10 +79,40 @@ data class Playlist(
     }
 }
 
+enum class LyricAnimation {
+    NONE, GLO, POP, DES, DED,
+    /** Eco / ghost atrasado. */
+    ECO,
+    /** Zoom out: começa grande e encolhe. */
+    ZOU,
+    /** Zoom in: começa pequeno e cresce. */
+    ZIN,
+    /** Desliza de baixo para o lugar. */
+    SLI,
+    /** Máquina de escrever (letras em sequência). */
+    TYP,
+    /** Flash curto de brilho. */
+    FLA,
+    /** Tremor suave. */
+    VIB,
+    /** Cor em ciclo arco-íris. */
+    RNB,
+    /** Congela em destaque até o fim da linha. */
+    FRZ,
+    /** Sombra longa de impacto. */
+    SHD,
+    /** Onda senoidal vertical. */
+    WAV
+}
+
 data class LyricWord(
     val timeMs: Long,
     val text: String,
-    val endMs: Long = -1L
+    val endMs: Long = -1L,
+    /** True se esta palavra é sílaba da anterior (marcador {sil}). */
+    val isSyllable: Boolean = false,
+    /** Efeito visual ativado ao chegar o timestamp desta palavra. */
+    val animation: LyricAnimation = LyricAnimation.NONE
 )
 
 data class LyricLine(
@@ -94,7 +124,9 @@ data class LyricLine(
     /** Agente/voz TTML (ex.: "v1", "v2", "bg"). */
     val agent: String? = null,
     /** True para backing vocals / harmonia / coro. */
-    val isBackground: Boolean = false
+    val isBackground: Boolean = false,
+    /** True para linha de tradução (marcador {tr}). */
+    val isTranslation: Boolean = false
 ) {
     val hasSyllableSync: Boolean get() = words.isNotEmpty()
 }

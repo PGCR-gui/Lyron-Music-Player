@@ -15,6 +15,11 @@
 
 extern "C" {
 
+// Renderização offline (vídeo): permite definir o tempo de cada frame em vez de usar o relógio.
+// Existe nas versões recentes do projectM 4.x. Declarada como "weak" para a lib continuar
+// compilando e funcionando se a versão usada não tiver a função (nativeSetFrameTime retorna false).
+__attribute__((weak)) void projectm_set_frame_time(projectm_handle instance, double secondsSinceFirstFrame);
+
 JNIEXPORT jlong JNICALL JNI_FN(nativeCreate)(
         JNIEnv* env, jobject /*thiz*/,
         jint width, jint height, jstring texturePath,
@@ -69,6 +74,14 @@ JNIEXPORT void JNICALL JNI_FN(nativeLoadPreset)(
 JNIEXPORT void JNICALL JNI_FN(nativeRender)(JNIEnv*, jobject, jlong handle) {
     if (!handle) return;
     projectm_opengl_render_frame(reinterpret_cast<projectm_handle>(handle));
+}
+
+JNIEXPORT jboolean JNICALL JNI_FN(nativeSetFrameTime)(
+        JNIEnv*, jobject, jlong handle, jdouble seconds) {
+    if (!handle) return JNI_FALSE;
+    if (projectm_set_frame_time == nullptr) return JNI_FALSE;
+    projectm_set_frame_time(reinterpret_cast<projectm_handle>(handle), seconds);
+    return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL JNI_FN(nativeDestroy)(JNIEnv*, jobject, jlong handle) {

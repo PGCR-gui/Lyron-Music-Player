@@ -270,6 +270,18 @@ Row(
 
 internal val changelogEntries = listOf(
     ChangelogEntry(
+        code = "230",
+        version = "0.70",
+        changes = listOf(
+            "Presets adicionados no gerador de vídeo",
+            "Possibilidade de gerar vídeos de músicas sem letras",
+            "Animações novas nas letras",
+            "Novos modos de escolha de intervalo de tempo no gerador de vídeo",
+            "Scrobble no Last.fm adicionado",
+            "Presets escolhidos novamente"
+        )
+    ),
+    ChangelogEntry(
         code = "229",
         version = "0.69",
         changes = listOf(

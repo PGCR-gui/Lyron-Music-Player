@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -20,6 +21,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -28,14 +30,41 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tolete.player.data.LyricLine
+import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.Track
 import com.tolete.player.video.LyricsVideoGenerator
 import com.tolete.player.video.LyricsVideoGenerator.Aspect
+import com.tolete.player.visualizer.ProjectMNative
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 private val Accent = Color(0xFFB388FF)
 private const val MIN_CLIP_MS = 1000f
+
+/** Como o tempo do vídeo é escolhido. */
+private enum class ClipMode { WHOLE, MANUAL, LINES }
+
+/** Se a última linha escolhida não tem fim conhecido, limita a duração dela (pausas instrumentais). */
+private const val LAST_LINE_MAX_MS = 10_000L
+
+/** Fim da linha [idx]: fim da própria linha (se houver), senão o começo da próxima. */
+private fun lineEndMs(lines: List<LyricLine>, idx: Int, durationMs: Long): Long {
+    val l = lines[idx]
+    val lastWordEnd = l.words.lastOrNull()?.endMs ?: -1L
+    val explicit = when {
+        l.endMs > l.timeMs -> l.endMs
+        lastWordEnd > l.timeMs -> lastWordEnd
+        else -> -1L
+    }
+    if (explicit > 0L) return explicit.coerceAtMost(durationMs)
+    val next = lines.getOrNull(idx + 1)?.timeMs ?: durationMs
+    return minOf(next, l.timeMs + LAST_LINE_MAX_MS, durationMs)
+}
 
 private fun fmtTime(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
@@ -48,16 +77,84 @@ internal fun LyricsVideoDialog(
     track: Track,
     currentPositionMs: Long,
     onDismiss: () -> Unit,
-    onGenerate: (startMs: Long, endMs: Long, shortSide: Int, aspect: Aspect, fps: Int) -> Unit
+    milkPresets: List<String> = emptyList(),
+    initialMilkPreset: String? = null,
+    /** True se existe .lrc ao lado da música (habilita a opção de fonte). */
+    hasExternalLrc: Boolean = false,
+    /** Carrega as linhas da fonte escolhida (chamado fora da main thread). Usado no tempo "Por linhas". */
+    loadLyrics: (LyricsEmbedder.Target) -> List<LyricLine> = { emptyList() },
+    /** [useLyrics] = false gera o vídeo sem letra (capa/visualizador, título, artista e progresso). */
+    onGenerate: (
+        startMs: Long,
+        endMs: Long,
+        shortSide: Int,
+        aspect: Aspect,
+        fps: Int,
+        milkPresetPath: String?,
+        lyricsSource: LyricsEmbedder.Target,
+        useLyrics: Boolean
+    ) -> Unit
 ) {
     val duration = track.duration.coerceAtLeast(2000L)
     val durF = duration.toFloat()
 
-    var whole by remember { mutableStateOf(true) }
+    var clipMode by remember { mutableStateOf(ClipMode.WHOLE) }
     var range by remember { mutableStateOf(0f..durF) }
     var aspect by remember { mutableStateOf(Aspect.V_9_16) }
     var fps by remember { mutableIntStateOf(30) }
     var chosenSide by remember { mutableIntStateOf(1080) }
+    // Fonte da letra no vídeo: .lrc externo ou tags embutidas
+    var lyricsSource by remember {
+        mutableStateOf(
+            if (hasExternalLrc) LyricsEmbedder.Target.LRC_FILE
+            else LyricsEmbedder.Target.EMBEDDED
+        )
+    }
+
+    // Vídeo sem letra (músicas sem letra ou quando o usuário prefere só a capa/visualizador)
+    var noLyrics by remember { mutableStateOf(false) }
+
+    // Linhas principais sincronizadas da fonte escolhida: base do tempo "Por linhas"
+    var syncedMain by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
+    var loadingLines by remember { mutableStateOf(true) }
+    LaunchedEffect(lyricsSource, noLyrics) {
+        if (noLyrics) {
+            syncedMain = emptyList()
+            loadingLines = false
+            if (clipMode == ClipMode.LINES) clipMode = ClipMode.WHOLE
+            return@LaunchedEffect
+        }
+        loadingLines = true
+        val loaded = withContext(Dispatchers.IO) {
+            try {
+                loadLyrics(lyricsSource)
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        syncedMain = loaded
+            .filter { it.timeMs >= 0 && it.text.isNotBlank() && !it.isTranslation && !it.isBackground }
+            .sortedBy { it.timeMs }
+        loadingLines = false
+        if (syncedMain.isEmpty() && clipMode == ClipMode.LINES) clipMode = ClipMode.WHOLE
+    }
+    val n = syncedMain.size
+    val linesAvailable = n > 0
+    var lineRange by remember(syncedMain) {
+        mutableStateOf(0f..(n - 1).coerceAtLeast(0).toFloat())
+    }
+    val lastIdx = (n - 1).coerceAtLeast(0)
+    val i0 = lineRange.start.roundToInt().coerceIn(0, lastIdx)
+    val i1 = lineRange.endInclusive.roundToInt().coerceIn(i0, lastIdx)
+
+    // Fundo: capa borrada (padrão) ou preset milk escolhido pelo usuário
+    val milkAvailable = remember { ProjectMNative.isAvailable } && milkPresets.isNotEmpty()
+    var useMilk by remember { mutableStateOf(false) }
+    var milkPreset by remember {
+        mutableStateOf(initialMilkPreset?.takeIf { it in milkPresets } ?: milkPresets.firstOrNull())
+    }
+    var showPicker by remember { mutableStateOf(false) }
+    val milkPath = if (useMilk && milkAvailable) milkPreset else null
 
     val sides = remember(aspect, fps) { LyricsVideoGenerator.supportedShortSides(aspect, fps) }
     val side = when {
@@ -66,8 +163,19 @@ internal fun LyricsVideoDialog(
         else -> sides.last()
     }
 
-    val startMs = if (whole) 0L else range.start.toLong()
-    val endMs = if (whole) duration else range.endInclusive.toLong()
+    val mode = if (clipMode == ClipMode.LINES && !linesAvailable) ClipMode.WHOLE else clipMode
+    val startMs = when (mode) {
+        ClipMode.WHOLE -> 0L
+        ClipMode.MANUAL -> range.start.toLong()
+        ClipMode.LINES -> syncedMain[i0].timeMs.coerceIn(0L, duration)
+    }
+    val endMs = when (mode) {
+        ClipMode.WHOLE -> duration
+        ClipMode.MANUAL -> range.endInclusive.toLong()
+        ClipMode.LINES -> lineEndMs(syncedMain, i1, duration)
+            .coerceAtLeast(startMs + MIN_CLIP_MS.toLong())
+            .coerceAtMost(duration)
+    }
     val (vw, vh) = LyricsVideoGenerator.dimsFor(side, aspect)
 
     fun setStart(ms: Long) {
@@ -87,30 +195,124 @@ internal fun LyricsVideoDialog(
         selectedLabelColor = Color.White
     )
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1A1A24),
-        title = { Text("Gerar vídeo com letra", color = Color.White) },
+        title = { Text("Gerar vídeo", color = MaterialTheme.colorScheme.onSurface) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("Trecho", color = Color.White.copy(0.6f), fontSize = 12.sp)
+                Text("Fonte da letra", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
-                        selected = whole,
-                        onClick = { whole = true },
+                        selected = !noLyrics && lyricsSource == LyricsEmbedder.Target.LRC_FILE,
+                        onClick = {
+                            noLyrics = false
+                            lyricsSource = LyricsEmbedder.Target.LRC_FILE
+                        },
+                        enabled = hasExternalLrc,
+                        label = { Text("Arquivo .lrc") },
+                        colors = chipColors
+                    )
+                    FilterChip(
+                        selected = !noLyrics && lyricsSource == LyricsEmbedder.Target.EMBEDDED,
+                        onClick = {
+                            noLyrics = false
+                            lyricsSource = LyricsEmbedder.Target.EMBEDDED
+                        },
+                        label = { Text("Tags embutidas") },
+                        colors = chipColors
+                    )
+                    FilterChip(
+                        selected = noLyrics,
+                        onClick = { noLyrics = true },
+                        label = { Text("Sem letra") },
+                        colors = chipColors
+                    )
+                }
+                if (noLyrics) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Sem letra: o vídeo mostra a capa (ou o preset milk) com título, artista e barra de progresso.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                } else if (!loadingLines && !linesAvailable) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Nenhuma letra sincronizada nesta fonte — o vídeo será gerado sem letra.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                }
+                if (!hasExternalLrc) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Não há .lrc ao lado desta música — usando tags embutidas.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
+
+                Text("Trecho", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = mode == ClipMode.WHOLE,
+                        onClick = { clipMode = ClipMode.WHOLE },
                         label = { Text("Música inteira") },
                         colors = chipColors
                     )
                     FilterChip(
-                        selected = !whole,
-                        onClick = { whole = false },
+                        selected = mode == ClipMode.MANUAL,
+                        onClick = { clipMode = ClipMode.MANUAL },
                         label = { Text("Escolher trecho") },
+                        colors = chipColors
+                    )
+                    FilterChip(
+                        selected = mode == ClipMode.LINES,
+                        onClick = { clipMode = ClipMode.LINES },
+                        enabled = linesAvailable,
+                        label = { Text("Por linhas da letra") },
                         colors = chipColors
                     )
                 }
 
-                if (!whole) {
+                if (mode == ClipMode.LINES) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Do começo da linha inicial até o fim da linha final (letra sincronizada).",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                    if (n > 1) {
+                        RangeSlider(
+                            value = lineRange,
+                            onValueChange = { lineRange = it },
+                            valueRange = 0f..(n - 1).toFloat(),
+                            steps = (n - 2).coerceAtLeast(0),
+                            colors = SliderDefaults.colors(
+                                thumbColor = Accent,
+                                activeTrackColor = Accent,
+                                inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
+                            )
+                        )
+                    }
+                    LineInfoRow(label = "Início", line = syncedMain[i0], number = i0 + 1)
+                    LineInfoRow(label = "Fim", line = syncedMain[i1], number = i1 + 1)
+                } else if (loadingLines && !noLyrics) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Carregando linhas da letra…",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                }
+
+                if (mode == ClipMode.MANUAL) {
                     Spacer(Modifier.height(8.dp))
                     RangeSlider(
                         value = range,
@@ -127,7 +329,7 @@ internal fun LyricsVideoDialog(
                         colors = SliderDefaults.colors(
                             thumbColor = Accent,
                             activeTrackColor = Accent,
-                            inactiveTrackColor = Color.White.copy(alpha = 0.2f)
+                            inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
                         )
                     )
                     TimeAdjustRow(
@@ -145,7 +347,47 @@ internal fun LyricsVideoDialog(
                 }
 
                 Spacer(Modifier.height(14.dp))
-                Text("Proporção", color = Color.White.copy(0.6f), fontSize = 12.sp)
+                Text("Fundo", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = !useMilk,
+                        onClick = { useMilk = false },
+                        label = { Text("Capa borrada") },
+                        colors = chipColors
+                    )
+                    FilterChip(
+                        selected = useMilk && milkAvailable,
+                        onClick = { useMilk = true },
+                        enabled = milkAvailable,
+                        label = { Text("Preset milk") },
+                        colors = chipColors
+                    )
+                }
+                if (useMilk && milkAvailable) {
+                    TextButton(onClick = { showPicker = true }) {
+                        Text(
+                            milkPreset?.let { java.io.File(it).nameWithoutExtension } ?: "Escolher preset",
+                            color = Accent,
+                            maxLines = 1
+                        )
+                    }
+                    Text(
+                        "O preset reage à música do trecho. Gerar com esse fundo demora bem mais.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                } else if (!milkAvailable) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Preset milk indisponível: importe presets em Configurações > Visualizador.",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
+                        fontSize = 12.sp
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("Proporção", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -162,7 +404,7 @@ internal fun LyricsVideoDialog(
                 }
 
                 Spacer(Modifier.height(14.dp))
-                Text("Taxa de quadros", color = Color.White.copy(0.6f), fontSize = 12.sp)
+                Text("Taxa de quadros", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     LyricsVideoGenerator.FPS_OPTIONS.forEach { f ->
@@ -176,7 +418,7 @@ internal fun LyricsVideoDialog(
                 }
 
                 Spacer(Modifier.height(14.dp))
-                Text("Resolução", color = Color.White.copy(0.6f), fontSize = 12.sp)
+                Text("Resolução", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -196,28 +438,63 @@ internal fun LyricsVideoDialog(
                 Text(
                     "Saída: ${vw}×${vh} · $fps fps · MP4 (H.264 + AAC) · " +
                         fmtTime(endMs - startMs),
-                    color = Color.White.copy(0.7f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(0.7f),
                     fontSize = 13.sp
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Resoluções maiores e 60 fps demoram mais para gerar. O progresso aparece na notificação. A letra usa a fonte e as cores do Tocando agora.",
-                    color = Color.White.copy(0.45f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
                     fontSize = 12.sp
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = { onGenerate(startMs, endMs, side, aspect, fps) }) {
+            TextButton(onClick = {
+                onGenerate(startMs, endMs, side, aspect, fps, milkPath, lyricsSource, !noLyrics)
+            }) {
                 Text("Gerar", color = Accent)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancelar", color = Color.White.copy(0.7f))
+                Text("Cancelar", color = MaterialTheme.colorScheme.onSurface.copy(0.7f))
             }
         }
     )
+
+    if (showPicker) {
+        MilkPresetPickerDialog(
+            presets = milkPresets,
+            currentPath = milkPreset,
+            onDismiss = { showPicker = false },
+            onSelect = { path ->
+                milkPreset = path
+                showPicker = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun LineInfoRow(label: String, line: LyricLine, number: Int) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Color.White.copy(0.85f), fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+        Text(fmtTime(line.timeMs), color = Accent, fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+        Text(
+            "#$number · ${line.text}",
+            color = Color.White.copy(0.75f),
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
 }
 
 @Composable
@@ -247,26 +524,25 @@ internal fun LyricsVideoProgressDialog(
     onCancel: () -> Unit,
     onHide: () -> Unit
 ) {
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = { /* só fecha pelos botões */ },
-        containerColor = Color(0xFF1A1A24),
-        title = { Text("Gerando vídeo…", color = Color.White) },
+        title = { Text("Gerando vídeo…", color = MaterialTheme.colorScheme.onSurface) },
         text = {
             Column {
-                Text(running.trackTitle, color = Color.White.copy(0.85f), fontSize = 14.sp, maxLines = 1)
+                Text(running.trackTitle, color = MaterialTheme.colorScheme.onSurface.copy(0.85f), fontSize = 14.sp, maxLines = 1)
                 Spacer(Modifier.height(4.dp))
-                Text(running.stage, color = Color.White.copy(0.6f), fontSize = 13.sp)
+                Text(running.stage, color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 13.sp)
                 Spacer(Modifier.height(14.dp))
                 LinearProgressIndicator(
                     progress = { running.progress.coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth(),
                     color = Accent,
-                    trackColor = Color.White.copy(alpha = 0.15f)
+                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "${(running.progress * 100).toInt()}%",
-                    color = Color.White.copy(0.7f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(0.7f),
                     fontSize = 13.sp
                 )
             }
@@ -275,7 +551,7 @@ internal fun LyricsVideoProgressDialog(
             TextButton(onClick = onHide) { Text("Segundo plano", color = Accent) }
         },
         dismissButton = {
-            TextButton(onClick = onCancel) { Text("Cancelar", color = Color.White.copy(0.7f)) }
+            TextButton(onClick = onCancel) { Text("Cancelar", color = MaterialTheme.colorScheme.onSurface.copy(0.7f)) }
         }
     )
 }

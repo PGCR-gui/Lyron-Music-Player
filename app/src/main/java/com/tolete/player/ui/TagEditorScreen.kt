@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -94,7 +95,9 @@ data class TagEdits(
     val originalArtist: String = "",
     val originalYear: String = "",
     /** Nova capa (JPEG já reduzido) escolhida no editor; null = manter a atual. */
-    val cover: ByteArray? = null
+    val cover: ByteArray? = null,
+    /** true só se o usuário esvaziou de propósito uma letra que existia. */
+    val clearLyrics: Boolean = false
 )
 
 fun TagEdits.toWriterFields() = TagWriter.Fields(
@@ -112,6 +115,7 @@ fun TagEdits.toWriterFields() = TagWriter.Fields(
     lyricist = lyricist,
     comment = comment,
     lyrics = lyrics,
+    clearLyrics = clearLyrics,
     bpm = bpm,
     isrc = isrc,
     copyright = copyright,
@@ -150,6 +154,8 @@ fun TagEditorScreen(
     var lyricist by remember(track.id) { mutableStateOf("") }
     var comment by remember(track.id) { mutableStateOf("") }
     var lyrics by remember(track.id) { mutableStateOf("") }
+    // Letra como estava no arquivo ao abrir (para saber se o usuário a apagou de propósito)
+    var originalLyrics by remember(track.id) { mutableStateOf("") }
     var bpm by remember(track.id) { mutableStateOf("") }
     var isrc by remember(track.id) { mutableStateOf("") }
     var copyright by remember(track.id) { mutableStateOf("") }
@@ -233,7 +239,8 @@ fun TagEditorScreen(
         composer, lyricist, comment, lyrics,
         bpm, isrc, copyright, encoder, publisher,
         originalArtist, originalYear,
-        pendingCover
+        pendingCover,
+        clearLyrics = originalLyrics.isNotBlank() && lyrics.isBlank()
     )
 
     fun applyTags(t: TagReader.Tags) {
@@ -251,6 +258,7 @@ fun TagEditorScreen(
         lyricist = t.lyricist.orEmpty()
         comment = t.comment.orEmpty()
         lyrics = t.lyrics.orEmpty()
+        originalLyrics = lyrics
         bpm = t.bpm.orEmpty()
         isrc = t.isrc.orEmpty()
         copyright = t.copyright.orEmpty()
@@ -281,6 +289,20 @@ fun TagEditorScreen(
             }
             if (tags != null) {
                 applyTags(tags)
+                if (tags.lyrics.isNullOrBlank()) {
+                    // Letra pode estar em outra tag (UNSYNCEDLYRICS/SYNCEDLYRICS, USLT/SYLT):
+                    // mostra no campo para o editor de letras não abrir vazio.
+                    val extra = withContext(Dispatchers.IO) {
+                        try {
+                            val l = com.tolete.player.data.LyricsExtractor.loadEmbedded(context, track)
+                            if (l.isEmpty()) "" else com.tolete.player.data.LyricsEmbedder.linesToLrcText(l).trimEnd()
+                        } catch (_: Throwable) { "" }
+                    }
+                    if (extra.isNotBlank()) {
+                        lyrics = extra
+                        originalLyrics = extra
+                    }
+                }
                 fileHint = "Lido do ficheiro via JAudioTagger"
             } else {
                 fileHint = "Não foi possível ler o ficheiro (path real / “Todos os ficheiros”)"
@@ -634,14 +656,14 @@ fun TagEditorScreen(
         } // Column content
 
         if (showOnlineLookup) {
-            AlertDialog(
+            AppAlertDialog(
                 onDismissRequest = { if (!onlineLoading) showOnlineLookup = false },
                 title = { Text("Resultados online") },
                 text = {
                     when {
                         onlineLoading -> {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(modifier = Modifier.size(22.dp), color = appColors.accent)
+                                CircularProgressIndicator(modifier = Modifier.size(22.dp), color = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
                                 Text("Buscando no Deezer e Last.fm…")
                             }
@@ -661,7 +683,7 @@ fun TagEditorScreen(
                                         Modifier
                                             .fillMaxWidth()
                                             .clip(RoundedCornerShape(12.dp))
-                                            .background(Color.White.copy(0.08f))
+                                            .background(MaterialTheme.colorScheme.onSurface.copy(0.08f))
                                             .clickable {
                                                 // Aplica tags no formulário (preview antes de Salvar)
                                                 if (r.title.isNotBlank()) title = r.title
@@ -718,7 +740,7 @@ fun TagEditorScreen(
                                             Modifier
                                                 .size(56.dp)
                                                 .clip(RoundedCornerShape(8.dp))
-                                                .background(Color.White.copy(0.1f)),
+                                                .background(MaterialTheme.colorScheme.onSurface.copy(0.1f)),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             if (!r.coverUrl.isNullOrBlank()) {
@@ -732,7 +754,7 @@ fun TagEditorScreen(
                                                 Icon(
                                                     Icons.Rounded.Image,
                                                     contentDescription = null,
-                                                    tint = Color.White.copy(0.4f)
+                                                    tint = MaterialTheme.colorScheme.onSurface.copy(0.4f)
                                                 )
                                             }
                                         }
@@ -742,10 +764,10 @@ fun TagEditorScreen(
                                             Text(
                                                 listOf(r.artist, r.album).filter { it.isNotBlank() }.joinToString(" · "),
                                                 fontSize = 12.sp,
-                                                color = Color.White.copy(0.7f),
+                                                color = MaterialTheme.colorScheme.onSurface.copy(0.7f),
                                                 maxLines = 2
                                             )
-                                            Text(r.source, fontSize = 11.sp, color = appColors.accent.copy(0.9f))
+                                            Text(r.source, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary.copy(0.9f))
                                         }
                                     }
                                 }
@@ -763,11 +785,7 @@ fun TagEditorScreen(
 
         if (showLyricsSync) {
             val initialLines = remember(lyrics) {
-                val parsed = com.tolete.player.data.LyricsExtractor.parseLrcText(lyrics)
-                if (parsed.isNotEmpty()) parsed
-                else lyrics.lines().filter { it.isNotBlank() }.map {
-                    com.tolete.player.data.LyricLine(-1L, it)
-                }
+                com.tolete.player.data.LyricsExtractor.parseLyricsContent(lyrics)
             }
             LyricsEditorScreen(
                 track = track,

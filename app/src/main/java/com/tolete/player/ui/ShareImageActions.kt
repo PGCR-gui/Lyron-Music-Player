@@ -6,7 +6,13 @@ import android.content.ClipData
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.graphics.drawable.GradientDrawable
 import android.os.Environment
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.TextView
+import androidx.compose.ui.graphics.toArgb
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import java.io.File
@@ -40,17 +46,45 @@ object ShareImageActions {
         val act = findActivity(context)
         val appCtx = context.applicationContext
         val run = Runnable {
-            val builder = if (act != null) AlertDialog.Builder(act) else AlertDialog.Builder(context)
-            builder
-                .setTitle(dialogTitle)
-                .setItems(arrayOf("Salvar", "Compartilhar")) { _, which ->
+            val ctx: Context = act ?: context
+            val builder = AlertDialog.Builder(ctx)
+            // Mesmo visual dos outros menus: cor do tema com transparência e texto adaptável.
+            val pal = menuPalette(LiveThemeHolder.colors ?: DefaultAppColors)
+            val density = ctx.resources.displayMetrics.density
+            val options = arrayOf("Salvar", "Compartilhar")
+            val adapter = object : ArrayAdapter<String>(
+                ctx, android.R.layout.simple_list_item_1, options
+            ) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val v = super.getView(position, convertView, parent)
+                    (v as? TextView)?.setTextColor(pal.content.toArgb())
+                    return v
+                }
+            }
+            val titleView = TextView(ctx).apply {
+                text = dialogTitle
+                textSize = 22f
+                setTextColor(pal.content.toArgb())
+                setPadding((24 * density).toInt(), (22 * density).toInt(), (24 * density).toInt(), (8 * density).toInt())
+            }
+            val dialog = builder
+                .setCustomTitle(titleView)
+                .setAdapter(adapter) { _, which ->
                     when (which) {
                         0 -> saveToLyron(appCtx, cacheFile, subdir)
                         1 -> shareFile(appCtx, cacheFile, shareTitle, shareText, mime)
                     }
                 }
                 .setNegativeButton("Cancelar", null)
-                .show()
+                .create()
+            dialog.window?.setBackgroundDrawable(
+                GradientDrawable().apply {
+                    setColor(pal.container.toArgb())
+                    cornerRadius = 28 * density
+                }
+            )
+            dialog.show()
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(pal.accent.toArgb())
         }
         if (act != null) act.runOnUiThread(run)
         else android.os.Handler(android.os.Looper.getMainLooper()).post(run)

@@ -12,6 +12,7 @@ import android.graphics.Shader
 import android.graphics.Typeface
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.graphics.ColorUtils
+import com.tolete.player.data.LyricAnimation
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
 import com.tolete.player.ui.BuiltInFonts
@@ -20,14 +21,19 @@ import java.io.File
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /** Aparência da letra no vídeo (mesmos valores usados na tela Tocando agora). */
 data class LyricsVideoStyle(
     val fontPath: String? = null,
+    val translationFontPath: String? = null,
     val primaryColor: Int = 0xFFFFFFFF.toInt(),
     val secondaryColor: Int = 0x66FFFFFF,
     val borderColor: Int = 0xFF000000.toInt(),
-    val borderWidth: Float = 0f
+    val borderWidth: Float = 0f,
+    val translationColor: Int = 0xFFB0BEC5.toInt(),
+    /** Fonte usada nas palavras com efeito {des}; null = mesma da letra. */
+    val emphasisFontPath: String? = null
 )
 
 /**
@@ -44,12 +50,21 @@ class LyricsFrameRenderer(
     rawLines: List<LyricLine>,
     private val style: LyricsVideoStyle,
     val width: Int,
-    val height: Int
+    val height: Int,
+    /** true = sem fundo (transparente): o fundo vem de um preset milk desenhado por baixo. */
+    private val transparentBackground: Boolean = false
 ) {
     private val portrait = height >= width
     private val scale = min(width, height) / 1080f
     private val dw = width / scale
     private val dh = height / scale
+
+    /** Nenhuma linha de letra sincronizada (música instrumental ou sem letra). */
+    private val noLyrics: Boolean =
+        rawLines.none { it.timeMs >= 0 && it.text.isNotBlank() && !it.isBackground }
+
+    /** Sem letra e sem preset milk: a capa grande ocupa o centro do vídeo. */
+    private val bigCover: Boolean = noLyrics && !transparentBackground
 
     // Área da letra (unidades de projeto)
     private val areaLeft = if (portrait) 72f else 820f
@@ -59,25 +74,71 @@ class LyricsFrameRenderer(
     private val areaCx = (areaLeft + areaRight) / 2f
     private val areaCy = (areaTop + areaBottom) / 2f
 
+    // Largura da coluna da capa/marca na horizontal (com capa grande ela usa a tela toda)
+    private val leftColW = if (!portrait && bigCover) dw else areaLeft
+
     // Barra de progresso
-    private val barX1 = if (portrait) 96f else areaLeft
-    private val barX2 = if (portrait) dw - 96f else areaRight
-    private val barY = if (portrait) dh - 290f else dh - 110f
+    private val barX1 = if (portrait) 96f else if (bigCover) dw * 0.22f else areaLeft
+    private val barX2 = if (portrait) dw - 96f else if (bigCover) dw * 0.78f else areaRight
+    private val barY = if (portrait) dh - 290f else if (bigCover) dh - 190f else dh - 110f
 
     private val customTypeface: Typeface? = resolveTypeface(style.fontPath)
     private val lyricTypeface: Typeface =
         customTypeface ?: Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    private val translationTypeface: Typeface =
+        resolveTypeface(style.translationFontPath) ?: lyricTypeface
+    private val emphasisTypeface: Typeface =
+        resolveTypeface(style.emphasisFontPath) ?: lyricTypeface
 
     private val primary = (style.primaryColor and 0x00FFFFFF) or (0xF2 shl 24)
     private val dim = (style.secondaryColor and 0x00FFFFFF) or (0x94 shl 24)
 
     private val baseSize = 58f
+    private val TRANSLATION_SIZE_MUL = 0.88f
     private val lineGap = 44f
     private val rowFactor = 1.28f
 
+    // Efeitos de palavra — mesmos valores da tela Tocando agora (SyllableLine), convertidos de dp
+    // para unidades de projeto (~2,6 unidades por dp num celular de ~411dp de largura).
+    private val DES_SCALE = 1.24f
+    /** Tempo (ms) que o destaque leva para crescer até o tamanho final. */
+    private val DES_GROW_MS = 160f
+    private val GLO_HALF_PERIOD_MS = 460f
+    private val POP_HALF_PERIOD_MS = 110f
+    private val POP_DX = 6.2f
+    private val POP_DY = 2.8f
+    private val DED_DELAY_MS = 1000f
+    private val DED_DELAY_TR_MS = 1500f
+    private val DED_FADE_MS = 200f
+    private val ZOOM_MS = 300f
+    private val SLI_MS = 280f
+    private val FLA_MS = 220f
+    private val VIB_MS = 450f
+    private val SHD_MS = 500f
+    private val TYP_CHAR_MS = 55f
+    private val VIB_DX = 2.6f
+    private val VIB_DY = 1.6f
+    private val WAV_AMP = 6.5f
+    private val ECO_DX = 7f
+    private val ECO_DY = 5f
+
     // ---- layout das linhas ----
-    private class Seg(val text: String, val x: Float, val w: Float, val wordIdx: Int)
-    private class Row(val text: String, val width: Float, val segs: List<Seg>?)
+    /**
+     * [w] é a largura reservada no layout. Em palavras {des} ela já considera o texto ampliado
+     * (fonte de ênfase × DES_SCALE): [leadW] = espaço inicial (tamanho normal), [coreW] = texto ampliado.
+     */
+    private class Seg(
+        val text: String,
+        val x: Float,
+        val w: Float,
+        val wordIdx: Int,
+        val leadW: Float = 0f,
+        val coreW: Float = 0f,
+        val des: Boolean = false
+    )
+
+    /** [width] = largura com os espaços reservados; [plainWidth] = largura do texto liso (linha inativa). */
+    private class Row(val text: String, val width: Float, val segs: List<Seg>?, val plainWidth: Float = width)
     private class Layout(
         val line: LyricLine,
         val rows: List<Row>,
@@ -88,10 +149,12 @@ class LyricsFrameRenderer(
         val height: Float get() = rows.size * rowH
     }
 
-    // Letras de fundo (backing vocals) ficam de fora: sobrepõem a linha principal no tempo
-    // e fariam a linha ativa piscar entre uma e outra.
+    // Mantém principal + tradução; backing fica para desenho paralelo quando no mesmo instante.
     private val lines: List<LyricLine> = rawLines
         .filter { it.timeMs >= 0 && it.text.isNotBlank() && !it.isBackground }
+        .sortedBy { it.timeMs }
+    private val bgLines: List<LyricLine> = rawLines
+        .filter { it.timeMs >= 0 && it.text.isNotBlank() && it.isBackground }
         .sortedBy { it.timeMs }
     private val starts = LongArray(lines.size) { lines[it].timeMs }
 
@@ -132,6 +195,7 @@ class LyricsFrameRenderer(
     private val rectF = RectF()
 
     fun render(tMs: Long): Bitmap {
+        if (transparentBackground) frame.eraseColor(0)
         canvas.drawBitmap(staticLayer, 0f, 0f, null)
         canvas.save()
         canvas.scale(scale, scale)
@@ -163,6 +227,22 @@ class LyricsFrameRenderer(
                 hi = mid - 1
             }
         }
+        // Prefere linha principal (não-tradução) para o scroll; tradução acompanha logo abaixo
+        if (ans >= 0 && lines[ans].isTranslation) {
+            var i = ans - 1
+            while (i >= 0 && lines[i].isTranslation) i--
+            if (i >= 0 && lines[i].timeMs == lines[ans].timeMs) return i
+        }
+        return ans
+    }
+
+    /** Última linha de tradução com timeMs <= tMs (para cor ativa da tradução). */
+    private fun activeTranslationIndex(tMs: Long): Int {
+        var ans = -1
+        for (i in lines.indices) {
+            if (starts[i] > tMs) break
+            if (lines[i].isTranslation) ans = i
+        }
         return ans
     }
 
@@ -173,6 +253,7 @@ class LyricsFrameRenderer(
         if (n == 0) return
 
         val a = activeIndex(tMs)
+        val aTr = activeTranslationIndex(tMs)
         val k: Float
         val scrollCenter: Float
         val focus: Float
@@ -212,23 +293,61 @@ class LyricsFrameRenderer(
 
             c.save()
             c.scale(sc, sc, areaCx, mid)
-            val karaoke = (j == a) && lay.line.hasSyllableSync
-            fillPaint.textSize = lay.size
-            strokePaint.textSize = lay.size
+            val isTr = lay.line.isTranslation
+            // Efeitos ({sil}/{glo}/{pop}/{des}) valem também nas linhas de tradução: a tradução fica
+            // "ativa" enquanto for a vigente (aTr); a principal, enquanto for a ativa (a).
+            val karaoke = lay.line.hasSyllableSync && (if (isTr) j == aTr else j == a)
+            val sizeMul = if (isTr) TRANSLATION_SIZE_MUL else 1f
+            // Fonte separada para tradução, se configurada
+            val face = if (isTr) translationTypeface else lyricTypeface
+            fillPaint.typeface = face
+            strokePaint.typeface = face
+            measure.typeface = face
+            fillPaint.textSize = lay.size * sizeMul
+            strokePaint.textSize = lay.size * sizeMul
             strokePaint.strokeWidth = style.borderWidth * 2f
+            val lineAlpha = if (isTr) alpha * 0.95f else alpha
+            // Tradução: cor escolhida só enquanto está no timestamp ativo; senão secundária
+            val trColor = (style.translationColor and 0x00FFFFFF) or (0xF2 shl 24)
+            val lineMix = mix
 
             for ((r, row) in lay.rows.withIndex()) {
                 val baseline = top + r * lay.rowH + lay.baselineOff
-                val x0 = areaCx - row.width / 2f
                 if (karaoke && row.segs != null) {
-                    drawKaraokeRow(c, lay, row, x0, baseline, tMs, alpha)
+                    drawKaraokeRow(
+                        c, lay, row, areaCx - row.width / 2f, baseline, tMs, lineAlpha,
+                        face, lay.size * sizeMul, if (isTr) trColor else primary
+                    )
                 } else {
-                    val color = ColorUtils.blendARGB(dim, primary, mix)
-                    drawText(c, row.text, x0, baseline, color, alpha)
+                    // Linha inativa: texto liso, centralizado pela largura dele (sem os espaços
+                    // reservados para os destaques).
+                    val x0 = areaCx - row.plainWidth / 2f
+                    val color = if (isTr) {
+                        // Coriva só enquanto esta tradução é a vigente (timeMs <= tMs)
+                        // — independente do activeIndex, que aponta para a linha principal
+                        val trMix = if (j == aTr) 1f else 0f
+                        ColorUtils.blendARGB(dim, trColor, trMix)
+                    } else {
+                        ColorUtils.blendARGB(dim, primary, lineMix)
+                    }
+                    drawText(c, row.text, x0, baseline, color, lineAlpha)
                 }
             }
             c.restore()
         }
+    }
+
+    /** Onda triangular 0→1→0 (equivale ao animateFloat com RepeatMode.Reverse do player). */
+    private fun tri(x: Float): Float {
+        val m = ((x % 2f) + 2f) % 2f
+        return if (m <= 1f) m else 2f - m
+    }
+
+    private fun setPaintStyle(face: Typeface, size: Float) {
+        fillPaint.typeface = face
+        strokePaint.typeface = face
+        fillPaint.textSize = size
+        strokePaint.textSize = size
     }
 
     private fun drawKaraokeRow(
@@ -238,27 +357,157 @@ class LyricsFrameRenderer(
         x0: Float,
         baseline: Float,
         tMs: Long,
-        alpha: Float
+        alpha: Float,
+        /** Fonte e tamanho desta linha (letra principal ou tradução). */
+        baseFace: Typeface,
+        baseSize: Float,
+        /** Cor da parte já cantada (primária na letra, cor da tradução na tradução). */
+        lit: Int
     ) {
         val words = lay.line.words
         for (seg in row.segs!!) {
             val w = words[seg.wordIdx]
             val end = wordEnd(lay.line, seg.wordIdx)
-            val x = x0 + seg.x
+            // O efeito começa no tempo da palavra e dura enquanto a linha estiver ativa.
+            val started = w.timeMs < 0L || tMs >= w.timeMs
+            val anim = if (started) w.animation else LyricAnimation.NONE
+            val t0 = if (w.timeMs >= 0L) w.timeMs else lay.line.timeMs
+            val elapsed = (tMs - t0).coerceAtLeast(0L).toFloat()
+
+            var text = seg.text
+            var x = x0 + seg.x
+            var segW = seg.w
+            var fontSize = baseSize
+            if (seg.des) {
+                // Destacar: o layout já reservou o espaço do texto ampliado (leadW + coreW), então a
+                // palavra cresce no lugar, centralizada no espaço dela, sem invadir as vizinhas.
+                val core = seg.text.trim()
+                val grow = if (started) {
+                    val k = ((tMs - t0) / DES_GROW_MS).coerceIn(0f, 1f)
+                    1f - (1f - k) * (1f - k)
+                } else 0f
+                fontSize = baseSize * (1f + (DES_SCALE - 1f) * grow)
+                setPaintStyle(if (started) emphasisTypeface else baseFace, fontSize)
+                segW = fillPaint.measureText(core)
+                val center = x0 + seg.x + seg.leadW + seg.coreW / 2f
+                text = core
+                x = center - segW / 2f
+            }
+
+            // Dim da tradução: versão mais apagada da própria cor de tradução (não a secundária da letra)
+            val localDim = if (lay.line.isTranslation) {
+                ColorUtils.setAlphaComponent(lit, 0x94)
+            } else dim
+
+            c.save()
+            // Transforms por efeito
+            if (anim == LyricAnimation.POP) {
+                val ph = (tri(elapsed / POP_HALF_PERIOD_MS) * 2f * Math.PI).toFloat()
+                c.translate(sin(ph) * POP_DX, sin(ph * 2f) * POP_DY)
+            } else if (anim == LyricAnimation.VIB && elapsed < VIB_MS) {
+                val ph = (tri(elapsed / POP_HALF_PERIOD_MS) * 2f * Math.PI).toFloat()
+                c.translate(sin(ph) * VIB_DX, sin(ph * 1.7f) * VIB_DY)
+            } else if (anim == LyricAnimation.WAV) {
+                c.translate(0f, sin((elapsed / 160f) * 2f * Math.PI.toFloat()) * WAV_AMP)
+            } else if (anim == LyricAnimation.SLI) {
+                val k = (elapsed / SLI_MS).coerceIn(0f, 1f)
+                val e = 1f - (1f - k) * (1f - k)
+                c.translate(0f, (1f - e) * 18f)
+            }
+            // Zoom in/out em torno do centro do segmento
+            val zScale = when (anim) {
+                LyricAnimation.ZOU -> {
+                    val k = (elapsed / ZOOM_MS).coerceIn(0f, 1f)
+                    1.55f - 0.55f * (1f - (1f - k) * (1f - k))
+                }
+                LyricAnimation.ZIN -> {
+                    val k = (elapsed / ZOOM_MS).coerceIn(0f, 1f)
+                    0.55f + 0.45f * (1f - (1f - k) * (1f - k))
+                }
+                else -> 1f
+            }
+            if (zScale != 1f) {
+                val cx = x + segW / 2f
+                val cy = baseline - fontSize * 0.35f
+                c.translate(cx, cy)
+                c.scale(zScale, zScale)
+                c.translate(-cx, -cy)
+            }
+
+            // Alpha: Sumir {ded} 1s / 1,5s tradução
+            var drawAlpha = alpha
+            if (anim == LyricAnimation.DED && t0 >= 0L) {
+                // Mesmo tempo na letra e na tradução
+                val delay = DED_DELAY_MS
+                val e = (tMs - t0).toFloat()
+                drawAlpha = when {
+                    e < delay -> alpha
+                    e < delay + DED_FADE_MS -> alpha * (1f - (e - delay) / DED_FADE_MS)
+                    else -> 0f
+                }
+            }
+
+            // Typewriter: corta o texto
+            if (anim == LyricAnimation.TYP && text.isNotEmpty()) {
+                val chars = ((elapsed / TYP_CHAR_MS).toInt() + 1).coerceIn(0, text.length)
+                text = text.take(chars)
+                segW = fillPaint.measureText(text)
+            }
+
             val span = (end - w.timeMs).coerceAtLeast(1L).toFloat()
             val lin = ((tMs - w.timeMs) / span).coerceIn(0f, 1f)
+            // Tradução: palavras sem efeito ficam na cor cheia (sem preenchimento de karaokê)
+            val trNoKaraoke = lay.line.isTranslation && w.animation == LyricAnimation.NONE
+
+            // Eco ghost
+            if (anim == LyricAnimation.ECO) {
+                val ghostPhase = (elapsed / 180f) % 1f
+                c.save()
+                c.translate(ECO_DX, ECO_DY + ghostPhase * 4f)
+                drawText(c, text, x, baseline, lit, drawAlpha * 0.32f * (1f - ghostPhase * 0.4f))
+                c.restore()
+            }
+
             when {
-                tMs < w.timeMs -> drawText(c, seg.text, x, baseline, dim, alpha)
-                lin >= 1f -> drawText(c, seg.text, x, baseline, primary, alpha)
+                anim == LyricAnimation.GLO -> {
+                    val col = ColorUtils.blendARGB(lit, localDim, tri(elapsed / GLO_HALF_PERIOD_MS))
+                    drawText(c, text, x, baseline, col, drawAlpha)
+                }
+                anim == LyricAnimation.RNB -> {
+                    val hue = ((elapsed / 12f) % 360f)
+                    val col = android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.85f, 1f))
+                    drawText(c, text, x, baseline, col, drawAlpha)
+                }
+                anim == LyricAnimation.FLA && elapsed < FLA_MS -> {
+                    val boost = 1f - (elapsed / FLA_MS)
+                    val col = ColorUtils.blendARGB(lit, android.graphics.Color.WHITE, boost * 0.85f)
+                    drawText(c, text, x, baseline, col, drawAlpha)
+                }
+                anim == LyricAnimation.FRZ -> {
+                    drawText(c, text, x, baseline, lit, drawAlpha)
+                }
+                anim == LyricAnimation.SHD && elapsed < SHD_MS -> {
+                    val k = 1f - (elapsed / SHD_MS).coerceIn(0f, 1f)
+                    // sombra
+                    val shCol = ColorUtils.setAlphaComponent(lit, (90 * k).toInt().coerceIn(0, 255))
+                    drawText(c, text, x + 3f * k, baseline + 4f * k, shCol, drawAlpha * k)
+                    drawText(c, text, x, baseline, lit, drawAlpha)
+                }
+                trNoKaraoke -> drawText(c, text, x, baseline, lit, drawAlpha)
+                tMs < w.timeMs -> drawText(c, text, x, baseline, localDim, drawAlpha)
+                lin >= 1f || anim == LyricAnimation.FRZ -> drawText(c, text, x, baseline, lit, drawAlpha)
                 else -> {
                     val p = 1f - (1f - lin) * (1f - lin)
-                    drawText(c, seg.text, x, baseline, dim, alpha)
+                    drawText(c, text, x, baseline, localDim, drawAlpha)
                     c.save()
-                    c.clipRect(x, baseline - lay.size * 1.3f, x + seg.w * p, baseline + lay.size * 0.5f)
-                    drawText(c, seg.text, x, baseline, primary, alpha)
+                    c.clipRect(x, baseline - fontSize * 1.3f, x + segW * p, baseline + fontSize * 0.5f)
+                    drawText(c, text, x, baseline, lit, drawAlpha)
                     c.restore()
                 }
             }
+            c.restore()
+
+            if (seg.des) setPaintStyle(baseFace, baseSize)
         }
     }
 
@@ -333,7 +582,9 @@ class LyricsFrameRenderer(
 
         // Fundo: capa cortada (sem esticar) + blur, ou cor sólida
         val cover = LyricsShareHelper.loadCoverBitmap(track)
-        if (cover != null) {
+        if (transparentBackground) {
+            // sem fundo aqui: o preset milk é desenhado por baixo deste layer
+        } else if (cover != null) {
             val blurred = LyricsShareHelper.buildBlurredBackground(cover, dw.toInt(), dh.toInt())
             c.drawBitmap(blurred, null, RectF(0f, 0f, dw, dh), filter)
             if (!blurred.isRecycled) blurred.recycle()
@@ -344,7 +595,8 @@ class LyricsFrameRenderer(
         val veil = Paint().apply {
             shader = LinearGradient(
                 0f, 0f, 0f, dh,
-                intArrayOf(0x66000000, 0x88000000.toInt(), 0xCC000000.toInt()),
+                if (transparentBackground) intArrayOf(0x40000000, 0x59000000, 0x99000000.toInt())
+                else intArrayOf(0x66000000, 0x88000000.toInt(), 0xCC000000.toInt()),
                 floatArrayOf(0f, 0.45f, 1f),
                 Shader.TileMode.CLAMP
             )
@@ -365,7 +617,31 @@ class LyricsFrameRenderer(
         val artist = track.artist.ifBlank { "Desconhecido" }
 
         val coverRect: RectF
-        if (portrait) {
+        if (bigCover) {
+            // Sem letra: capa grande no centro, título e artista centralizados logo abaixo.
+            val side = if (portrait) min(areaRight - areaLeft, areaBottom - areaTop) * 0.82f else 520f
+            val cx = dw / 2f
+            coverRect = if (portrait) {
+                RectF(cx - side / 2f, areaCy - side / 2f - 40f, cx + side / 2f, areaCy + side / 2f - 40f)
+            } else {
+                RectF(cx - side / 2f, 130f, cx + side / 2f, 130f + side)
+            }
+            // Sombra suave atrás da capa (camadas translúcidas, sem BlurMaskFilter)
+            val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x07000000 }
+            val rad = coverRect.width() * 0.14f
+            for (i in 10 downTo 1) {
+                val grow = i * 6f
+                val rr = RectF(coverRect).apply { inset(-grow, -grow); offset(0f, 14f) }
+                c.drawRoundRect(rr, rad + grow, rad + grow, shadow)
+            }
+            titlePaint.textSize = if (portrait) 54f else 46f
+            artistPaint.textSize = if (portrait) 38f else 34f
+            titlePaint.textAlign = Paint.Align.CENTER
+            artistPaint.textAlign = Paint.Align.CENTER
+            val maxW = if (portrait) dw - 144f else dw * 0.6f
+            c.drawText(ellipsize(title, titlePaint, maxW), cx, coverRect.bottom + 92f, titlePaint)
+            c.drawText(ellipsize(artist, artistPaint, maxW), cx, coverRect.bottom + 148f, artistPaint)
+        } else if (portrait) {
             coverRect = RectF(72f, 110f, 72f + 210f, 110f + 210f)
             titlePaint.textSize = 50f
             artistPaint.textSize = 36f
@@ -388,7 +664,7 @@ class LyricsFrameRenderer(
 
         // Marca (pílula LYRON), a mesma da foto do trecho
         val pillH = if (portrait) 96f else 84f
-        val pillCx = if (portrait) dw / 2f else areaLeft / 2f
+        val pillCx = if (portrait) dw / 2f else leftColW / 2f
         val pillCy = if (portrait) dh - 130f else dh - 100f
         try {
             LyricsShareHelper.drawBrandPill(c, context, pillCx, pillCy, pillH)
@@ -419,33 +695,61 @@ class LyricsFrameRenderer(
 
     private fun buildLayout(line: LyricLine): Layout {
         val size = baseSize
-        measure.textSize = size
+        // A tradução é DESENHADA com fonte própria e 88% do tamanho (ver drawLyrics). A largura das
+        // linhas (usada para centralizar e quebrar) precisa ser medida com exatamente o mesmo
+        // typeface/tamanho, senão o texto sai deslocado do centro.
+        val isTr = line.isTranslation
+        measure.typeface = if (isTr) translationTypeface else lyricTypeface
+        measure.textSize = if (isTr) size * TRANSLATION_SIZE_MUL else size
         val maxW = areaRight - areaLeft
         val rows = ArrayList<Row>()
 
         if (line.hasSyllableSync) {
             var cur = ArrayList<Seg>()
             var x = 0f
+
+            // Monta o segmento medindo-o como será desenhado. Em {des}, o texto é medido com a fonte
+            // de ênfase ampliada, para o espaço reservado bater com o que aparece no vídeo.
+            fun makeSeg(t: String, xPos: Float, idx: Int): Seg {
+                if (line.words[idx].animation != LyricAnimation.DES) {
+                    return Seg(t, xPos, measure.measureText(t), idx)
+                }
+                val core = t.trim()
+                val lead = t.substring(0, t.length - t.trimStart().length)
+                val trail = t.substring(t.trimEnd().length)
+                val leadW = if (lead.isEmpty()) 0f else measure.measureText(lead)
+                val trailW = if (trail.isEmpty() || core.isEmpty()) 0f else measure.measureText(trail)
+                val savedFace = measure.typeface
+                val savedSize = measure.textSize
+                measure.typeface = emphasisTypeface
+                measure.textSize = savedSize * DES_SCALE
+                val coreW = measure.measureText(core)
+                measure.typeface = savedFace
+                measure.textSize = savedSize
+                return Seg(t, xPos, leadW + coreW + trailW, idx, leadW, coreW, true)
+            }
+
             for ((i, w) in line.words.withIndex()) {
                 var t = w.text
-                if (i > 0) {
+                if (i > 0 && !w.isSyllable) {
                     val prev = line.words[i - 1].text
                     val needSpace = prev.isNotEmpty() && t.isNotEmpty() &&
                         !prev.last().isWhitespace() && !t.first().isWhitespace() &&
                         !",.;:!?)]}".contains(t.first())
-                    if (needSpace) t = " $t"
+                    // Espaço maior entre palavras normais para diferenciar de sílabas (coladas)
+                    if (needSpace) t = "  $t"
                 }
                 if (cur.isEmpty()) t = t.trimStart()
-                var tw = measure.measureText(t)
-                if (cur.isNotEmpty() && x + tw > maxW) {
+                var seg = makeSeg(t, x, i)
+                if (cur.isNotEmpty() && x + seg.w > maxW) {
                     rows.add(finishRow(cur, x))
                     cur = ArrayList()
                     x = 0f
                     t = t.trimStart()
-                    tw = measure.measureText(t)
+                    seg = makeSeg(t, 0f, i)
                 }
-                cur.add(Seg(t, x, tw, i))
-                x += tw
+                cur.add(seg)
+                x += seg.w
             }
             if (cur.isNotEmpty()) rows.add(finishRow(cur, x))
         } else {
@@ -455,9 +759,13 @@ class LyricsFrameRenderer(
         }
         if (rows.isEmpty()) rows.add(Row(line.text, measure.measureText(line.text), null))
 
+        // Métricas da fonte realmente usada (centraliza verticalmente também a tradução)
         val fm = measure.fontMetrics
         val rowH = size * rowFactor
         val baselineOff = (rowH - (fm.descent - fm.ascent)) / 2f - fm.ascent
+        // Restaura o paint de medição para a fonte da letra principal
+        measure.typeface = lyricTypeface
+        measure.textSize = size
         return Layout(line, rows, size, rowH, baselineOff)
     }
 
@@ -466,11 +774,13 @@ class LyricsFrameRenderer(
         val trimmed = last.text.trimEnd()
         var width = x
         if (trimmed != last.text) {
-            val w = measure.measureText(trimmed)
-            segs[segs.lastIndex] = Seg(trimmed, last.x, w, last.wordIdx)
+            val w = if (last.des) last.leadW + last.coreW else measure.measureText(trimmed)
+            segs[segs.lastIndex] = Seg(trimmed, last.x, w, last.wordIdx, last.leadW, last.coreW, last.des)
             width = last.x + w
         }
-        return Row(segs.joinToString("") { it.text }, width, segs.toList())
+        val joined = segs.joinToString("") { it.text }
+        // measure ainda está com a fonte/tamanho base desta linha: serve para a largura da versão lisa
+        return Row(joined, width, segs.toList(), measure.measureText(joined))
     }
 
     private fun wrapPlain(text: String, paint: Paint, maxW: Float): List<String> {

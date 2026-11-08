@@ -35,6 +35,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.MarqueeAnimationMode
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -45,6 +47,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -147,6 +151,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import kotlin.math.sin
 import androidx.compose.ui.text.font.Font
 import androidx.compose.runtime.DisposableEffect
 import androidx.core.view.WindowCompat
@@ -159,6 +164,9 @@ import coil.decode.GifDecoder
 import coil.request.ImageRequest
 import com.tolete.player.R
 import com.tolete.player.data.LyricLine
+import com.tolete.player.data.LyricAnimation
+import com.tolete.player.data.LyricsEmbedder
+import com.tolete.player.data.LyricsExtractor
 import com.tolete.player.data.Track
 import com.tolete.player.video.LyricsVideoGenerator
 import com.tolete.player.video.LyricsVideoStyle
@@ -167,9 +175,6 @@ import com.tolete.player.visualizer.ProjectMNative
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
-
-/** Cor de texto em menus com fundo claro (glass). */
-private val MenuDarkText = Color(0xFF1A1A1A)
 
 /**
  * Até 2 linhas de letra; reduz a fonte automaticamente até o texto caber
@@ -310,6 +315,7 @@ fun NowPlayingScreen(
     queue: List<Track>,
     isFavorite: Boolean,
     lyricsFontPath: String? = null,
+    lyricsTranslationFontPath: String? = null,
     getPosition: () -> Long,
     onClose: () -> Unit,
     onPrevious: () -> Unit,
@@ -349,14 +355,16 @@ fun NowPlayingScreen(
     lyricsSecondaryColor: Int = 0x66FFFFFF,
     lyricsBorderColor: Int = 0xFF000000.toInt(),
     lyricsBorderWidth: Float = 0f,
-    menuBgColor: Int = 0xE8F2F2F7.toInt(),
+    lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
+    lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
     playCount: Int = 0,
     firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L,
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     immersiveNowPlaying: Boolean = true,
     getPlaybackSpeed: () -> Float = { 1f },
-    onPlaybackSpeed: (Float) -> Unit = {}
+    onPlaybackSpeed: (Float) -> Unit = {},
+    lyricsEmphasisFontPath: String? = null
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
@@ -492,20 +500,50 @@ fun NowPlayingScreen(
 
     // Linha ativa (só sincronizadas com timeMs >= 0)
     val synced = remember(lyrics) { lyrics.filter { it.timeMs >= 0 } }
-    // Só muda quando a linha muda — evita recompor texto a cada tick de ms.
-    val activeLine = remember(synced, position / 50) {
-        if (synced.isEmpty()) null
+    // Linhas ativas simultâneas: principal + tradução + backing.
+    // A tradução ({tr}) é ligada à linha principal pela ORDEM das linhas (a tradução logo depois,
+    // ou logo antes no mesmo instante), nunca por comparação de tempo — assim ela sempre aparece
+    // junto da principal e jamais ocupa o lugar dela.
+    val activeLines = remember(synced, position / 50) {
+        if (synced.isEmpty()) Triple<LyricLine?, LyricLine?, LyricLine?>(null, null, null)
         else {
-            var cur: LyricLine? = null
-            for (l in synced) {
-                if (l.timeMs <= position) cur = l else break
+            var mainIdx = -1
+            var lastBg: LyricLine? = null
+            var lastTr: LyricLine? = null
+            for (i in synced.indices) {
+                val l = synced[i]
+                if (l.timeMs > position) break
+                when {
+                    l.isTranslation -> lastTr = l
+                    l.isBackground -> lastBg = l
+                    else -> mainIdx = i
+                }
             }
-            cur
+            if (mainIdx >= 0) {
+                val main = synced[mainIdx]
+                val trIdx = pairedTranslationIndex(synced, mainIdx)
+                val tr = if (trIdx >= 0) synced[trIdx] else null
+                val bg = synced.lastOrNull {
+                    it.isBackground && !it.isTranslation && it.timeMs <= position && it.timeMs >= main.timeMs
+                }
+                Triple<LyricLine?, LyricLine?, LyricLine?>(main, bg, tr)
+            } else {
+                Triple<LyricLine?, LyricLine?, LyricLine?>(null, lastBg, lastTr)
+            }
         }
     }
+    val activeLine = activeLines.first
+    val activeBgLine = activeLines.second
+    val activeTrLine = activeLines.third
 
     val lyricsFont = remember(lyricsFontPath) {
         BuiltInFonts.resolveFamily(lyricsFontPath)
+    }
+    val lyricsTranslationFont = remember(lyricsTranslationFontPath, lyricsFontPath) {
+        BuiltInFonts.resolveFamily(lyricsTranslationFontPath) ?: BuiltInFonts.resolveFamily(lyricsFontPath)
+    }
+    val lyricsEmphasisFont = remember(lyricsEmphasisFontPath, lyricsFontPath) {
+        BuiltInFonts.resolveFamily(lyricsEmphasisFontPath)
     }
 
     val layout = rememberLayoutScale()
@@ -562,10 +600,9 @@ fun NowPlayingScreen(
                     IconButton(onClick = { showMenu = true }) {
                         Icon(Icons.Rounded.MoreVert, contentDescription = "Mais opções")
                     }
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false },
-                        containerColor = Color(menuBgColor),
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .border(
@@ -578,7 +615,7 @@ fun NowPlayingScreen(
                     ) {
                         DropdownMenuItem(
                             text = {
-                                Text("Adicionar a uma playlist", color = MenuDarkText)
+                                Text("Adicionar a uma playlist", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
@@ -587,7 +624,7 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Editar tags", color = MenuDarkText)
+                                Text("Editar tags", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
@@ -596,7 +633,7 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Colocar na blacklist", color = MenuDarkText)
+                                Text("Colocar na blacklist", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
@@ -605,7 +642,7 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Buscar letra", color = MenuDarkText)
+                                Text("Buscar letra", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
@@ -614,9 +651,18 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
+                                Text("Editar letra", color = MaterialTheme.colorScheme.onSurface)
+                            },
+                            onClick = {
+                                showMenu = false
+                                onEditLyrics()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
                                 Text(
                                     if (sleepMinutes > 0) "Timer de sono (${sleepMinutes} min)" else "Timer de sono",
-                                    color = MenuDarkText
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             },
                             onClick = {
@@ -644,7 +690,7 @@ fun NowPlayingScreen(
                                     2f -> "2x"
                                     else -> "${"%.2f".format(menuSpeed)}x"
                                 }
-                                Text("Velocidade: $label  (tocar p/ mudar)", color = MenuDarkText)
+                                Text("Velocidade: $label  (tocar p/ mudar)", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 val idx = speedSteps.indexOf(menuSpeed).let {
@@ -657,15 +703,16 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Gerar foto do trecho", color = MenuDarkText)
+                                Text("Gerar foto do trecho", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
-                                val lyric = activeLine?.text?.takeIf { it.isNotBlank() }
+                                // Linhas completas (não só o texto): a foto aplica o destaque {des}
+                                val lyric = activeLine?.takeIf { it.text.isNotBlank() }
                                 val linesToShare = if (lyric != null) {
                                     listOf(lyric)
                                 } else {
-                                    lyrics.filter { it.text.isNotBlank() }.take(15).map { it.text }
+                                    lyrics.filter { it.text.isNotBlank() }.take(15)
                                 }
                                 if (linesToShare.isEmpty()) {
                                     android.widget.Toast.makeText(
@@ -685,7 +732,7 @@ fun NowPlayingScreen(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Gerar vídeo com letra", color = MenuDarkText)
+                                Text("Gerar vídeo", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 showMenu = false
@@ -698,25 +745,21 @@ fun NowPlayingScreen(
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                     }
-                                    synced.isEmpty() -> android.widget.Toast.makeText(
-                                        context,
-                                        "O vídeo precisa de uma letra sincronizada",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
+                                    // Também abre sem letra: o gerador faz vídeo só com capa/visualizador
                                     else -> showVideoDialog = true
                                 }
                             }
                         )
                         DropdownMenuItem(
                             text = {
-                                Text("Excluir arquivo", color = Color(0xFFC62828))
+                                Text("Excluir arquivo", color = MaterialTheme.colorScheme.error)
                             },
                             onClick = {
                                 showMenu = false
                                 pendingDeleteTrack = track
                             },
                             leadingIcon = {
-                                Icon(Icons.Rounded.Delete, contentDescription = null, tint = Color(0xFFC62828))
+                                Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                             }
                         )
                     }
@@ -997,9 +1040,12 @@ fun NowPlayingScreen(
                     ) {
                         if (synced.isNotEmpty()) {
                             val line = activeLine
+                            val finePos = if (isPlaying) lyricsPosition else position
+                            Column(
+                                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
                             if (line != null && line.hasSyllableSync) {
-                                // Usa position fina no karaokê embutido
-                                val finePos = if (isPlaying) lyricsPosition else position
                                 SyllableLine(
                                     line = line,
                                     position = finePos,
@@ -1009,10 +1055,11 @@ fun NowPlayingScreen(
                                     secondary = Color(lyricsSecondaryColor),
                                     borderColor = Color(lyricsBorderColor),
                                     borderWidth = lyricsBorderWidth,
+                                    emphasisFont = lyricsEmphasisFont,
                                     isBackground = false,
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                    modifier = Modifier.fillMaxWidth()
                                 )
-                            } else {
+                            } else if (line != null) {
                             AnimatedContent(
                                 targetState = activeLine?.text.orEmpty(),
                                 transitionSpec = {
@@ -1035,11 +1082,53 @@ fun NowPlayingScreen(
                                         baseFontSize = lyricsFontSize.sp,
                                         fontFamily = lyricsFont,
                                         color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                        modifier = Modifier.fillMaxWidth()
                                     )
                                 }
                             }
                             }
+                            // Tradução e backing simultâneos (primeiro plano = principal)
+                            activeTrLine?.takeIf { it.text.isNotBlank() }?.let { trLine ->
+                                if (trLine.hasSyllableSync) {
+                                    SyllableLine(
+                                        line = trLine,
+                                        position = finePos,
+                                        fontSize = (lyricsFontSize - 3f).coerceAtLeast(12f).sp,
+                                        fontFamily = lyricsTranslationFont ?: lyricsFont,
+                                        primary = Color(lyricsTranslationColor).copy(alpha = 0.95f),
+                                        secondary = Color(lyricsTranslationColor).copy(alpha = 0.55f),
+                                        borderColor = Color(lyricsBorderColor),
+                                        borderWidth = lyricsBorderWidth,
+                                        emphasisFont = lyricsEmphasisFont,
+                                        isTranslation = true,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        trLine.text,
+                                        color = Color(lyricsTranslationColor).copy(alpha = 0.9f),
+                                        fontSize = (lyricsFontSize - 3f).coerceAtLeast(12f).sp,
+                                        fontFamily = lyricsTranslationFont ?: lyricsFont,
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                                    )
+                                }
+                            }
+                            activeBgLine?.text?.takeIf { it.isNotBlank() }?.let { bg ->
+                                Text(
+                                    bg,
+                                    color = Color(lyricsBackingColor).copy(alpha = 0.85f),
+                                    fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
+                                    fontFamily = lyricsFont,
+                                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 2,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                )
+                            }
+                            } // Column
                         } else if (lyrics.isNotEmpty()) {
                             // Sem timestamps: trecho atual (até 2 linhas na tela)
                             val plain = lyrics.firstOrNull { it.text.isNotBlank() }?.text.orEmpty()
@@ -1057,18 +1146,25 @@ fun NowPlayingScreen(
                 }
             }
 
-            // Título e artista/álbum (estilo cartão de música)
+            // Título em uma linha; se for longo, rola (marquee)
             Text(
                 track.title,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = if (layout.compact) 2.dp else 4.dp)
-                    .clickable { onOpenContainingFolder() },
+                    .clickable { onOpenContainingFolder() }
+                    .basicMarquee(
+                        iterations = Int.MAX_VALUE,
+                        animationMode = MarqueeAnimationMode.Immediately,
+                        initialDelayMillis = 1200,
+                        velocity = 40.dp
+                    ),
                 fontSize = titleSp,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+                maxLines = 1,
+                overflow = TextOverflow.Clip,
+                softWrap = false,
                 color = Color.White
             )
             Spacer(Modifier.height(10.dp))
@@ -1098,10 +1194,9 @@ fun NowPlayingScreen(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                DropdownMenu(
+                AppDropdownMenu(
                     expanded = showArtistMenu,
                     onDismissRequest = { showArtistMenu = false },
-                    containerColor = Color(menuBgColor),
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier
                         .border(
@@ -1114,7 +1209,7 @@ fun NowPlayingScreen(
                 ) {
                     artistNames.forEach { name ->
                         DropdownMenuItem(
-                            text = { Text(name, color = MenuDarkText) },
+                            text = { Text(name, color = MaterialTheme.colorScheme.onSurface) },
                             onClick = {
                                 showArtistMenu = false
                                 onOpenArtist(name)
@@ -1303,29 +1398,63 @@ fun NowPlayingScreen(
             LyricsVideoDialog(
                 track = track,
                 currentPositionMs = position,
+                milkPresets = milkPresets,
+                initialMilkPreset = currentPresetPath,
+                hasExternalLrc = LyricsEmbedder.hasExternalLrc(track),
                 onDismiss = { showVideoDialog = false },
-                onGenerate = { startMs, endMs, shortSide, aspect, fps ->
+                loadLyrics = { source ->
+                    when (source) {
+                        LyricsEmbedder.Target.LRC_FILE -> LyricsEmbedder.loadExternalLrc(track)
+                        LyricsEmbedder.Target.EMBEDDED -> LyricsExtractor.loadEmbedded(context, track)
+                    }
+                },
+                onGenerate = { startMs, endMs, shortSide, aspect, fps, milkPresetPath, lyricsSource, useLyrics ->
                     showVideoDialog = false
                     videoProgressHidden = false
-                    LyricsVideoGenerator.start(
-                        context = context,
-                        track = track,
-                        lyrics = synced,
-                        options = LyricsVideoGenerator.Options(
-                            startMs = startMs,
-                            endMs = endMs,
-                            shortSide = shortSide,
-                            aspect = aspect,
-                            fps = fps,
-                            style = LyricsVideoStyle(
-                                fontPath = lyricsFontPath,
-                                primaryColor = lyricsPrimaryColor,
-                                secondaryColor = lyricsSecondaryColor,
-                                borderColor = lyricsBorderColor,
-                                borderWidth = lyricsBorderWidth
+                    scope.launch {
+                        // Sem letra (escolhido pelo usuário ou fonte sem letra sincronizada): o vídeo sai
+                        // só com capa/visualizador, título, artista e barra de progresso.
+                        val sourceLines = if (!useLyrics) {
+                            emptyList()
+                        } else {
+                            when (lyricsSource) {
+                                LyricsEmbedder.Target.LRC_FILE ->
+                                    LyricsEmbedder.loadExternalLrc(track)
+                                LyricsEmbedder.Target.EMBEDDED ->
+                                    LyricsExtractor.loadEmbedded(context, track)
+                            }.filter { it.timeMs >= 0 }
+                        }
+                        if (useLyrics && sourceLines.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "Sem letra sincronizada nesta fonte: gerando o vídeo sem letra",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        LyricsVideoGenerator.start(
+                            context = context,
+                            track = track,
+                            lyrics = sourceLines,
+                            options = LyricsVideoGenerator.Options(
+                                startMs = startMs,
+                                endMs = endMs,
+                                shortSide = shortSide,
+                                aspect = aspect,
+                                fps = fps,
+                                milkPresetPath = milkPresetPath,
+                                style = LyricsVideoStyle(
+                                    fontPath = lyricsFontPath,
+                                    translationFontPath = lyricsTranslationFontPath,
+                                    primaryColor = lyricsPrimaryColor,
+                                    secondaryColor = lyricsSecondaryColor,
+                                    borderColor = lyricsBorderColor,
+                                    borderWidth = lyricsBorderWidth,
+                                    translationColor = lyricsTranslationColor,
+                                    emphasisFontPath = lyricsEmphasisFontPath
+                                )
                             )
                         )
-                    )
+                    }
                 }
             )
         }
@@ -1380,12 +1509,11 @@ fun NowPlayingScreen(
                 onDelete = { t -> pendingDeleteTrack = t },
                 onPlayNext = onPlayNextFromQueue,
                 isFavorite = isFavoriteCheck,
-                menuBgColor = menuBgColor
             )
         }
 
         pendingDeleteTrack?.let { toDelete ->
-            AlertDialog(
+            AppAlertDialog(
                 onDismissRequest = { pendingDeleteTrack = null },
                 title = { Text("Excluir permanentemente?") },
                 text = {
@@ -1399,7 +1527,7 @@ fun NowPlayingScreen(
                             onDeleteTrack(toDelete)
                             pendingDeleteTrack = null
                         }
-                    ) { Text("Excluir", color = Color(0xFFE53935)) }
+                    ) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {
                     TextButton(onClick = { pendingDeleteTrack = null }) {
@@ -1413,7 +1541,6 @@ fun NowPlayingScreen(
             TechDetailsDialog(
                 track = track,
                 onDismiss = { showTechDetails = false },
-                menuBgColor = menuBgColor,
                 playCount = playCount,
                 firstPlayedAt = firstPlayedAt,
                 lastPlayedAt = lastPlayedAt
@@ -1426,9 +1553,13 @@ fun NowPlayingScreen(
                 lyrics = if (synced.isNotEmpty()) synced else lyrics,
                 position = lyricsPosition,
                 lyricsFont = lyricsFont,
+                translationFont = lyricsTranslationFont,
+                emphasisFont = lyricsEmphasisFont,
                 fontSizeSp = lyricsFontSize,
                 primaryColor = Color(lyricsPrimaryColor),
                 secondaryColor = Color(lyricsSecondaryColor),
+                translationColor = Color(lyricsTranslationColor),
+                backingColor = Color(lyricsBackingColor),
                 borderColor = Color(lyricsBorderColor),
                 borderWidth = lyricsBorderWidth,
                 onSeek = { ms ->
@@ -1455,13 +1586,13 @@ fun NowPlayingScreen(
                 }
             )
             pendingLyricResult?.let { result ->
-                AlertDialog(
+                AppAlertDialog(
                     onDismissRequest = { pendingLyricResult = null },
                     title = { Text("Salvar letra") },
                     text = {
                         Text(
                             "Como deseja salvar a letra encontrada?\n\n" +
-                                "• Arquivo .lrc — ao lado do áudio (recomendado)\n" +
+                                "• Arquivo .lrc — ao lado do áudio (precisa de Acesso a todos os arquivos)\n" +
                                 "• Embutir no arquivo — grava nas tags do áudio"
                         )
                     },
@@ -1480,7 +1611,8 @@ fun NowPlayingScreen(
                                         showLyricsSearch = false
                                         android.widget.Toast.makeText(
                                             context,
-                                            "Letra salva em .lrc",
+                                            if (lines.isNotEmpty()) "Letra salva em .lrc"
+                                            else "Falha ao salvar .lrc (ative Acesso a todos os arquivos)",
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                     }
@@ -1499,7 +1631,8 @@ fun NowPlayingScreen(
                                         showLyricsSearch = false
                                         android.widget.Toast.makeText(
                                             context,
-                                            "Letra embutida no arquivo",
+                                            if (lines.isNotEmpty()) "Letra embutida no arquivo"
+                                            else "Falha ao embutir letra",
                                             android.widget.Toast.LENGTH_SHORT
                                         ).show()
                                     }
@@ -1536,15 +1669,13 @@ fun NowPlayingScreen(
 internal fun TechDetailsDialog(
     track: Track,
     onDismiss: () -> Unit,
-    menuBgColor: Int = 0xE8F2F2F7.toInt(),
     playCount: Int = 0,
     firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L
 ) {
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(menuBgColor),
-        title = { Text("Informações técnicas", color = Color(0xFF1A1A1A)) },
+        title = { Text("Informações técnicas") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 TechRow("Título", track.title)
@@ -1587,7 +1718,7 @@ internal fun TechDetailsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+            TextButton(onClick = onDismiss) { Text("Fechar") }
         }
     )
 }
@@ -1595,8 +1726,8 @@ internal fun TechDetailsDialog(
 @Composable
 private fun TechRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = Color(0xFF666666))
-        Text(value, fontSize = 13.sp, color = Color(0xFF1A1A1A), maxLines = 3, overflow = TextOverflow.Ellipsis)
+        Text(label, modifier = Modifier.width(100.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1930,7 +2061,6 @@ internal fun QueueSheet(
     onDelete: (Track) -> Unit = {},
     onPlayNext: (Track) -> Unit = {},
     isFavorite: (String) -> Boolean = { false },
-    menuBgColor: Int = 0xE8F2F2F7.toInt()
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val order = remember { mutableStateListOf<Track>().apply { addAll(queue) } }
@@ -1978,7 +2108,7 @@ internal fun QueueSheet(
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(Color(0xCC0A0A12))
+                    .background(appColors.gradientBottom.copy(alpha = 0.80f))
             )
             Column(Modifier.fillMaxSize()) {
         // Header: contagem + ações de seleção + fechar
@@ -2254,10 +2384,9 @@ internal fun QueueSheet(
                                 .background(appColors.accent)
                         )
                     }
-                    DropdownMenu(
+                    AppDropdownMenu(
                         expanded = menuForIndex == realIndex && !showSelectionMenu,
                         onDismissRequest = { menuForIndex = null },
-                        containerColor = Color(menuBgColor),
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .border(
@@ -2270,7 +2399,7 @@ internal fun QueueSheet(
                     ) {
                         val fav = isFavorite(track.id)
                         DropdownMenuItem(
-                            text = { Text("Reproduzir a seguir", color = MenuDarkText) },
+                            text = { Text("Reproduzir a seguir", color = MaterialTheme.colorScheme.onSurface) },
                             onClick = {
                                 menuForIndex = null
                                 selectedIds = emptySet()
@@ -2278,9 +2407,9 @@ internal fun QueueSheet(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Remover da fila", color = MenuDarkText) },
+                            text = { Text("Remover da fila", color = MaterialTheme.colorScheme.onSurface) },
                             leadingIcon = {
-                                Icon(Icons.Rounded.Close, contentDescription = null, tint = MenuDarkText)
+                                Icon(Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
                                 menuForIndex = null
@@ -2290,13 +2419,13 @@ internal fun QueueSheet(
                         )
                         DropdownMenuItem(
                             text = {
-                                Text(if (fav) "Desfavoritar" else "Favoritar", color = MenuDarkText)
+                                Text(if (fav) "Desfavoritar" else "Favoritar", color = MaterialTheme.colorScheme.onSurface)
                             },
                             leadingIcon = {
                                 Icon(
                                     if (fav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                     contentDescription = null,
-                                    tint = if (fav) Color(0xFFE53935) else MenuDarkText
+                                    tint = if (fav) Color(0xFFE53935) else MaterialTheme.colorScheme.onSurface
                                 )
                             },
                             onClick = {
@@ -2305,9 +2434,9 @@ internal fun QueueSheet(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("Excluir permanentemente", color = Color(0xFFC62828)) },
+                            text = { Text("Excluir permanentemente", color = MaterialTheme.colorScheme.error) },
                             leadingIcon = {
-                                Icon(Icons.Rounded.Delete, contentDescription = null, tint = Color(0xFFC62828))
+                                Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
                             },
                             onClick = {
                                 menuForIndex = null
@@ -2322,14 +2451,13 @@ internal fun QueueSheet(
 
         if (showSelectionMenu && selectionMode) {
             val selectedTracks = order.filter { it.id in selectedIds }
-            AlertDialog(
+            AppAlertDialog(
                 onDismissRequest = { showSelectionMenu = false },
-                containerColor = Color(menuBgColor),
                 title = {
                     Text(
                         if (selectedTracks.size == 1) "1 faixa na fila"
                         else "${selectedTracks.size} faixas na fila",
-                        color = Color(0xFF1A1A1A)
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 },
                 text = {
@@ -2341,7 +2469,7 @@ internal fun QueueSheet(
                                 selectedIds = emptySet()
                             },
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text("Reproduzir a seguir", color = Color(0xFF1A1A1A)) }
+                        ) { Text("Reproduzir a seguir", color = MaterialTheme.colorScheme.onSurface) }
                         TextButton(
                             onClick = {
                                 order.mapIndexedNotNull { i, t -> if (t.id in selectedIds) i else null }
@@ -2351,7 +2479,7 @@ internal fun QueueSheet(
                                 selectedIds = emptySet()
                             },
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text("Remover da fila", color = Color(0xFF1A1A1A)) }
+                        ) { Text("Remover da fila", color = MaterialTheme.colorScheme.onSurface) }
                         TextButton(
                             onClick = {
                                 selectedTracks.forEach { onToggleFavorite(it) }
@@ -2360,7 +2488,7 @@ internal fun QueueSheet(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             val allFav = selectedTracks.isNotEmpty() && selectedTracks.all { isFavorite(it.id) }
-                            Text(if (allFav) "Desfavoritar" else "Favoritar", color = Color(0xFF1A1A1A))
+                            Text(if (allFav) "Desfavoritar" else "Favoritar", color = MaterialTheme.colorScheme.onSurface)
                         }
                         TextButton(
                             onClick = {
@@ -2369,12 +2497,12 @@ internal fun QueueSheet(
                                 selectedIds = emptySet()
                             },
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text("Excluir permanentemente", color = Color(0xFFC62828)) }
+                        ) { Text("Excluir permanentemente", color = MaterialTheme.colorScheme.error) }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = { showSelectionMenu = false }) {
-                        Text("Fechar", color = Color(0xFF1A1A1A))
+                        Text("Fechar", color = MaterialTheme.colorScheme.onSurface)
                     }
                 }
             )
@@ -2401,9 +2529,10 @@ internal fun LyricsSearchDialog(
     var searched by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    val dialogDark = Color(0xFF1A1A1A)
-    val dialogMuted = Color(0xFF555555)
-    AlertDialog(
+    val dialogDark = menuPalette(LocalAppColors.current).content
+    val dialogMuted = menuPalette(LocalAppColors.current).muted
+    val dialogAccent = menuPalette(LocalAppColors.current).accent
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Buscar letra", color = dialogDark) },
         text = {
@@ -2417,10 +2546,10 @@ internal fun LyricsSearchDialog(
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = dialogDark,
                         unfocusedTextColor = dialogDark,
-                        focusedBorderColor = Color(0xFF5C6BC0),
-                        unfocusedBorderColor = Color(0xFFAAAAAA),
-                        cursorColor = Color(0xFF5C6BC0),
-                        focusedLabelColor = Color(0xFF5C6BC0),
+                        focusedBorderColor = dialogAccent,
+                        unfocusedBorderColor = dialogMuted,
+                        cursorColor = dialogAccent,
+                        focusedLabelColor = dialogAccent,
                         unfocusedLabelColor = dialogMuted
                     )
                 )
@@ -2434,10 +2563,10 @@ internal fun LyricsSearchDialog(
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = dialogDark,
                         unfocusedTextColor = dialogDark,
-                        focusedBorderColor = Color(0xFF5C6BC0),
-                        unfocusedBorderColor = Color(0xFFAAAAAA),
-                        cursorColor = Color(0xFF5C6BC0),
-                        focusedLabelColor = Color(0xFF5C6BC0),
+                        focusedBorderColor = dialogAccent,
+                        unfocusedBorderColor = dialogMuted,
+                        cursorColor = dialogAccent,
+                        focusedLabelColor = dialogAccent,
                         unfocusedLabelColor = dialogMuted
                     )
                 )
@@ -2580,7 +2709,7 @@ internal fun LyricsSearchDialog(
                         searched = true
                     }
                 }
-            ) { Text("Pesquisar", color = Color(0xFF5C6BC0)) }
+            ) { Text("Pesquisar", color = dialogAccent) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Descartar", color = dialogMuted) }
@@ -2608,15 +2737,45 @@ private fun LyricsBadge(text: String, background: Color, foreground: Color) {
 }
 
 
+/**
+ * Índice da tradução ({tr}) que pertence à linha principal em [mainIdx], ou -1.
+ * Regra: a tradução logo DEPOIS da principal (pulando backing no meio); se não houver, a que vem
+ * logo ANTES, desde que esteja praticamente no mesmo instante e não pertença a outra principal.
+ */
+internal fun pairedTranslationIndex(lines: List<LyricLine>, mainIdx: Int): Int {
+    if (mainIdx !in lines.indices) return -1
+    var j = mainIdx + 1
+    while (j < lines.size && lines[j].isBackground && !lines[j].isTranslation) j++
+    if (j < lines.size && lines[j].isTranslation) return j
+
+    var k = mainIdx - 1
+    while (k >= 0 && lines[k].isBackground && !lines[k].isTranslation) k--
+    if (k >= 0 && lines[k].isTranslation &&
+        kotlin.math.abs(lines[k].timeMs - lines[mainIdx].timeMs) <= 500L
+    ) {
+        var p = k - 1
+        while (p >= 0 && lines[p].isBackground && !lines[p].isTranslation) p--
+        val ownedByPrevious = p >= 0 && !lines[p].isTranslation &&
+            kotlin.math.abs(lines[p].timeMs - lines[k].timeMs) <= 500L
+        if (!ownedByPrevious) return k
+    }
+    return -1
+}
+
+
 @Composable
 internal fun FullscreenLyrics(
     track: Track,
     lyrics: List<LyricLine>,
     position: Long,
     lyricsFont: FontFamily?,
+    translationFont: FontFamily? = null,
+    emphasisFont: FontFamily? = null,
     fontSizeSp: Float = 22f,
     primaryColor: Color = Color.White,
     secondaryColor: Color = Color.White.copy(alpha = 0.40f),
+    translationColor: Color = Color(0xFFB0BEC5),
+    backingColor: Color = Color(0xFFCE93D8),
     borderColor: Color = Color.Black,
     borderWidth: Float = 0f,
     onSeek: (Long) -> Unit,
@@ -2626,37 +2785,50 @@ internal fun FullscreenLyrics(
     val context = LocalContext.current
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val hasTimestamps = remember(lyrics) { lyrics.any { it.timeMs >= 0 } }
-    // Índices ativos: principal + backing sobrepostos no tempo atual
-    val (activeIndex, activeBgIndex) = remember(lyrics, position, hasTimestamps) {
-        if (!hasTimestamps) -1 to -1
+    // Índices ativos: principal + backing + tradução.
+    // A linha principal nunca é uma tradução; a tradução ativa é a que pertence (pela ordem)
+    // à principal ativa.
+    val (activeIndex, activeBgIndex, activeTrIndex) = remember(lyrics, position, hasTimestamps) {
+        if (!hasTimestamps) Triple(-1, -1, -1)
         else {
             var bestMain = -1
             var bestBg = -1
+            var lastStartedMain = -1
             var lastStarted = -1
             for (i in lyrics.indices) {
                 val line = lyrics[i]
                 if (line.timeMs < 0) continue
                 if (line.timeMs > position) break
                 lastStarted = i
+                if (!line.isTranslation && !line.isBackground) lastStartedMain = i
                 val stillActive = line.endMs < 0 || position <= line.endMs + 120
                 if (!stillActive) continue
-                if (line.isBackground) {
-                    if (bestBg < 0 || line.timeMs >= lyrics[bestBg].timeMs) bestBg = i
-                } else {
-                    if (bestMain < 0 || line.timeMs >= lyrics[bestMain].timeMs) bestMain = i
+                when {
+                    line.isTranslation -> Unit
+                    line.isBackground -> {
+                        if (bestBg < 0 || line.timeMs >= lyrics[bestBg].timeMs) bestBg = i
+                    }
+                    else -> {
+                        if (bestMain < 0 || line.timeMs >= lyrics[bestMain].timeMs) bestMain = i
+                    }
                 }
             }
-            val main = if (bestMain >= 0) bestMain else lastStarted
-            // Backing só conta se sobrepõe a linha principal (ou o instante atual)
-            val bg = if (bestBg >= 0 && main >= 0) {
+            val main = when {
+                bestMain >= 0 -> bestMain
+                lastStartedMain >= 0 -> lastStartedMain
+                lastStarted >= 0 && !lyrics[lastStarted].isTranslation -> lastStarted
+                else -> -1
+            }
+            fun overlapsMain(idx: Int): Boolean {
+                if (idx < 0 || main < 0) return idx >= 0
                 val mainLine = lyrics[main]
-                val bgLine = lyrics[bestBg]
+                val other = lyrics[idx]
                 val mainEnd = if (mainLine.endMs > 0) mainLine.endMs else Long.MAX_VALUE
-                val overlaps = bgLine.timeMs <= mainEnd &&
-                    (bgLine.endMs < 0 || bgLine.endMs >= mainLine.timeMs)
-                if (overlaps) bestBg else -1
-            } else bestBg
-            main to bg
+                return other.timeMs <= mainEnd && (other.endMs < 0 || other.endMs >= mainLine.timeMs)
+            }
+            val bg = if (overlapsMain(bestBg)) bestBg else -1
+            val tr = if (main >= 0) pairedTranslationIndex(lyrics, main) else -1
+            Triple(main, bg, tr)
         }
     }
     var selectMode by remember { mutableStateOf(false) }
@@ -2743,7 +2915,7 @@ internal fun FullscreenLyrics(
                 IconButton(onClick = {
                     if (selectMode) {
                         if (selectedLines.isNotEmpty()) {
-                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it)?.text }.take(15)
+                            val ordered = selectedLines.sorted().mapNotNull { lyrics.getOrNull(it) }.take(15)
                             android.widget.Toast.makeText(context, "Gerando foto…", android.widget.Toast.LENGTH_SHORT).show()
                             LyricsShareHelper.shareSnippet(context, track, ordered)
                             selectMode = false
@@ -2783,18 +2955,21 @@ internal fun FullscreenLyrics(
                 itemsIndexed(lyrics) { index, line ->
                     val isMainActive = index == activeIndex
                     val isBgActive = index == activeBgIndex
-                    val isActive = isMainActive || isBgActive
+                    val isTrActive = index == activeTrIndex
+                    val isActive = isMainActive || isBgActive || isTrActive
                     val isBg = line.isBackground
+                    val isTr = line.isTranslation
                     val baseSize = when {
                         isMainActive -> (fontSizeSp + 6f).sp
                         isBgActive -> (fontSizeSp + 1f).sp
-                        isBg -> (fontSizeSp - 2f).coerceAtLeast(12f).sp
+                        isTrActive -> (fontSizeSp - 1f).coerceAtLeast(12f).sp
+                        isBg || isTr -> (fontSizeSp - 2f).coerceAtLeast(12f).sp
                         else -> fontSizeSp.sp
                     }
                     val scale by androidx.compose.animation.core.animateFloatAsState(
                         targetValue = when {
                             isMainActive -> 1.07f
-                            isBgActive -> 1.03f
+                            isBgActive || isTrActive -> 1.03f
                             else -> 1f
                         },
                         animationSpec = androidx.compose.animation.core.spring(
@@ -2807,7 +2982,7 @@ internal fun FullscreenLyrics(
                         targetValue = when {
                             !hasTimestamps -> 0.85f
                             isMainActive -> 1f
-                            isBgActive -> 0.92f
+                            isBgActive || isTrActive -> 0.92f
                             kotlin.math.abs(index - activeIndex) <= 1 -> 0.55f
                             kotlin.math.abs(index - activeIndex) <= 3 -> 0.34f
                             else -> 0.18f
@@ -2858,11 +3033,22 @@ internal fun FullscreenLyrics(
                                 line = line,
                                 position = position,
                                 fontSize = baseSize,
-                                fontFamily = lyricsFont,
-                                primary = primaryColor,
-                                secondary = secondaryColor,
+                                fontFamily = if (isTr) (translationFont ?: lyricsFont) else lyricsFont,
+                                // Tradução usa a cor de tradução; letra usa primária/secundária
+                                primary = when {
+                                    isTr -> translationColor
+                                    isBg -> backingColor
+                                    else -> primaryColor
+                                },
+                                secondary = when {
+                                    isTr -> translationColor.copy(alpha = 0.55f)
+                                    isBg -> backingColor.copy(alpha = 0.55f)
+                                    else -> secondaryColor
+                                },
                                 borderColor = borderColor,
                                 borderWidth = borderWidth,
+                                emphasisFont = emphasisFont,
+                                isTranslation = isTr,
                                 isBackground = isBg,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -2880,12 +3066,14 @@ internal fun FullscreenLyrics(
                                 },
                                 color = when {
                                     isMainActive -> primaryColor
-                                    isBgActive -> primaryColor.copy(alpha = 0.8f)
-                                    isBg -> secondaryColor.copy(alpha = 0.65f)
+                                    isBgActive -> backingColor.copy(alpha = 0.95f)
+                                    isTrActive -> translationColor.copy(alpha = 0.95f)
+                                    isBg -> backingColor.copy(alpha = 0.65f)
+                                    isTr -> secondaryColor  // fora do timestamp: secundária
                                     else -> secondaryColor
                                 },
-                                fontFamily = lyricsFont,
-                                fontStyle = if (isBg) androidx.compose.ui.text.font.FontStyle.Italic
+                                fontFamily = if (isTr) (translationFont ?: lyricsFont) else lyricsFont,
+                                fontStyle = if (isBg || isTr) androidx.compose.ui.text.font.FontStyle.Italic
                                 else androidx.compose.ui.text.font.FontStyle.Normal,
                                 style = if (borderWidth > 0f && isActive) {
                                     androidx.compose.ui.text.TextStyle(
@@ -2904,6 +3092,7 @@ internal fun FullscreenLyrics(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SyllableLine(
     line: LyricLine,
@@ -2914,10 +3103,11 @@ private fun SyllableLine(
     secondary: Color,
     borderColor: Color,
     borderWidth: Float,
+    emphasisFont: FontFamily? = null,
+    isTranslation: Boolean = false,
     isBackground: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // Índice da palavra atual + progresso 0..1 (recalculado a cada frame de posição)
     var activeWordIdx = -1
     for (i in line.words.indices) {
         if (position >= line.words[i].timeMs) activeWordIdx = i else break
@@ -2925,68 +3115,227 @@ private fun SyllableLine(
     val wordProgress = if (activeWordIdx < 0) {
         0f
     } else {
-        val cur = line.words[activeWordIdx]
+        val current = line.words[activeWordIdx]
         val end = when {
-            cur.endMs > cur.timeMs -> cur.endMs
+            current.endMs > current.timeMs -> current.endMs
             activeWordIdx < line.words.lastIndex -> line.words[activeWordIdx + 1].timeMs
-            line.endMs > cur.timeMs -> line.endMs
-            else -> cur.timeMs + 350L
+            line.endMs > current.timeMs -> line.endMs
+            else -> current.timeMs + 350L
         }
-        val span = (end - cur.timeMs).coerceAtLeast(1L).toFloat()
-        // Curva suave (ease-out) para o preenchimento da palavra
-        val linear = ((position - cur.timeMs) / span).coerceIn(0f, 1f)
+        val span = (end - current.timeMs).coerceAtLeast(1L).toFloat()
+        val linear = ((position - current.timeMs) / span).coerceIn(0f, 1f)
         1f - (1f - linear) * (1f - linear)
     }
 
+    val effects = rememberInfiniteTransition(label = "lyricWordEffects")
+    val effectPhase by effects.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 460, easing = LinearEasing),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "lyricWordEffectPhase"
+    )
+    val shakePhase by effects.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 110, easing = LinearEasing),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+        ),
+        label = "lyricWordShakePhase"
+    )
+
     val dimSecondary = secondary.copy(alpha = if (isBackground) 0.48f else 0.58f)
     val activePrimary = if (isBackground) primary.copy(alpha = 0.88f) else primary
+    FlowRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.spacedBy(0.dp)
+    ) {
+        line.words.forEachIndexed { index, word ->
+            val hasFx = word.animation != LyricAnimation.NONE
+            // Tradução: sem karaokê palavra-a-palavra — só palavras com efeito animam no tempo delas
+            val fullyActive = if (isTranslation) false else index < activeWordIdx
+            val isCurrent = if (isTranslation) {
+                hasFx && (word.timeMs < 0L || position >= word.timeMs) &&
+                    (index == activeWordIdx || word.timeMs < 0L)
+            } else index == activeWordIdx
+            // A animação começa no tempo da palavra (ou da linha se não houver timestamp)
+            val effectStarted = hasFx && (word.timeMs < 0L || position >= word.timeMs)
+            val animStartMs = when {
+                word.timeMs >= 0L -> word.timeMs
+                line.timeMs >= 0L -> line.timeMs
+                else -> -1L
+            }
+            val animElapsed = if (animStartMs >= 0L) (position - animStartMs).coerceAtLeast(0L) else 0L
+            val animElapsedF = animElapsed.toFloat()
 
-    val annotated = androidx.compose.ui.text.buildAnnotatedString {
-        line.words.forEachIndexed { i, w ->
-            val fullyActive = i < activeWordIdx
-            val isCurrent = i == activeWordIdx
+            val rainbowColor = if (word.animation == LyricAnimation.RNB && effectStarted) {
+                val hue = ((animElapsedF / 12f) % 360f)
+                Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.85f, 1f)))
+            } else null
+            val flashBoost = if (word.animation == LyricAnimation.FLA && effectStarted && animElapsed < 220L) {
+                1f - (animElapsedF / 220f)
+            } else 0f
             val color = when {
+                isTranslation && !hasFx -> activePrimary
+                rainbowColor != null -> rainbowColor
+                word.animation == LyricAnimation.GLO && effectStarted ->
+                    androidx.compose.ui.graphics.lerp(primary, secondary, effectPhase)
+                word.animation == LyricAnimation.FLA && effectStarted && flashBoost > 0f ->
+                    androidx.compose.ui.graphics.lerp(activePrimary, Color.White, flashBoost * 0.85f)
+                word.animation == LyricAnimation.FRZ && effectStarted -> activePrimary
                 fullyActive -> activePrimary
                 isCurrent -> androidx.compose.ui.graphics.lerp(dimSecondary, activePrimary, wordProgress)
                 else -> dimSecondary
             }
-            if (i > 0) {
-                val prev = line.words[i - 1].text
-                val needSpace = prev.isNotEmpty() && w.text.isNotEmpty() &&
-                    !prev.last().isWhitespace() && !w.text.first().isWhitespace() &&
-                    !",.;:!?)]}".contains(w.text.first())
-                if (needSpace) append(' ')
+
+            val isDes = word.animation == LyricAnimation.DES && effectStarted
+            val isShaking = word.animation == LyricAnimation.POP && effectStarted
+            val isVib = word.animation == LyricAnimation.VIB && effectStarted && animElapsed < 450L
+            val isWav = word.animation == LyricAnimation.WAV && effectStarted
+            val isEco = word.animation == LyricAnimation.ECO && effectStarted
+            val isSli = word.animation == LyricAnimation.SLI && effectStarted
+            val isZou = word.animation == LyricAnimation.ZOU && effectStarted
+            val isZin = word.animation == LyricAnimation.ZIN && effectStarted
+            val isShd = word.animation == LyricAnimation.SHD && effectStarted
+            val isTyp = word.animation == LyricAnimation.TYP && effectStarted
+
+            val isDed = word.animation == LyricAnimation.DED && effectStarted
+            // Mesmo tempo na letra e na tradução (1s)
+            val dedDelayMs = 1000L
+            val dedAlpha = if (isDed && animStartMs >= 0L) {
+                when {
+                    animElapsed < dedDelayMs -> 1f
+                    animElapsed < dedDelayMs + 200L -> 1f - ((animElapsed - dedDelayMs).toFloat() / 200f)
+                    else -> 0f
+                }
+            } else 1f
+
+            // Zoom só via graphicsLayer (não mexe no layout). DES só via fontSize (reserva espaço).
+            val zoomScale = when {
+                isZou -> {
+                    val k = (animElapsedF / 300f).coerceIn(0f, 1f)
+                    1.55f - 0.55f * (1f - (1f - k) * (1f - k))
+                }
+                isZin -> {
+                    val k = (animElapsedF / 300f).coerceIn(0f, 1f)
+                    0.55f + 0.45f * (1f - (1f - k) * (1f - k))
+                }
+                else -> 1f
             }
-            pushStyle(
-                androidx.compose.ui.text.SpanStyle(
+            val desFontMul = if (isDes) 1.24f else 1f
+
+            val slideY = if (isSli) {
+                val k = (animElapsedF / 280f).coerceIn(0f, 1f)
+                val e = 1f - (1f - k) * (1f - k)
+                (1f - e) * 14f
+            } else 0f
+
+            val displayText = if (isTyp && word.text.isNotEmpty()) {
+                val n = word.text.length
+                val chars = ((animElapsedF / 55f).toInt() + 1).coerceIn(0, n)
+                word.text.take(chars)
+            } else word.text
+
+            val leadingSpace = if (index > 0 && !word.isSyllable) {
+                val previous = line.words[index - 1].text
+                if (previous.isNotEmpty() && word.text.isNotEmpty() &&
+                    !previous.last().isWhitespace() && !word.text.first().isWhitespace() &&
+                    !",.;:!?)]}".contains(word.text.first())
+                ) " " else ""
+            } else ""
+
+            val shadowStyle = when {
+                isShd && animElapsed < 500L -> {
+                    val k = 1f - (animElapsedF / 500f).coerceIn(0f, 1f)
+                    androidx.compose.ui.text.TextStyle(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = primary.copy(alpha = 0.55f * k),
+                            offset = androidx.compose.ui.geometry.Offset(4f * k, 6f * k),
+                            blurRadius = 10f * k + borderWidth
+                        )
+                    )
+                }
+                borderWidth > 0f && (fullyActive || isCurrent || (word.animation == LyricAnimation.FRZ && effectStarted)) ->
+                    androidx.compose.ui.text.TextStyle(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = borderColor.copy(alpha = 0.7f),
+                            blurRadius = borderWidth * 1.8f
+                        )
+                    )
+                else -> androidx.compose.ui.text.TextStyle.Default
+            }
+
+            // Box: eco sobrepõe sem ocupar espaço extra no FlowRow
+            Box {
+                if (isEco) {
+                    val ghostPhase = ((animElapsedF / 180f) % 1f)
+                    Text(
+                        text = leadingSpace + word.text,
+                        modifier = Modifier.graphicsLayer {
+                            alpha = dedAlpha * 0.35f * (1f - ghostPhase * 0.5f)
+                            translationX = 3.2f.dp.toPx()
+                            translationY = (2.2f + ghostPhase * 3f).dp.toPx()
+                            scaleX = zoomScale
+                            scaleY = zoomScale
+                        },
+                        color = color.copy(alpha = (color.alpha * 0.7f).coerceIn(0f, 1f)),
+                        fontSize = fontSize * desFontMul,
+                        fontWeight = FontWeight.Normal,
+                        fontFamily = fontFamily,
+                        fontStyle = if (isBackground || isTranslation)
+                            androidx.compose.ui.text.font.FontStyle.Italic
+                        else androidx.compose.ui.text.font.FontStyle.Normal,
+                        lineHeight = (fontSize.value * 1.32f * desFontMul).sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+                Text(
+                    text = leadingSpace + displayText,
+                    modifier = Modifier.graphicsLayer {
+                        alpha = dedAlpha
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        var ty = slideY.dp.toPx()
+                        if (isWav) {
+                            ty += (sin((animElapsedF / 160f) * 2f * Math.PI.toFloat()) * 2.8f).dp.toPx()
+                        }
+                        if (isShaking) {
+                            val phase = shakePhase * 2f * Math.PI.toFloat()
+                            translationX = (sin(phase) * 2.4f).dp.toPx()
+                            ty += (sin(phase * 2f) * 1.1f).dp.toPx()
+                        } else if (isVib) {
+                            val phase = shakePhase * 2f * Math.PI.toFloat()
+                            translationX = (sin(phase) * 1.1f).dp.toPx()
+                            ty += (sin(phase * 1.7f) * 0.7f).dp.toPx()
+                        } else {
+                            translationX = 0f
+                        }
+                        translationY = ty
+                    },
                     color = color,
+                    fontSize = fontSize * desFontMul,
                     fontWeight = when {
+                        word.animation == LyricAnimation.FRZ && effectStarted ->
+                            if (isBackground) FontWeight.SemiBold else FontWeight.Bold
                         fullyActive || (isCurrent && wordProgress > 0.15f) ->
                             if (isBackground) FontWeight.SemiBold else FontWeight.Bold
                         else -> FontWeight.Normal
                     },
-                    fontSize = fontSize,
-                    fontFamily = fontFamily,
-                    fontStyle = if (isBackground) androidx.compose.ui.text.font.FontStyle.Italic
+                    fontFamily = if (isDes) emphasisFont ?: fontFamily else fontFamily,
+                    fontStyle = if (isBackground || isTranslation)
+                        androidx.compose.ui.text.font.FontStyle.Italic
                     else androidx.compose.ui.text.font.FontStyle.Normal,
-                    shadow = if (borderWidth > 0f && (fullyActive || isCurrent)) {
-                        androidx.compose.ui.graphics.Shadow(
-                            color = borderColor.copy(alpha = 0.7f),
-                            blurRadius = borderWidth * 1.8f
-                        )
-                    } else null
+                    lineHeight = (fontSize.value * 1.32f * desFontMul).sp,
+                    textAlign = TextAlign.Center,
+                    style = shadowStyle
                 )
-            )
-            append(w.text)
-            pop()
+            }
         }
     }
-    Text(
-        text = annotated,
-        modifier = modifier,
-        textAlign = TextAlign.Center,
-        lineHeight = (fontSize.value * 1.32f).sp
-    )
 }
 
 
@@ -3080,7 +3429,7 @@ internal fun MilkPresetPickerDialog(
     LaunchedEffect(currentIndex, sorted.size, query) {
         if (sorted.isNotEmpty() && query.isBlank()) listState.scrollToItem(currentIndex)
     }
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Row(
@@ -3089,14 +3438,14 @@ internal fun MilkPresetPickerDialog(
             ) {
                 Text(
                     if (manageMode) "Gerenciar presets" else "Visualizer — presets",
-                    color = Color(0xFF1A1A1A),
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
                 IconButton(onClick = { showSearch = !showSearch }, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Rounded.Search,
                         contentDescription = "Buscar",
-                        tint = Color(0xFF5C6BC0)
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
@@ -3117,7 +3466,7 @@ internal fun MilkPresetPickerDialog(
                 if (sorted.isEmpty()) {
                     Text(
                         if (query.isNotBlank()) "Nenhum preset encontrado." else "Nenhum preset disponível.",
-                        color = Color(0xFF666666),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 14.sp
                     )
                 } else {
@@ -3140,13 +3489,13 @@ internal fun MilkPresetPickerDialog(
                                             if (onDelete != null) pendingDelete = path
                                         }
                                     )
-                                    .background(if (isCurrent) Color(0xFF5C6BC0).copy(0.15f) else Color.Transparent)
+                                    .background(if (isCurrent) MaterialTheme.colorScheme.primary.copy(0.15f) else Color.Transparent)
                                     .padding(vertical = 10.dp, horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     name,
-                                    color = Color(0xFF1A1A1A),
+                                    color = MaterialTheme.colorScheme.onSurface,
                                     fontSize = 14.sp,
                                     fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
                                     maxLines = 2,
@@ -3157,7 +3506,7 @@ internal fun MilkPresetPickerDialog(
                                     Icon(
                                         imageVector = if (isFav) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                                         contentDescription = "Favoritar",
-                                        tint = if (isFav) Color(0xFFE53935) else Color(0xFF888888),
+                                        tint = if (isFav) Color(0xFFE53935) else MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -3169,7 +3518,7 @@ internal fun MilkPresetPickerDialog(
                                         Icon(
                                             Icons.Rounded.Delete,
                                             contentDescription = "Excluir",
-                                            tint = Color(0xFFC62828),
+                                            tint = MaterialTheme.colorScheme.error,
                                             modifier = Modifier.size(20.dp)
                                         )
                                     }
@@ -3177,7 +3526,7 @@ internal fun MilkPresetPickerDialog(
                                     Icon(
                                         Icons.Rounded.Check,
                                         contentDescription = "Atual",
-                                        tint = Color(0xFF5C6BC0),
+                                        tint = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
@@ -3233,17 +3582,17 @@ internal fun MilkPresetPickerDialog(
                             }
                         }
                     }) {
-                        Text("Exportar favoritos (.zip)", color = Color(0xFF5C6BC0))
+                        Text("Exportar favoritos (.zip)", color = MaterialTheme.colorScheme.primary)
                     }
                 }
-                TextButton(onClick = onDismiss) { Text("Fechar", color = Color(0xFF5C6BC0)) }
+                TextButton(onClick = onDismiss) { Text("Fechar") }
             }
         }
     )
 
     pendingDelete?.let { path ->
         val name = java.io.File(path).name.removeSuffix(".milk").removeSuffix(".MILK")
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Excluir preset?") },
             text = {
@@ -3253,7 +3602,7 @@ internal fun MilkPresetPickerDialog(
                 TextButton(onClick = {
                     onDelete?.invoke(path)
                     pendingDelete = null
-                }) { Text("Excluir", color = Color(0xFFE53935)) }
+                }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancelar") }
@@ -3271,17 +3620,16 @@ private fun SleepTimerDialog(
     onSet: (Int) -> Unit
 ) {
     val options = listOf(0, 5, 10, 15, 30, 45, 60)
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1A1A24),
-        title = { Text("Timer de sono", color = Color.White) },
+        title = { Text("Timer de sono") },
         text = {
             Column {
                 options.forEach { m ->
                     val label = if (m == 0) "Desligado" else "$m minutos"
                     Text(
                         text = label,
-                        color = if (m == currentMinutes) Color(0xFFB388FF) else Color.White.copy(0.85f),
+                        color = if (m == currentMinutes) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                         fontSize = 16.sp,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3293,7 +3641,7 @@ private fun SleepTimerDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancelar", color = Color.White.copy(0.7f))
+                Text("Cancelar")
             }
         }
     )

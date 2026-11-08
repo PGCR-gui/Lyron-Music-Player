@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
     private var externalAudioUri by mutableStateOf<Uri?>(null)
     private var externalTitle by mutableStateOf<String?>("Lyron")
     private var externalArtist by mutableStateOf<String?>("")
+    /** Toque na notificação do scrobbler: mostra as informações da música tocando. */
+    private var showTrackInfo by mutableStateOf(false)
 
     private val pickFolder = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -379,9 +381,15 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
     }
 
-    private fun handleIncomingIntent(intent: Intent?) {
+    private fun handleIncomingIntent(intent: Intent?, recreated: Boolean = false) {
         if (intent == null) return
         val action = intent.action
+        if (action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_SHOW_TRACK_INFO) {
+            // Activity recriada (girar a tela etc.) não reabre o diálogo.
+            if (!recreated) showTrackInfo = true
+            intent.action = null
+            return
+        }
         val uri: Uri? = when {
             action == Intent.ACTION_VIEW -> intent.data
             action == Intent.ACTION_SEND -> {
@@ -413,7 +421,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         com.tolete.player.data.LyronStorage.init(this)
-        handleIncomingIntent(intent)
+        handleIncomingIntent(intent, recreated = savedInstanceState != null)
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -480,6 +488,20 @@ class MainActivity : ComponentActivity() {
                 if (!showSplash) {
                     ChangelogOnUpdateDialog()
                     UpdateHost()
+                }
+
+                if (showTrackInfo && !showSplash) {
+                    val playing by viewModel.nowPlaying.collectAsStateWithLifecycle()
+                    val infoTrack = playing ?: com.tolete.player.data.LastFmScrobbler.current.value
+                    if (infoTrack != null) {
+                        com.tolete.player.ui.TechDetailsDialog(
+                            track = infoTrack,
+                            onDismiss = { showTrackInfo = false },
+                            playCount = viewModel.playCountOf(infoTrack.id)
+                        )
+                    } else {
+                        androidx.compose.runtime.LaunchedEffect(Unit) { showTrackInfo = false }
+                    }
                 }
 
                 if (externalAudioUri != null && !showSplash) {

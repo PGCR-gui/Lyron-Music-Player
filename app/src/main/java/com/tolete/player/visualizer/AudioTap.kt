@@ -1,26 +1,38 @@
 package com.tolete.player.visualizer
 
-import androidx.annotation.OptIn
+import android.os.SystemClock
+import android.util.Log
 import androidx.media3.common.C
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.audio.TeeAudioProcessor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.sqrt
 
 /**
- * "Escuta" o PCM que o ExoPlayer manda para a saída de áudio e guarda os últimos
- * frames num buffer circular (estéreo, float). O renderizador do visualizador
- * lê daqui a cada quadro.
+ * Guarda os últimos frames de PCM (estéreo, float) que o player manda para a saída de áudio
+ * e entrega ao renderizador do visualizador.
  *
- * - O ExoPlayer (PlaybackService) e a UI rodam no mesmo processo, então um object basta.
- * - O áudio NÃO é alterado: o TeeAudioProcessor repassa os bytes idênticos.
- * - Enquanto [active] for false, [handleBuffer] sai na primeira linha (custo ~zero).
+ * Mudanças em relação à versão anterior:
+ *  1) Alimentado pelo [AudioTapSink] (na frente do DefaultAudioSink) e não mais por um
+ *     TeeAudioProcessor. Com saída float (bit-perfect / hi-res) o Media3 pula os
+ *     AudioProcessors customizados, então o Tee ficava mudo.
+ *  2) Compensa o atraso: o sink recebe o áudio ~250-750 ms ANTES de ele tocar. O [drain] entrega
+ *     o trecho que está soando agora, não o que acabou de entrar no buffer. Sem isso as batidas
+ *     do visualizador ficam fora de sincronia e parecem "genéricas".
+ *  3) Decimação para ~48 kHz: o projectM só analisa as últimas 512 amostras; em 96/192 kHz isso
+ *     cobria poucos ms e os graves sumiam.
+ *  4) Logs de diagnóstico (tag "AudioTap") a cada 1 s enquanto DEBUG = true.
  */
-@OptIn(UnstableApi::class)
-object AudioTap : TeeAudioProcessor.AudioBufferSink {
+object AudioTap {
 
-    private const val CAPACITY = 1 shl 15            // frames (potência de 2)
+    private const val TAG = "AudioTap"
+    private const val DEBUG = true
+
+    private const val CAPACITY = 1 shl 18            // frames (potência de 2), ~5,9 s a 44,1 kHz
     private const val MASK = CAPACITY - 1L
+    private const val TARGET_RATE = 48_000
+    private const val MAX_AHEAD_US = 4_000_000L
+    private const val NONE = Long.MIN_VALUE
+
     private val ring = FloatArray(CAPACITY * 2)      // L,R intercalados
 
     @Volatile private var writeFrames = 0L
@@ -28,19 +40,52 @@ object AudioTap : TeeAudioProcessor.AudioBufferSink {
 
     @Volatile private var channels = 2
     @Volatile private var encoding = C.ENCODING_INVALID
+    @Volatile private var sampleRate = TARGET_RATE
+    @Volatile private var step = 1
 
     /** Ligado enquanto existe um visualizador na tela. */
     @Volatile var active = false
 
-    // ---- lado do player (thread de áudio) ----
+    // sincronia: fim (em tempo de mídia) do que já entrou no sink x posição que está tocando
+    @Volatile private var writtenEndUs = NONE
+    @Volatile private var playedUs = NONE
 
-    override fun flush(sampleRateHz: Int, channelCount: Int, encoding: Int) {
-        this.channels = channelCount.coerceAtLeast(1)
-        this.encoding = encoding
+    // acumulador da decimação (só a thread do player)
+    private var accL = 0f
+    private var accR = 0f
+    private var accN = 0
+
+    // diagnóstico
+    @Volatile private var dbgBuffers = 0L
+    private var dbgLastLog = 0L
+    private var dbgDrained = 0L
+    private var dbgSumSq = 0.0
+    private var dbgSamples = 0L
+
+    // ---- lado do player (chamado pelo AudioTapSink) ----
+
+    fun onConfigure(sampleRateHz: Int, channelCount: Int, enc: Int) {
+        sampleRate = sampleRateHz.coerceAtLeast(8000)
+        channels = channelCount.coerceAtLeast(1)
+        encoding = enc
+        step = ((sampleRateHz + TARGET_RATE / 2) / TARGET_RATE).coerceAtLeast(1)
+        accL = 0f; accR = 0f; accN = 0
+        if (DEBUG) Log.i(TAG, "configure: ${sampleRateHz}Hz ${channelCount}ch enc=$enc decimação=1/$step")
     }
 
-    override fun handleBuffer(buffer: ByteBuffer) {
-        if (!active) return
+    fun onFlush() {
+        accL = 0f; accR = 0f; accN = 0
+        writtenEndUs = NONE
+        playedUs = NONE
+    }
+
+    /** Posição (tempo de mídia, µs) que está soando agora. */
+    fun onPosition(us: Long) {
+        playedUs = us
+    }
+
+    /** [buffer] = exatamente os bytes que o sink consumiu nesta chamada (position..limit). */
+    fun onBuffer(buffer: ByteBuffer, ptsUs: Long) {
         val enc = encoding
         val bytesPerSample = when (enc) {
             C.ENCODING_PCM_8BIT -> 1
@@ -51,27 +96,49 @@ object AudioTap : TeeAudioProcessor.AudioBufferSink {
         }
         val ch = channels
         val frameBytes = bytesPerSample * ch
+        var pos = buffer.position()
+        val totalFrames = (buffer.limit() - pos) / frameBytes
+        if (totalFrames <= 0) return
 
-        // asReadOnlyBuffer() volta para BIG_ENDIAN; o PCM do Android é little-endian
-        val b = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
-        var pos = b.position()
-        var frames = (b.limit() - pos) / frameBytes
-        if (frames <= 0) return
-        if (frames > CAPACITY) { // buffer gigante: só interessa o final
-            pos += (frames - CAPACITY) * frameBytes
-            frames = CAPACITY
+        dbgBuffers++
+        writtenEndUs = ptsUs + totalFrames * 1_000_000L / sampleRate
+        if (!active) return
+
+        val b = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN) // duplicate() volta p/ BIG_ENDIAN
+        val step = this.step
+        var frames = totalFrames
+        val maxIn = (CAPACITY / 2) * step              // buffer gigante: só interessa o final
+        if (frames > maxIn) {
+            pos += (frames - maxIn) * frameBytes
+            frames = maxIn
+            accN = 0
         }
 
         var w = writeFrames
+        var aL = accL
+        var aR = accR
+        var aN = accN
         for (f in 0 until frames) {
             val l = sample(b, pos, enc)
             val r = if (ch > 1) sample(b, pos + bytesPerSample, enc) else l
-            val i = ((w and MASK).toInt()) * 2
-            ring[i] = l
-            ring[i + 1] = r
-            w++
             pos += frameBytes
+            if (step == 1) {
+                val i = ((w and MASK).toInt()) * 2
+                ring[i] = l
+                ring[i + 1] = r
+                w++
+            } else {
+                aL += l; aR += r; aN++
+                if (aN >= step) {
+                    val i = ((w and MASK).toInt()) * 2
+                    ring[i] = aL / step
+                    ring[i + 1] = aR / step
+                    w++
+                    aL = 0f; aR = 0f; aN = 0
+                }
+            }
         }
+        accL = aL; accR = aR; accN = aN
         writeFrames = w // publica depois de escrever
     }
 
@@ -91,26 +158,66 @@ object AudioTap : TeeAudioProcessor.AudioBufferSink {
 
     // ---- lado do renderizador (thread do GL) ----
 
+    /** Quantos frames (já decimados) o buffer está adiantado em relação ao que toca agora. */
+    private fun aheadFrames(): Long {
+        val w = writtenEndUs
+        val p = playedUs
+        if (w == NONE || p == NONE) return 0L
+        val us = (w - p).coerceIn(0L, MAX_AHEAD_US)
+        val rate = (sampleRate / step).coerceAtLeast(1)
+        return us * rate / 1_000_000L
+    }
+
     /** Descarta o que já estava no buffer (usar ao criar o visualizador). */
     fun resetReader() {
-        readFrames = writeFrames
+        readFrames = (writeFrames - aheadFrames()).coerceAtLeast(0L)
     }
 
     /**
-     * Copia até [maxFrames] frames estéreo intercalados para [out].
-     * Retorna quantos frames foram copiados (0 = nada novo / pausado).
+     * Copia até [maxFrames] frames estéreo intercalados para [out], do trecho que está
+     * tocando agora. Retorna quantos frames foram copiados (0 = nada novo / pausado).
      */
     fun drain(out: FloatArray, maxFrames: Int): Int {
-        val w = writeFrames
+        val end = (writeFrames - aheadFrames()).coerceAtLeast(0L)
         var r = readFrames
-        if (w - r > maxFrames) r = w - maxFrames // atrasou: pula para o mais recente
-        val n = (w - r).toInt()
+        if (end - r > maxFrames) r = end - maxFrames // atrasou: pula para o mais recente
+        val n = (end - r).toInt()
+        if (n <= 0) {
+            debugTick()
+            return 0
+        }
         for (k in 0 until n) {
             val i = (((r + k) and MASK).toInt()) * 2
-            out[k * 2] = ring[i]
-            out[k * 2 + 1] = ring[i + 1]
+            val l = ring[i]
+            val rr = ring[i + 1]
+            out[k * 2] = l
+            out[k * 2 + 1] = rr
+            if (DEBUG) {
+                dbgSumSq += (l * l + rr * rr).toDouble()
+                dbgSamples += 2
+            }
         }
         readFrames = r + n
+        if (DEBUG) dbgDrained += n
+        debugTick()
         return n
+    }
+
+    private fun debugTick() {
+        if (!DEBUG) return
+        val now = SystemClock.uptimeMillis()
+        if (now - dbgLastLog < 1000) return
+        dbgLastLog = now
+        val rms = if (dbgSamples > 0) sqrt(dbgSumSq / dbgSamples) else 0.0
+        val aheadMs = aheadFrames() * 1000L / (sampleRate / step).coerceAtLeast(1)
+        val w = writtenEndUs
+        val p = playedUs
+        val rawMs = if (w == NONE || p == NONE) -1L else (w - p) / 1000L
+        Log.d(
+            TAG,
+            "ativo=$active buffers=$dbgBuffers drenados/s=$dbgDrained rms=${"%.3f".format(rms)} " +
+                "adiantamento=${aheadMs}ms bruto=${rawMs}ms fmt=$encoding ${channels}ch ${sampleRate}Hz"
+        )
+        dbgDrained = 0; dbgSumSq = 0.0; dbgSamples = 0
     }
 }

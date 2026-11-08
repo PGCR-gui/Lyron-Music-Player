@@ -53,6 +53,8 @@ internal fun PlayerPage(
     onCrossfadeMsChange: (Int) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
+    playCountMinutes: Int = 0,
+    onPlayCountMinutesChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
@@ -64,31 +66,6 @@ internal fun PlayerPage(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
-        Text(
-            "Letras",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.White.copy(0.55f),
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                Text("Busca automática de letras", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    "Quando a faixa não tiver letra nas tags nem arquivo .lrc, busca em lrclib.net",
-                    fontSize = 13.sp,
-                    color = Color.White.copy(0.55f)
-                )
-            }
-            Switch(checked = autoFetchLyrics, onCheckedChange = onAutoFetchLyricsChange)
-        }
-        Text(
-            "Fonte: lrclib.net · requer conexão com a internet",
-            fontSize = 12.sp,
-            color = Color.White.copy(0.4f),
-            modifier = Modifier.padding(top = 12.dp, bottom = 20.dp)
-        )
-
         Text(
             "Aleatório",
             fontSize = 13.sp,
@@ -251,6 +228,44 @@ internal fun PlayerPage(
             modifier = Modifier.padding(bottom = 8.dp)
         )
 
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Contar também por tempo", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    if (playCountMinutes > 0)
+                        "O play conta ao atingir ${playCountThreshold}% ou $playCountMinutes min tocados — o que vier primeiro"
+                    else
+                        "Desligado: conta só pela porcentagem",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(0.55f)
+                )
+            }
+            Switch(
+                checked = playCountMinutes > 0,
+                onCheckedChange = { on -> onPlayCountMinutesChange(if (on) 3 else 0) }
+            )
+        }
+        if (playCountMinutes > 0) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("1 min", fontSize = 12.sp, color = Color.White.copy(0.5f))
+                androidx.compose.material3.Slider(
+                    value = playCountMinutes.toFloat(),
+                    onValueChange = { onPlayCountMinutesChange(it.toInt().coerceIn(1, 6)) },
+                    valueRange = 1f..6f,
+                    steps = 4,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                )
+                Text("6 min", fontSize = 12.sp, color = Color.White.copy(0.5f))
+            }
+            Text(
+                "Atual: $playCountMinutes min",
+                fontSize = 13.sp,
+                color = Color.White.copy(0.7f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+        }
+
     }
 }
 
@@ -280,4 +295,3 @@ internal fun ShuffleTypeOption(
         }
     }
 }
-

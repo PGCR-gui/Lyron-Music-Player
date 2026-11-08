@@ -36,7 +36,10 @@ object MilkPresetStore {
             try {
                 val names = context.assets.list(ASSETS_MILK) ?: emptyArray()
                 for (name in names) {
-                    if (!name.endsWith(".milk", ignoreCase = true)) continue
+                    val lower = name.lowercase()
+                    val isMilk = lower.endsWith(".milk")
+                    val isTexture = TEXTURE_EXT.any { lower.endsWith(".$it") }
+                    if (!isMilk && !isTexture) continue
                     val dest = File(out, name)
                     if (dest.exists()) continue
                     context.assets.open("$ASSETS_MILK/$name").use { input ->

@@ -50,6 +50,7 @@ import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -83,7 +84,7 @@ import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
 
-enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED }
+enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED, SCROBBLE }
 
 internal data class SettingsEntry(
     val icon: ImageVector,
@@ -101,6 +102,7 @@ fun SettingsScreen(
     scanCount: Int,
     themeId: AppThemeId,
     lyricsFontPath: String?,
+    lyricsTranslationFontPath: String? = null,
     uiFontPath: String?,
     librarySettings: LibrarySettings,
     appColors: AppColors,
@@ -118,6 +120,9 @@ fun SettingsScreen(
     onClearUiFont: () -> Unit,
     onSelectUiFont: (String?) -> Unit = {},
     onSelectLyricsFont: (String?) -> Unit = {},
+    onPickTranslationFont: () -> Unit = {},
+    onClearTranslationFont: () -> Unit = {},
+    onSelectTranslationFont: (String?) -> Unit = {},
     onSplitArtistsChange: (Boolean) -> Unit,
     onArtistSeparatorsChange: (String) -> Unit,
     onArtistExceptionsChange: (String) -> Unit,
@@ -154,6 +159,10 @@ fun SettingsScreen(
     onLyricsBorderColorChange: (Int) -> Unit = {},
     lyricsBorderWidth: Float = 0f,
     onLyricsBorderWidthChange: (Float) -> Unit = {},
+    lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
+    onLyricsTranslationColorChange: (Int) -> Unit = {},
+    lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
+    onLyricsBackingColorChange: (Int) -> Unit = {},
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     splashEnabled: Boolean = true,
@@ -162,8 +171,6 @@ fun SettingsScreen(
     onSplashSoundChange: (Boolean) -> Unit = {},
     floatingIconsEnabled: Boolean = true,
     onFloatingIconsChange: (Boolean) -> Unit = {},
-    menuBgColor: Int = 0xE8F2F2F7.toInt(),
-    onMenuBgColorChange: (Int) -> Unit = {},
     homeButtonFontPath: String? = null,
     onHomeButtonFontSelect: (String?) -> Unit = {},
     homeButtonColor: Int = 0xFFFFFFFF.toInt(),
@@ -186,6 +193,8 @@ fun SettingsScreen(
     onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
+    playCountMinutes: Int = 0,
+    onPlayCountMinutesChange: (Int) -> Unit = {},
     milkPresetCount: Int = 0,
     milkIntervalSec: Int = 30,
     onPickMilkFiles: () -> Unit = {},
@@ -197,7 +206,9 @@ fun SettingsScreen(
     onChangePresetOnSongChange: (Boolean) -> Unit = {},
     onManageMilkPresets: () -> Unit = {},
     onOpenRecommendedPresets: () -> Unit = {},
-    onPickDataFolder: () -> Unit = {}
+    onPickDataFolder: () -> Unit = {},
+    lyricsEmphasisFontPath: String? = null,
+    onSelectLyricsEmphasisFont: (String?) -> Unit = {}
 ) {
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
@@ -213,6 +224,7 @@ fun SettingsScreen(
         SettingsPage.BACKUP -> "Backup"
         SettingsPage.VISUALIZER -> "Visualizador (.milk)"
         SettingsPage.ADVANCED -> "Avançado"
+        SettingsPage.SCROBBLE -> "Scrobbling (Last.fm)"
         else -> "Configurações"
     }
 
@@ -294,6 +306,8 @@ fun SettingsScreen(
                 onCrossfadeMsChange = onCrossfadeMsChange,
                 playCountThreshold = playCountThreshold,
                 onPlayCountThresholdChange = onPlayCountThresholdChange,
+                playCountMinutes = playCountMinutes,
+                onPlayCountMinutesChange = onPlayCountMinutesChange,
                 seekBarStyle = seekBarStyle,
                 onSeekBarStyleChange = onSeekBarStyleChange,
                 immersiveNowPlaying = immersiveNowPlaying,
@@ -325,8 +339,6 @@ fun SettingsScreen(
                 onSplashSoundChange = onSplashSoundChange,
                 floatingIconsEnabled = floatingIconsEnabled,
                 onFloatingIconsChange = onFloatingIconsChange,
-                menuBgColor = menuBgColor,
-                onMenuBgColorChange = onMenuBgColorChange,
                 homeButtonFontPath = homeButtonFontPath,
                 onHomeButtonFontSelect = onHomeButtonFontSelect,
                 onPickHomeButtonFont = onPickUiFont,
@@ -344,19 +356,29 @@ fun SettingsScreen(
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,
+                lyricsTranslationFontPath = lyricsTranslationFontPath,
+                lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                 lyricsFontSize = lyricsFontSize,
                 lyricsPrimaryColor = lyricsPrimaryColor,
                 lyricsSecondaryColor = lyricsSecondaryColor,
                 lyricsBorderColor = lyricsBorderColor,
                 lyricsBorderWidth = lyricsBorderWidth,
+                lyricsTranslationColor = lyricsTranslationColor,
+                lyricsBackingColor = lyricsBackingColor,
                 onPickFont = onPickFont,
                 onClearFont = onClearFont,
                 onSelectFont = onSelectLyricsFont,
+                onPickTranslationFont = onPickTranslationFont,
+                onClearTranslationFont = onClearTranslationFont,
+                onSelectTranslationFont = onSelectTranslationFont,
+                onSelectLyricsEmphasisFont = onSelectLyricsEmphasisFont,
                 onFontSizeChange = onLyricsFontSizeChange,
                 onPrimaryColorChange = onLyricsPrimaryColorChange,
                 onSecondaryColorChange = onLyricsSecondaryColorChange,
                 onBorderColorChange = onLyricsBorderColorChange,
-                onBorderWidthChange = onLyricsBorderWidthChange
+                onBorderWidthChange = onLyricsBorderWidthChange,
+                onTranslationColorChange = onLyricsTranslationColorChange,
+                onBackingColorChange = onLyricsBackingColorChange
             )
             SettingsPage.VISUALIZER -> VisualizerPage(
                 presetCount = milkPresetCount,
@@ -378,6 +400,7 @@ fun SettingsScreen(
             SettingsPage.ADVANCED -> AdvancedPage(
                 onPickCustomFolder = onPickDataFolder
             )
+            SettingsPage.SCROBBLE -> ScrobblePage()
             SettingsPage.ABOUT -> AboutPage(
                 onOpenChangelog = { onNavigate(SettingsPage.CHANGELOG) },
                 onOpenLicenses = { onNavigate(SettingsPage.LICENSES) },
@@ -397,8 +420,13 @@ fun SettingsScreen(
                     SettingsEntry(
                         Icons.Rounded.PlayArrow,
                         "Player",
-                        if (autoFetchLyrics) "Busca automática de letras: ligada" else "Busca automática de letras: desligada"
+                        "Letras lidas apenas das tags do arquivo"
                     ) { onNavigate(SettingsPage.PLAYER) },
+                    SettingsEntry(
+                        Icons.Rounded.Sync,
+                        "Scrobbling (Last.fm)",
+                        "Entrar na conta e enviar o que você ouve"
+                    ) { onNavigate(SettingsPage.SCROBBLE) },
                     SettingsEntry(
                         Icons.Rounded.GraphicEq,
                         "Visualizador",

@@ -16,6 +16,7 @@ import android.util.Log
 import android.widget.Toast
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
+import com.tolete.player.visualizer.ProjectMNative
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,7 +71,9 @@ object LyricsVideoGenerator {
         val shortSide: Int,
         val aspect: Aspect,
         val fps: Int,
-        val style: LyricsVideoStyle
+        val style: LyricsVideoStyle,
+        /** Caminho de um preset .milk para usar de fundo; null = capa borrada (padrão). */
+        val milkPresetPath: String? = null
     )
 
     sealed interface State {
@@ -301,21 +304,54 @@ object LyricsVideoGenerator {
         val muxer = VideoMuxer(videoTmp)
         var renderer: LyricsFrameRenderer? = null
         var enc: GlVideoEncoder? = null
+        var milk: MilkBackground? = null
+        var pcm: MilkPcmClip? = null
         var finished = false
+        val milkPath = options.milkPresetPath
         try {
-            renderer = LyricsFrameRenderer(app, track, lyrics, options.style, w, h)
-            enc = GlVideoEncoder(w, h, options.fps, bitrate, muxer)
+            if (milkPath != null) {
+                if (!ProjectMNative.isAvailable) throw IOException("O visualizador milk não está disponível neste app")
+                if (!File(milkPath).isFile) throw IOException("Preset milk não encontrado")
+                // Áudio do trecho em PCM mono, para o preset reagir ao som na posição exata de cada frame.
+                // Se a decodificação falhar, o fundo ainda anima (só não reage à música).
+                try {
+                    val pcmFile = File(videoTmp.parentFile, "lv_tmp_pcm_${System.nanoTime()}.raw")
+                    val spanMs = totalFrames * 1000L / options.fps + 500L
+                    pcm = MilkPcmDecoder.decode(app, track.uri, startMs, startMs + spanMs, pcmFile, cancelled)
+                } catch (e: IOException) {
+                    Log.w(TAG, "Sem áudio para o preset milk", e)
+                }
+            }
+            renderer = LyricsFrameRenderer(
+                app, track, lyrics, options.style, w, h,
+                transparentBackground = milkPath != null
+            )
+            enc = GlVideoEncoder(w, h, options.fps, bitrate, muxer, gles3 = milkPath != null)
+            if (milkPath != null) {
+                val mb = MilkBackground(app, milkPath, w, h, options.fps, pcm)
+                milk = mb
+                mb.init() // contexto GL do encoder já está ativo nesta thread
+            }
             for (i in 0 until totalFrames) {
                 if (cancelled()) throw CancellationException("cancelled")
                 val tMs = startMs + i * 1000L / options.fps
-                enc.encodeFrame(renderer.render(tMs), i * 1_000_000_000L / options.fps)
+                val ptsNs = i * 1_000_000_000L / options.fps
+                val bmp = renderer.render(tMs)
+                val bg = milk
+                if (bg != null) enc.encodeFrame(bmp, ptsNs) { bg.draw(i) }
+                else enc.encodeFrame(bmp, ptsNs)
                 if (i % 6 == 0) onProgress((i + 1f) / totalFrames)
             }
+            // o projectM precisa ser destruído com o contexto GL ainda vivo (antes do finish)
+            milk?.close()
+            milk = null
             enc.finish()
             finished = true
             onProgress(1f)
         } finally {
+            milk?.close()
             if (!finished) enc?.release()
+            pcm?.close()
             renderer?.close()
             muxer.finish()
         }

@@ -72,6 +72,18 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".scrobble.ScrobbleActionReceiver"
+            android:exported="false" />
+
+        <activity
+            android:name=".scrobble.ScrobbleEditActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Lyron.Transparent" />
+
         <service
             android:name=".video.LyricsVideoService"
             android:exported="false"

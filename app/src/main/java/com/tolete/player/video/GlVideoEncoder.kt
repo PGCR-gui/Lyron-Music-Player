@@ -11,6 +11,7 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLUtils
 import android.view.Surface
 import java.io.IOException
@@ -34,7 +35,9 @@ class GlVideoEncoder(
     private val height: Int,
     private val fps: Int,
     bitrate: Int,
-    private val muxer: VideoMuxer
+    private val muxer: VideoMuxer,
+    /** true = contexto OpenGL ES 3 (necessário para o fundo com preset milk). */
+    private val gles3: Boolean = false
 ) {
     private val codec: MediaCodec
     private val inputSurface: Surface
@@ -102,12 +105,24 @@ class GlVideoEncoder(
         drainThread = Thread({ drainLoop() }, "lyron-video-drain").apply { start() }
     }
 
-    /** Desenha [bitmap] (mesmas dimensões do vídeo) com o timestamp [ptsNs]. */
-    fun encodeFrame(bitmap: Bitmap, ptsNs: Long) {
+    /**
+     * Desenha [bitmap] (mesmas dimensões do vídeo) com o timestamp [ptsNs].
+     * Com [drawBackground], o fundo é desenhado por ele (ex.: projectM) no framebuffer atual e o
+     * bitmap (que então precisa ter fundo transparente) é composto por cima.
+     */
+    fun encodeFrame(bitmap: Bitmap, ptsNs: Long, drawBackground: (() -> Unit)? = null) {
         drainError?.let { throw it }
-        GLES20.glViewport(0, 0, width, height)
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        if (drawBackground != null) {
+            drawBackground()
+            resetStateAfterForeignRender()
+            GLES20.glEnable(GLES20.GL_BLEND)
+            // o bitmap do Android é "premultiplied"
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        } else {
+            GLES20.glViewport(0, 0, width, height)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        }
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
@@ -129,6 +144,7 @@ class GlVideoEncoder(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aTex)
+        if (drawBackground != null) GLES20.glDisable(GLES20.GL_BLEND)
 
         EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, ptsNs)
         if (!EGL14.eglSwapBuffers(eglDisplay, eglSurface)) {
@@ -182,6 +198,25 @@ class GlVideoEncoder(
 
     // ---------------------------------------------------------------------------------------
 
+    /** O projectM mexe em vários estados do GL; devolve tudo ao que o desenho do bitmap espera. */
+    private fun resetStateAfterForeignRender() {
+        if (gles3) {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+            GLES30.glBindVertexArray(0)
+        }
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+        GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, 0)
+        for (i in 0 until 8) GLES20.glDisableVertexAttribArray(i)
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glDisable(GLES20.GL_STENCIL_TEST)
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glDisable(GLES20.GL_CULL_FACE)
+        GLES20.glColorMask(true, true, true, true)
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 4)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glViewport(0, 0, width, height)
+    }
+
     private fun drainLoop() {
         val info = MediaCodec.BufferInfo()
         try {
@@ -221,16 +256,19 @@ class GlVideoEncoder(
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RENDERABLE_TYPE, if (gles3) EGLExt.EGL_OPENGL_ES3_BIT_KHR else EGL14.EGL_OPENGL_ES2_BIT,
             recordable, 1,
             EGL14.EGL_NONE
         )
         val configs = arrayOfNulls<EGLConfig>(1)
         val num = IntArray(1)
         if (!EGL14.eglChooseConfig(eglDisplay, attribs, 0, configs, 0, 1, num, 0) || num[0] <= 0) {
-            throw IOException("Nenhuma configuração EGL compatível")
+            throw IOException(
+                if (gles3) "Este aparelho não oferece OpenGL ES 3 para o fundo com preset milk"
+                else "Nenhuma configuração EGL compatível"
+            )
         }
-        val ctxAttrs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
+        val ctxAttrs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, if (gles3) 3 else 2, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttrs, 0)
         if (eglContext == EGL14.EGL_NO_CONTEXT) throw IOException("eglCreateContext falhou")
         val surfAttrs = intArrayOf(EGL14.EGL_NONE)

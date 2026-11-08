@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,7 +34,6 @@ import com.tolete.player.data.UpdateManager.State
 private const val PREFS = "tolete"
 private const val KEY_LAST_SEEN_CODE = "changelog_last_seen_code"
 
-private val DialogBg = Color(0xFF1C1C28)
 
 /**
  * Hospeda os diálogos de atualização (nova versão / download / instalar) e dispara a
@@ -65,25 +65,24 @@ internal fun UpdateHost() {
     }
 
     when (val s = state) {
-        is State.Available -> AlertDialog(
+        is State.Available -> AppAlertDialog(
             onDismissRequest = { UpdateManager.dismiss() },
-            containerColor = DialogBg,
             title = { Text("Nova versão disponível") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "v${UpdateManager.installedVersion(context)}  →  v${s.info.version}",
-                        fontSize = 14.sp, color = Color.White.copy(0.7f)
+                        fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.7f)
                     )
                     if (s.info.apkSize > 0) {
                         Text(
                             "Tamanho: %.1f MB".format(s.info.apkSize / 1_048_576.0),
-                            fontSize = 12.sp, color = Color.White.copy(0.5f)
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.5f)
                         )
                     }
                     if (s.info.notes.isNotBlank()) {
                         Spacer(Modifier.height(12.dp))
-                        Text(s.info.notes.trim(), fontSize = 13.sp, color = Color.White.copy(0.85f))
+                        Text(s.info.notes.trim(), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.85f))
                     }
                 }
             },
@@ -98,23 +97,21 @@ internal fun UpdateHost() {
             }
         )
 
-        is State.Downloading -> AlertDialog(
+        is State.Downloading -> AppAlertDialog(
             onDismissRequest = { /* não fecha durante o download */ },
-            containerColor = DialogBg,
             title = { Text("Baixando v${s.info.version}…") },
             text = {
                 Column {
                     LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    Text("${(s.progress * 100).toInt()}%", fontSize = 13.sp, color = Color.White.copy(0.7f))
+                    Text("${(s.progress * 100).toInt()}%", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.7f))
                 }
             },
             confirmButton = {}
         )
 
-        is State.ReadyToInstall -> AlertDialog(
+        is State.ReadyToInstall -> AppAlertDialog(
             onDismissRequest = { UpdateManager.dismiss() },
-            containerColor = DialogBg,
             title = { Text("Download concluído") },
             text = {
                 Text(
@@ -171,16 +168,15 @@ internal fun ChangelogOnUpdateDialog() {
     }
 
     if (show) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { show = false },
-            containerColor = DialogBg,
             title = { Text("O que há de novo") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     entries.forEach { e ->
-                        Text("v${e.version}", fontSize = 15.sp, color = Color.White)
+                        Text("v${e.version}", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
                         Spacer(Modifier.height(4.dp))
-                        e.changes.forEach { Text("•  $it", fontSize = 13.sp, color = Color.White.copy(0.85f)) }
+                        e.changes.forEach { Text("•  $it", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(0.85f)) }
                         Spacer(Modifier.height(12.dp))
                     }
                 }

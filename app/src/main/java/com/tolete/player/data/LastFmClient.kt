@@ -13,9 +13,11 @@ import java.net.URLEncoder
  */
 object LastFmClient {
 
-    private const val API_KEY = "752ee48ef50aca94c9b2ec0dbb4c4881"
-    private const val BASE = "https://ws.audioscrobbler.com/2.0/"
-    private const val USER_AGENT = "LyronMusicPlayer/0.40 (https://linktr.ee/pgcrgui)"
+    internal const val DEFAULT_API_KEY = "752ee48ef50aca94c9b2ec0dbb4c4881"
+    /** Pode ser trocada nas configurações; precisa ser do mesmo cadastro do API Secret. */
+    @Volatile internal var API_KEY: String = DEFAULT_API_KEY
+    internal const val BASE = "https://ws.audioscrobbler.com/2.0/"
+    internal const val USER_AGENT = "LyronMusicPlayer/0.40 (https://linktr.ee/pgcrgui)"
 
     data class ArtistInfo(
         val name: String,

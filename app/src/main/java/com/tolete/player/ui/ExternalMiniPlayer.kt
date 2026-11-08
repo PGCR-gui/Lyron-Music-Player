@@ -69,6 +69,7 @@ fun ExternalMiniPlayer(
     val progress = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
     var slider by remember(progress) { mutableFloatStateOf(progress) }
     var dragging by remember { mutableStateOf(false) }
+    val pal = menuPalette(LocalAppColors.current)
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -86,14 +87,7 @@ fun ExternalMiniPlayer(
                 Modifier
                     .fillMaxWidth(0.88f)
                     .clip(RoundedCornerShape(24.dp))
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                Color(0xE6282830),
-                                Color(0xF0121218)
-                            )
-                        )
-                    )
+                    .background(pal.container)
                     .clickable(enabled = false, onClick = {})
                     .padding(20.dp)
             ) {
@@ -103,26 +97,26 @@ fun ExternalMiniPlayer(
                         Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF4ADE80)),
+                            .background(pal.accent),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             Icons.Rounded.MusicNote,
                             contentDescription = null,
-                            tint = Color.Black,
+                            tint = pal.onAccent,
                             modifier = Modifier.size(22.dp)
                         )
                     }
                     Spacer(Modifier.width(10.dp))
                     Text(
                         "Lyron",
-                        color = Color.White,
+                        color = pal.content,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 16.sp,
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = Color.White.copy(0.7f))
+                        Icon(Icons.Rounded.Close, contentDescription = "Fechar", tint = pal.content.copy(0.7f))
                     }
                 }
 
@@ -143,17 +137,17 @@ fun ExternalMiniPlayer(
                             Modifier
                                 .size(64.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White.copy(0.1f)),
+                                .background(pal.content.copy(0.1f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Rounded.MusicNote, null, tint = Color.White.copy(0.5f), modifier = Modifier.size(28.dp))
+                            Icon(Icons.Rounded.MusicNote, null, tint = pal.content.copy(0.5f), modifier = Modifier.size(28.dp))
                         }
                     }
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
                             title,
-                            color = Color.White,
+                            color = pal.content,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 16.sp,
                             maxLines = 1,
@@ -161,7 +155,7 @@ fun ExternalMiniPlayer(
                         )
                         Text(
                             artist.ifBlank { "Artista desconhecido" },
-                            color = Color.White.copy(0.6f),
+                            color = pal.content.copy(0.6f),
                             fontSize = 13.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -182,9 +176,9 @@ fun ExternalMiniPlayer(
                         onSeek(slider)
                     },
                     colors = SliderDefaults.colors(
-                        thumbColor = Color(0xFF4ADE80),
-                        activeTrackColor = Color(0xFF4ADE80),
-                        inactiveTrackColor = Color.White.copy(0.2f)
+                        thumbColor = pal.accent,
+                        activeTrackColor = pal.accent,
+                        inactiveTrackColor = pal.content.copy(0.2f)
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -193,8 +187,8 @@ fun ExternalMiniPlayer(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(formatMs(positionMs), color = Color.White.copy(0.5f), fontSize = 11.sp)
-                    Text(formatMs(durationMs), color = Color.White.copy(0.5f), fontSize = 11.sp)
+                    Text(formatMs(positionMs), color = pal.content.copy(0.5f), fontSize = 11.sp)
+                    Text(formatMs(durationMs), color = pal.content.copy(0.5f), fontSize = 11.sp)
                 }
 
                 Spacer(Modifier.height(8.dp))
@@ -209,12 +203,12 @@ fun ExternalMiniPlayer(
                         modifier = Modifier
                             .size(56.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF4ADE80))
+                            .background(pal.accent)
                     ) {
                         Icon(
                             if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                             contentDescription = if (isPlaying) "Pausar" else "Tocar",
-                            tint = Color.Black,
+                            tint = pal.onAccent,
                             modifier = Modifier.size(32.dp)
                         )
                     }

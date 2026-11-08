@@ -349,7 +349,7 @@ fun FileManagerScreen(
     }
 
     if (showDeleteConfirm) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("Excluir?") },
             text = { Text("Excluir ${selected.size} item(ns) permanentemente?") },
@@ -368,7 +368,7 @@ fun FileManagerScreen(
                         reload()
                         onTracksMayHaveChanged?.invoke()
                     }
-                }) { Text("Excluir", color = Color(0xFFFF8A80)) }
+                }) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancelar") }
@@ -377,7 +377,7 @@ fun FileManagerScreen(
     }
 
     if (renameTarget != null) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { renameTarget = null },
             title = { Text("Renomear") },
             text = {
@@ -423,7 +423,7 @@ fun FileManagerScreen(
     }
 
     if (showMkdir) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { showMkdir = false },
             title = { Text("Nova pasta") },
             text = {
@@ -522,7 +522,7 @@ fun FileManagerScreen(
     }
 
     if (showLyricsEditor && lyricsEditFile != null) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = {
                 showLyricsEditor = false
                 lyricsEditFile = null
@@ -543,7 +543,7 @@ fun FileManagerScreen(
                         .height(360.dp),
                     textStyle = androidx.compose.ui.text.TextStyle(
                         fontSize = 13.sp,
-                        color = Color(0xFF1A1A1A),
+                        color = MaterialTheme.colorScheme.onSurface,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 )

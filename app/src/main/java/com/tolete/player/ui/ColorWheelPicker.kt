@@ -42,6 +42,7 @@ fun ColorWheelPickerDialog(
     title: String = "Escolher cor"
 ) {
     val initial = Color(initialColor)
+    val pal = menuPalette(LocalAppColors.current)
     var hue by remember { mutableFloatStateOf(rgbToHsv(initial).first) }
     var sat by remember { mutableFloatStateOf(rgbToHsv(initial).second) }
     var value by remember { mutableFloatStateOf(rgbToHsv(initial).third) }
@@ -59,8 +60,8 @@ fun ColorWheelPickerDialog(
                 .fillMaxWidth(0.92f)
                 .wrapContentHeight(),
             shape = RoundedCornerShape(20.dp),
-            color = Color(0xFF2A2A2E),
-            tonalElevation = 8.dp
+            color = pal.container,
+            tonalElevation = 0.dp
         ) {
             Column(
                 Modifier
@@ -70,7 +71,7 @@ fun ColorWheelPickerDialog(
             ) {
                 Text(
                     title,
-                    color = Color.White,
+                    color = pal.content,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
@@ -89,7 +90,7 @@ fun ColorWheelPickerDialog(
                             .size(48.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .background(currentColor)
-                            .border(1.dp, Color.White.copy(0.3f), RoundedCornerShape(12.dp))
+                            .border(1.dp, pal.content.copy(0.3f), RoundedCornerShape(12.dp))
                     )
                     var hexText by remember(argb) {
                         mutableStateOf(toHexString(argb, showAlpha))
@@ -112,13 +113,13 @@ fun ColorWheelPickerDialog(
                         label = { Text(if (showAlpha) "Hex (#AARRGGBB)" else "Hex (#RRGGBB)") },
                         modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color(0xFF69F0AE),
-                            unfocusedBorderColor = Color.White.copy(0.3f),
-                            focusedLabelColor = Color.White.copy(0.7f),
-                            unfocusedLabelColor = Color.White.copy(0.5f),
-                            cursorColor = Color(0xFF69F0AE)
+                            focusedTextColor = pal.content,
+                            unfocusedTextColor = pal.content,
+                            focusedBorderColor = pal.accent,
+                            unfocusedBorderColor = pal.content.copy(0.3f),
+                            focusedLabelColor = pal.content.copy(0.7f),
+                            unfocusedLabelColor = pal.content.copy(0.5f),
+                            cursorColor = pal.accent
                         )
                     )
                 }
@@ -158,7 +159,7 @@ fun ColorWheelPickerDialog(
                     Spacer(Modifier.height(12.dp))
                     Text(
                         "Opacidade: ${(alpha * 100).toInt()}%",
-                        color = Color.White.copy(0.75f),
+                        color = pal.content.copy(0.75f),
                         fontSize = 13.sp,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -167,9 +168,9 @@ fun ColorWheelPickerDialog(
                         onValueChange = { alpha = it },
                         valueRange = 0f..1f,
                         colors = SliderDefaults.colors(
-                            thumbColor = Color.White,
+                            thumbColor = pal.content,
                             activeTrackColor = currentColor.copy(alpha = 1f),
-                            inactiveTrackColor = Color.White.copy(0.2f)
+                            inactiveTrackColor = pal.content.copy(0.2f)
                         )
                     )
                 }
@@ -182,7 +183,7 @@ fun ColorWheelPickerDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = onDismiss) {
-                        Text("CANCELAR", color = Color.White.copy(0.7f))
+                        Text("CANCELAR", color = pal.content.copy(0.7f))
                     }
                     Spacer(Modifier.width(8.dp))
                     Button(
@@ -191,8 +192,8 @@ fun ColorWheelPickerDialog(
                             onDismiss()
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF69F0AE),
-                            contentColor = Color.Black
+                            containerColor = pal.accent,
+                            contentColor = pal.onAccent
                         )
                     ) {
                         Text("OK", fontWeight = FontWeight.Bold)

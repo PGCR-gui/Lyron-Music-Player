@@ -34,6 +34,12 @@ object TagWriter {
         val lyricist: String = "",
         val comment: String = "",
         val lyrics: String = "",
+        /**
+         * Só apaga a letra do arquivo quando o usuário esvaziou de propósito um campo que tinha letra.
+         * Campo de letra em branco por qualquer outro motivo (leitura falhou, letra em outra tag,
+         * etc.) NÃO remove a letra existente.
+         */
+        val clearLyrics: Boolean = false,
         val bpm: String = "",
         val isrc: String = "",
         val copyright: String = "",
@@ -156,7 +162,11 @@ object TagWriter {
             set(FieldKey.COMPOSER, fields.composer)
             set(FieldKey.LYRICIST, fields.lyricist)
             set(FieldKey.COMMENT, fields.comment)
-            set(FieldKey.LYRICS, fields.lyrics)
+            if (fields.lyrics.isNotBlank()) {
+                set(FieldKey.LYRICS, fields.lyrics)
+            } else if (fields.clearLyrics) {
+                try { tag.deleteField(FieldKey.LYRICS) } catch (_: Exception) { }
+            }
             set(FieldKey.BPM, fields.bpm)
             set(FieldKey.ISRC, fields.isrc)
             set(FieldKey.COPYRIGHT, fields.copyright)

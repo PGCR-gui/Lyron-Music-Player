@@ -129,6 +129,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -156,6 +157,7 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -260,6 +262,8 @@ fun TolereApp(
     val themeId by vm.themeId.collectAsStateWithLifecycle()
     val repeatMode by vm.repeatMode.collectAsStateWithLifecycle()
     val lyricsFontPath by vm.lyricsFontPath.collectAsStateWithLifecycle()
+    val lyricsTranslationFontPath by vm.lyricsTranslationFontPath.collectAsStateWithLifecycle()
+    val lyricsEmphasisFontPath by vm.lyricsEmphasisFontPath.collectAsStateWithLifecycle()
     val uiFontPath by vm.uiFontPath.collectAsStateWithLifecycle()
     val librarySettings by vm.librarySettings.collectAsStateWithLifecycle()
     val allFilesMode by vm.allFilesMode.collectAsStateWithLifecycle()
@@ -277,6 +281,7 @@ fun TolereApp(
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
+    val playCountMinutes by vm.playCountMinutes.collectAsStateWithLifecycle()
     val lastFmUsername by vm.lastFmUsername.collectAsStateWithLifecycle()
     val lastFmSyncMessage by vm.lastFmSyncMessage.collectAsStateWithLifecycle()
     val libraryRootPath by vm.libraryRootPath.collectAsStateWithLifecycle()
@@ -292,10 +297,11 @@ fun TolereApp(
     val lyricsSecondaryColor by vm.lyricsSecondaryColor.collectAsStateWithLifecycle()
     val lyricsBorderColor by vm.lyricsBorderColor.collectAsStateWithLifecycle()
     val lyricsBorderWidth by vm.lyricsBorderWidth.collectAsStateWithLifecycle()
+    val lyricsTranslationColor by vm.lyricsTranslationColor.collectAsStateWithLifecycle()
+    val lyricsBackingColor by vm.lyricsBackingColor.collectAsStateWithLifecycle()
     val splashEnabled by vm.splashEnabled.collectAsStateWithLifecycle()
     val splashSoundEnabled by vm.splashSoundEnabled.collectAsStateWithLifecycle()
     val floatingIconsEnabled by vm.floatingIconsEnabled.collectAsStateWithLifecycle()
-    val menuBgColor by vm.menuBgColor.collectAsStateWithLifecycle()
     val homeButtonFontPath by vm.homeButtonFontPath.collectAsStateWithLifecycle()
     val homeButtonColor by vm.homeButtonColor.collectAsStateWithLifecycle()
     val shareFontPath by vm.shareFontPath.collectAsStateWithLifecycle()
@@ -343,6 +349,9 @@ fun TolereApp(
     var selectionInfoTrack by remember { mutableStateOf<Track?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var lyricsEditTrack by remember { mutableStateOf<Track?>(null) }
+    var lyricsEditTarget by remember { mutableStateOf(LyricsEmbedder.Target.EMBEDDED) }
+    /** Track pendente do diálogo "abrir .lrc ou tags embutidas". */
+    var lyricsSourcePickTrack by remember { mutableStateOf<Track?>(null) }
     var showManageMilkPresets by remember { mutableStateOf(false) }
     var tagEditTrack by remember { mutableStateOf<Track?>(null) }
     var showBatchTagEdit by remember { mutableStateOf(false) }
@@ -415,7 +424,7 @@ fun TolereApp(
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
                             SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
-            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.ADVANCED, SettingsPage.VISUALIZER -> SettingsPage.MENU
+            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.ADVANCED, SettingsPage.VISUALIZER, SettingsPage.SCROBBLE -> SettingsPage.MENU
             SettingsPage.CHANGELOG -> SettingsPage.ABOUT
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
             else -> SettingsPage.NONE
@@ -432,7 +441,12 @@ fun TolereApp(
         showAddToPlaylist = true
     }
 
-    CompositionLocalProvider(LocalUiFontFamily provides uiFontFamily) {
+    // Menus e diálogos leem o tema atual (ou a cor da capa no modo dinâmico) daqui.
+    SideEffect { LiveThemeHolder.colors = appColors }
+    CompositionLocalProvider(
+        LocalUiFontFamily provides uiFontFamily,
+        LocalAppColors provides appColors
+    ) {
     val uiTypography = remember(uiFontFamily) {
         if (uiFontFamily != null) {
             val base = Typography()
@@ -1080,6 +1094,8 @@ fun TolereApp(
                     scanCount = scanCount,
                     themeId = themeId,
                     lyricsFontPath = lyricsFontPath,
+                    lyricsTranslationFontPath = lyricsTranslationFontPath,
+                    lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                     uiFontPath = uiFontPath,
                     librarySettings = librarySettings,
                     appColors = appColors,
@@ -1091,7 +1107,7 @@ fun TolereApp(
                             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
                             SettingsPage.CHANGELOG, SettingsPage.LICENSES, SettingsPage.FONT_CREDITS -> SettingsPage.ABOUT
                             SettingsPage.LIBRARY, SettingsPage.APPEARANCE,
-                            SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP -> SettingsPage.MENU
+                            SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.SCROBBLE -> SettingsPage.MENU
                             else -> SettingsPage.NONE
                         }
                     },
@@ -1109,12 +1125,20 @@ fun TolereApp(
                     onThemeSelected = vm::setThemeId,
                     dynamicDefaultColor = dynamicDefaultArgb,
                     onDynamicDefaultColorChange = vm::setDynamicDefaultColor,
-                    onPickFont = onPickFont,
+                    onPickFont = { vm.beginFontPickForLyrics(); onPickFont() },
                     onClearFont = { vm.setLyricsFontPath(null) },
                     onPickUiFont = onPickUiFont,
                     onClearUiFont = { vm.setUiFontPath(null) },
                     onSelectUiFont = { key -> vm.setUiFontPath(key) },
                     onSelectLyricsFont = { key -> vm.setLyricsFontPath(key) },
+                    onPickTranslationFont = {
+                        // Reusa o picker de fonte: marca destino e abre o mesmo fluxo
+                        vm.beginFontPickForTranslation()
+                        onPickFont()
+                    },
+                    onClearTranslationFont = { vm.setLyricsTranslationFontPath(null) },
+                    onSelectTranslationFont = { key -> vm.setLyricsTranslationFontPath(key) },
+                    onSelectLyricsEmphasisFont = vm::setLyricsEmphasisFontPath,
                     onSplitArtistsChange = vm::setSplitArtists,
                     onArtistSeparatorsChange = vm::setArtistSeparators,
                     onArtistExceptionsChange = vm::setArtistExceptions,
@@ -1153,6 +1177,8 @@ fun TolereApp(
                     onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
                     playCountThreshold = playCountThreshold,
                     onPlayCountThresholdChange = vm::setPlayCountThreshold,
+                    playCountMinutes = playCountMinutes,
+                    onPlayCountMinutesChange = vm::setPlayCountMinutes,
                     lastFmUsername = lastFmUsername,
                     onLastFmUsernameChange = vm::setLastFmUsername,
                     lastFmSyncMessage = lastFmSyncMessage,
@@ -1213,6 +1239,10 @@ fun TolereApp(
                     onLyricsBorderColorChange = vm::setLyricsBorderColor,
                     lyricsBorderWidth = lyricsBorderWidth,
                     onLyricsBorderWidthChange = vm::setLyricsBorderWidth,
+                    lyricsTranslationColor = lyricsTranslationColor,
+                    onLyricsTranslationColorChange = vm::setLyricsTranslationColor,
+                    lyricsBackingColor = lyricsBackingColor,
+                    onLyricsBackingColorChange = vm::setLyricsBackingColor,
                     onExportBackup = onExportBackup,
                     onImportBackup = onImportBackup,
                     splashEnabled = splashEnabled,
@@ -1221,8 +1251,6 @@ fun TolereApp(
                     onSplashSoundChange = vm::setSplashSoundEnabled,
                     floatingIconsEnabled = floatingIconsEnabled,
                     onFloatingIconsChange = vm::setFloatingIconsEnabled,
-                    menuBgColor = menuBgColor,
-                    onMenuBgColorChange = vm::setMenuBgColor,
                     homeButtonFontPath = homeButtonFontPath,
                     onHomeButtonFontSelect = vm::setHomeButtonFontPath,
                     homeButtonColor = homeButtonColor,
@@ -1289,6 +1317,50 @@ fun TolereApp(
                 )
             }
 
+            // Diálogo: escolher fonte da letra antes de abrir o editor
+            lyricsSourcePickTrack?.let { pickTrack ->
+                val hasLrc = remember(pickTrack.id) { LyricsEmbedder.hasExternalLrc(pickTrack) }
+                AppAlertDialog(
+                    onDismissRequest = { lyricsSourcePickTrack = null },
+                    title = { Text("Editar letra") },
+                    text = {
+                        Text(
+                            if (hasLrc)
+                                "Qual fonte de letra deseja abrir?\n\n• Arquivo .lrc — ao lado da música (salva de volta no .lrc)\n• Tags embutidas — dentro do arquivo de áudio (salva nas tags)"
+                            else
+                                "Não há arquivo .lrc ao lado desta música.\nAbrir as tags embutidas do arquivo?"
+                        )
+                    },
+                    confirmButton = {
+                        Column {
+                            if (hasLrc) {
+                                TextButton(
+                                    onClick = {
+                                        lyricsEditTarget = LyricsEmbedder.Target.LRC_FILE
+                                        lyricsEditTrack = pickTrack
+                                        lyricsSourcePickTrack = null
+                                        showNowPlaying = false
+                                    }
+                                ) { Text("Arquivo .lrc") }
+                            }
+                            TextButton(
+                                onClick = {
+                                    lyricsEditTarget = LyricsEmbedder.Target.EMBEDDED
+                                    lyricsEditTrack = pickTrack
+                                    lyricsSourcePickTrack = null
+                                    showNowPlaying = false
+                                }
+                            ) { Text(if (hasLrc) "Tags embutidas" else "Abrir tags embutidas") }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { lyricsSourcePickTrack = null }) {
+                            Text("Cancelar")
+                        }
+                    }
+                )
+            }
+
             AnimatedVisibility(
                 visible = lyricsEditTrack != null,
                 enter = slideInVertically(tween(300)) { it } + fadeIn(tween(220)),
@@ -1296,43 +1368,66 @@ fun TolereApp(
             ) {
                 lyricsEditTrack?.let { track ->
                     val editCtx = LocalContext.current
-                    var initialLines by remember(track.id) { mutableStateOf<List<LyricLine>>(emptyList()) }
-                    LaunchedEffect(track.id) {
-                        initialLines = vm.loadLyrics(track)
+                    val target = lyricsEditTarget
+                    // Carrega a fonte escolhida ANTES de montar o editor.
+                    // LyricsEditorScreen usa remember { initialLines } e não reage a updates assíncronos.
+                    var loadedLines by remember(track.id, target) { mutableStateOf<List<LyricLine>?>(null) }
+                    LaunchedEffect(track.id, target) {
+                        loadedLines = null
+                        val fromSource = when (target) {
+                            LyricsEmbedder.Target.LRC_FILE -> vm.loadExternalLyrics(track)
+                            LyricsEmbedder.Target.EMBEDDED -> vm.loadEmbeddedLyrics(track)
+                        }
+                        // Se a fonte escolhida está vazia mas o player mostra uma letra (vinda de
+                        // .elrc/.ttml, de outra tag ou da busca online), abre o editor com ela em vez
+                        // de um editor em branco — salvar em branco parecia "apagar" a letra.
+                        loadedLines = if (fromSource.isNotEmpty()) fromSource
+                        else try { vm.loadLyrics(track) } catch (_: Exception) { emptyList() }
                     }
-                    LyricsEditorScreen(
-                        track = track,
-                        initialLines = initialLines,
-                        isPlaying = isPlaying,
-                        getPosition = vm::currentPosition,
-                        onSeek = vm::seekTo,
-                        onToggle = vm::togglePlayPause,
-                        onSave = { lines, target ->
-                            val ok = vm.saveSyncedLyrics(track, lines, target)
-                            val msg = when {
-                                ok && target == LyricsEmbedder.Target.LRC_FILE -> "Letra salva no arquivo .lrc"
-                                ok && target == LyricsEmbedder.Target.EMBEDDED -> "Letra salva nas tags do arquivo"
-                                else -> "Falha ao salvar letra"
-                            }
-                            android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
-                            if (ok) {
-                                vm.setPlaybackSpeed(1f)
-                                lyricsEditTrack = null
-                            }
-                        },
-                        onClose = {
-                            vm.setPlaybackSpeed(1f)
-                            lyricsEditTrack = null
-                        },
-                        appColors = appColors,
-                        initialTarget = if (LyricsEmbedder.hasExternalLrc(track))
-                            LyricsEmbedder.Target.LRC_FILE
-                        else
-                            LyricsEmbedder.Target.EMBEDDED,
-                        canWriteLrc = LyricsEmbedder.canWriteExternalLrc(track),
-                        getPlaybackSpeed = vm::currentPlaybackSpeed,
-                        onPlaybackSpeed = vm::setPlaybackSpeed
-                    )
+                    if (loadedLines == null) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(0.9f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = appColors.accent)
+                        }
+                    } else {
+                        // key força recomposição limpa quando a fonte/letra muda
+                        key(track.id, target, loadedLines!!.size) {
+                            LyricsEditorScreen(
+                                track = track,
+                                initialLines = loadedLines!!,
+                                isPlaying = isPlaying,
+                                getPosition = vm::currentPosition,
+                                onSeek = vm::seekTo,
+                                onToggle = vm::togglePlayPause,
+                                onSave = { lines, saveTarget ->
+                                    val ok = vm.saveSyncedLyrics(track, lines, saveTarget)
+                                    val msg = when {
+                                        ok && saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Letra salva no arquivo .lrc"
+                                        ok && saveTarget == LyricsEmbedder.Target.EMBEDDED -> "Letra salva nas tags do arquivo"
+                                        saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Falha ao salvar .lrc (ative Acesso a todos os arquivos)"
+                                        else -> "Falha ao salvar letra nas tags"
+                                    }
+                                    android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                    if (ok) {
+                                        vm.setPlaybackSpeed(1f)
+                                        lyricsEditTrack = null
+                                    }
+                                },
+                                onClose = {
+                                    vm.setPlaybackSpeed(1f)
+                                    lyricsEditTrack = null
+                                },
+                                appColors = appColors,
+                                initialTarget = target,
+                                getPlaybackSpeed = vm::currentPlaybackSpeed,
+                                onPlaybackSpeed = vm::setPlaybackSpeed
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1367,6 +1462,8 @@ fun TolereApp(
                         queue = queue,
                         isFavorite = isFavorite,
                         lyricsFontPath = lyricsFontPath,
+                        lyricsTranslationFontPath = lyricsTranslationFontPath,
+                        lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                         getPosition = vm::currentPosition,
                         onClose = { showNowPlaying = false },
                         onPrevious = vm::previous,
@@ -1394,8 +1491,7 @@ fun TolereApp(
                             showNowPlaying = false
                         },
                         onEditLyrics = {
-                            lyricsEditTrack = current
-                            showNowPlaying = false
+                            lyricsSourcePickTrack = current
                         },
                         artistNames = remember(current.artist, librarySettings) { vm.artistNamesOf(current) },
                         onOpenArtist = { name ->
@@ -1435,7 +1531,8 @@ fun TolereApp(
                         lyricsSecondaryColor = lyricsSecondaryColor,
                         lyricsBorderColor = lyricsBorderColor,
                         lyricsBorderWidth = lyricsBorderWidth,
-                        menuBgColor = menuBgColor,
+                        lyricsTranslationColor = lyricsTranslationColor,
+                        lyricsBackingColor = lyricsBackingColor,
                         playCount = vm.playCountOf(current.id),
                         firstPlayedAt = vm.firstPlayedAtOf(current.id).takeIf { it > 0L },
                         lastPlayedAt = vm.lastPlayedAt(current.id),
@@ -1669,7 +1766,7 @@ fun TolereApp(
                     selectedTrackIds.mapNotNull { byId[it] }
                 }
                 val count = selectedTrackIds.size
-                AlertDialog(
+                AppAlertDialog(
                     onDismissRequest = { showDeleteConfirm = false },
                     title = { Text(if (count == 1) "Excluir permanentemente?" else "Excluir $count faixas?") },
                     text = {
@@ -1685,7 +1782,7 @@ fun TolereApp(
                                 showDeleteConfirm = false
                                 selectedTrackIds = emptySet()
                             }
-                        ) { Text("Excluir", color = Color(0xFFE53935)) }
+                        ) { Text("Excluir", color = MaterialTheme.colorScheme.error) }
                     },
                     dismissButton = {
                         TextButton(onClick = { showDeleteConfirm = false }) {
@@ -1700,7 +1797,6 @@ fun TolereApp(
                 TechDetailsDialog(
                     track = infoTrack,
                     onDismiss = { selectionInfoTrack = null },
-                    menuBgColor = menuBgColor,
                     playCount = vm.playCountOf(infoTrack.id)
                 )
             }
@@ -1730,7 +1826,7 @@ fun TolereApp(
 
             // ---------- Criar playlist ----------
             if (showCreatePlaylist) {
-                AlertDialog(
+                AppAlertDialog(
                     onDismissRequest = { showCreatePlaylist = false },
                     title = { Text("Nova playlist") },
                     text = {
@@ -2390,13 +2486,13 @@ internal fun PlaylistList(
     }
 
     pendingDelete?.let { pl ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Excluir playlist") },
             text = { Text("“${pl.name}” será excluída. As músicas continuam no aparelho.") },
             confirmButton = {
                 TextButton(onClick = { pendingDelete = null; onDelete(pl) }) {
-                    Text("Excluir", color = Color(0xFFE53935))
+                    Text("Excluir", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancelar") } }
@@ -2685,6 +2781,7 @@ private fun SelectionActionsMenu(
     onRenameBatch: (() -> Unit)? = null,
     onDelete: () -> Unit
 ) {
+    val pal = menuPalette(LocalAppColors.current)
     // onEditTags: 1 faixa = editor completo; várias = edição em lote (Artista/Álbum/Artista do Álbum)
     Dialog(
         onDismissRequest = onDismiss,
@@ -2714,6 +2811,7 @@ private fun SelectionActionsMenu(
                 ) {
                     Column(
                         Modifier
+                            .background(pal.container.copy(alpha = 0.72f))
                             .padding(vertical = 8.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
@@ -2722,7 +2820,7 @@ private fun SelectionActionsMenu(
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF1A1A1A),
+                            color = pal.content,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -2744,7 +2842,7 @@ private fun SelectionActionsMenu(
                         if (onRenameBatch != null) {
                             MenuRow("Renomear por tags", onRenameBatch)
                         }
-                        MenuRow("Excluir", onDelete, textColor = Color(0xFFC62828))
+                        MenuRow("Excluir", onDelete, textColor = pal.danger)
                         MenuRow("Desmarcar Todas", onClearSelection)
                     }
                 }
@@ -2754,7 +2852,8 @@ private fun SelectionActionsMenu(
 }
 
 @Composable
-private fun MenuRow(label: String, onClick: () -> Unit, textColor: Color = Color(0xFF1A1A1A)) {
+private fun MenuRow(label: String, onClick: () -> Unit, textColor: Color = Color.Unspecified) {
+    val resolved = if (textColor == Color.Unspecified) menuPalette(LocalAppColors.current).content else textColor
     Text(
         text = label,
         modifier = Modifier
@@ -2762,7 +2861,7 @@ private fun MenuRow(label: String, onClick: () -> Unit, textColor: Color = Color
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
         fontSize = 16.sp,
-        color = textColor
+        color = resolved
     )
 }
 
@@ -2773,7 +2872,7 @@ private fun AddToPlaylistDialog(
     onSelect: (String) -> Unit,
     onCreateNew: () -> Unit
 ) {
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Adicionar a playlist") },
         text = {
@@ -2850,7 +2949,7 @@ private fun SortBar(
         ) {
             Text("Ordenar: $label", fontSize = 13.sp, color = Color.White.copy(0.85f))
         }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        AppDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             if (isGroup) {
                 listOf(
                     MusicViewModel.GroupSort.NAME to "Nome",
@@ -4101,7 +4200,7 @@ private fun BatchTagEditDialog(
     var year by remember { mutableStateOf("") }
     var trackTotal by remember { mutableStateOf("") }
     var discTotal by remember { mutableStateOf("") }
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Editar tags em lote ($count faixas)") },
         text = {
@@ -4109,7 +4208,7 @@ private fun BatchTagEditDialog(
                 Text(
                     "Deixe em branco os campos que não quiser alterar.",
                     fontSize = 13.sp,
-                    color = Color.White.copy(0.6f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(0.6f),
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
                 OutlinedTextField(
@@ -4227,7 +4326,7 @@ internal fun BatchRenameDialog(
     var showAdd by remember { mutableStateOf(false) }
     var newPattern by remember { mutableStateOf("") }
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Renomear por tags (${tracks.size})") },
         text = {
@@ -4241,7 +4340,7 @@ internal fun BatchRenameDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(selected = selected == p, onClick = { selected = p })
-                        Text(p, Modifier.padding(start = 8.dp), color = Color(0xFF1A1A1A))
+                        Text(p, Modifier.padding(start = 8.dp), color = MaterialTheme.colorScheme.onSurface)
                     }
                 }
                 TextButton(onClick = { showAdd = true }) {
@@ -4257,7 +4356,7 @@ internal fun BatchRenameDialog(
                     Text(
                         "Códigos: %ARTIST% %TITLE% %ALBUM% %ALBUM_ARTIST% %TRACK% %YEAR% %GENRE%",
                         fontSize = 11.sp,
-                        color = Color.Gray
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     TextButton(onClick = {
                         if (newPattern.isNotBlank()) {
@@ -4273,7 +4372,7 @@ internal fun BatchRenameDialog(
                     Text(
                         "Ex.: ${applyRenamePattern(selected, t)}",
                         fontSize = 12.sp,
-                        color = Color.Gray,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 }
@@ -4324,6 +4423,7 @@ private fun LysPlaceHome(
     var mostPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
     var historyPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
     val context = LocalContext.current
+    BackHandler(enabled = section != null) { section = null }
     Box(
         Modifier
             .fillMaxSize()

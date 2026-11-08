@@ -24,6 +24,7 @@ import com.tolete.player.data.FavoritesFile
 import com.tolete.player.data.Genre
 import com.tolete.player.data.LibraryCache
 import com.tolete.player.data.LastFmClient
+import com.tolete.player.data.LastFmScrobbler
 import com.tolete.player.data.LyricLine
 import com.tolete.player.data.LyricsExtractor
 import com.tolete.player.data.LyricsEmbedder
@@ -1284,7 +1285,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
             persistPlaybackState(paused = !isPlaying)
-            if (isPlaying) startPositionTicker()
+            if (isPlaying) {
+                startPositionTicker()
+                _nowPlaying.value?.let { LastFmScrobbler.nowPlaying(it) }
+            }
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -1293,6 +1297,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _positionMs.value = 0L
             _durationMs.value = 0L
             _nowPlaying.value = _queue.value.firstOrNull { it.id == mediaItem?.mediaId }
+            if (_isPlaying.value) _nowPlaying.value?.let { LastFmScrobbler.nowPlaying(it) }
             persistPlaybackState(paused = !(_isPlaying.value))
             // Re-anexa EQ caso a sessão de áudio mude
             val sessionId = com.tolete.player.PlaybackService.currentAudioSessionId
@@ -1315,6 +1320,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun connectController() {
         val app = getApplication<Application>()
+        LastFmScrobbler.init(app)
         val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
         val future = MediaController.Builder(app, token).buildAsync()
         controllerFuture = future
@@ -1750,16 +1756,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Salva linhas LRC (arquivo .lrc ou tags embutidas). */
+    /** Salva linhas LRC no .lrc ou nas tags, conforme o target. */
     fun saveSyncedLyrics(
         track: Track,
         lines: List<LyricLine>,
-        target: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE
+        target: LyricsEmbedder.Target
     ): Boolean {
         return LyricsEmbedder.save(getApplication(), track, lines, target)
     }
 
-    // ---------- Letras (LRC + tags embutidas) ----------
+    // ---------- Letras (.lrc + tags embutidas, sem cache) ----------
     suspend fun loadLyrics(track: Track): List<LyricLine> = withContext(Dispatchers.IO) {
         val local = LyricsExtractor.load(getApplication(), track)
         if (local.isNotEmpty()) return@withContext local
@@ -1767,14 +1773,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val (lines, raw) = LrcLibClient.fetchLyricsWithRaw(track)
                 if (lines.isNotEmpty() && !raw.isNullOrBlank()) {
-                    // Embute a letra sincronizada no arquivo (sidecar .lrc ou cache)
-                    LyricsEmbedder.embedLrc(getApplication(), track, raw)
+                    // Preferência de auto-fetch: tenta .lrc; se falhar, tags
+                    if (!LyricsEmbedder.embedLrc(getApplication(), track, raw)) {
+                        LyricsEmbedder.embedInTags(getApplication(), track, raw)
+                    }
                 }
                 lines
             } catch (_: Exception) {
                 emptyList()
             }
         } else emptyList()
+    }
+
+    /** Só tags embutidas (para o editor). */
+    suspend fun loadEmbeddedLyrics(track: Track): List<LyricLine> = withContext(Dispatchers.IO) {
+        LyricsExtractor.loadEmbedded(getApplication(), track)
+    }
+
+    /** Só arquivo .lrc externo (para o editor). */
+    suspend fun loadExternalLyrics(track: Track): List<LyricLine> = withContext(Dispatchers.IO) {
+        LyricsEmbedder.loadExternalLrc(track)
     }
 
     /** Busca manual: LRCLIB + QQ Music + NetEase + KuGou, todas ao mesmo tempo. */
@@ -1784,7 +1802,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun embedLyricsResult(
         track: Track,
         result: LyricsSearchResult,
-        target: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE
+        target: LyricsEmbedder.Target
     ): List<LyricLine> =
         withContext(Dispatchers.IO) {
             val lines = result.lines
@@ -1964,8 +1982,9 @@ private val _firstPlayedAt = MutableStateFlow(
         for ((id, ts) in _playEvents.value) {
             if (ts in start until end) map[id] = (map[id] ?: 0) + 1
         }
-        // Fallback: se ainda não há log de eventos, usa lastPlayedAt + contagem total
-        if (map.isEmpty() && _playEvents.value.isEmpty()) {
+        // Fallback: se o log de eventos não cobre o período (CSV antigo / prefs dessincronizado),
+        // usa lastPlayedAt — pelo menos 1 play se a última vez foi no período.
+        if (map.isEmpty()) {
             for ((id, ts) in _lastPlayedAt.value) {
                 if (ts in start until end) {
                     map[id] = _playCounts.value[id] ?: 1
@@ -2056,12 +2075,25 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     fun historyInPeriod(period: StatsPeriod): List<Track> {
-        val all = _historyIds.value
         val byId = _library.value.associateBy { it.id }
-        if (period == StatsPeriod.ALL_TIME) return all.mapNotNull { byId[it] }
+        if (period == StatsPeriod.ALL_TIME) {
+            return _historyIds.value.mapNotNull { byId[it] }
+        }
         val (start, end) = periodRange(period)
+        // Preferir ordem dos eventos no período (mais recente primeiro)
+        val seen = linkedSetOf<String>()
+        val fromEvents = mutableListOf<Track>()
+        for ((id, ts) in _playEvents.value) {
+            if (ts !in start until end) continue
+            if (id in seen) continue
+            val t = byId[id] ?: continue
+            seen.add(id)
+            fromEvents.add(t)
+        }
+        if (fromEvents.isNotEmpty()) return fromEvents
+        // Fallback: histórico + lastPlayedAt
         val lasts = _lastPlayedAt.value
-        return all.mapNotNull { id ->
+        return _historyIds.value.mapNotNull { id ->
             val ts = lasts[id] ?: return@mapNotNull null
             if (ts in start until end) byId[id] else null
         }
@@ -2100,7 +2132,22 @@ private val _firstPlayedAt = MutableStateFlow(
         prefs.edit().putInt(KEY_PLAY_COUNT_THRESHOLD, v).apply()
     }
 
-    /** Username público do Last.fm (sem scrobbling; só leitura de histórico/loved). */
+    /**
+     * Minutos de reprodução (1–6) que também contam o play; 0 = desligado.
+     * Vale o que for atingido primeiro: o percentual acima OU este tempo.
+     */
+    private val _playCountMinutes = MutableStateFlow(
+        prefs.getInt(KEY_PLAY_COUNT_MINUTES, 0).coerceIn(0, 6)
+    )
+    val playCountMinutes: StateFlow<Int> = _playCountMinutes.asStateFlow()
+
+    fun setPlayCountMinutes(minutes: Int) {
+        val v = minutes.coerceIn(0, 6)
+        _playCountMinutes.value = v
+        prefs.edit().putInt(KEY_PLAY_COUNT_MINUTES, v).apply()
+    }
+
+    /** Username público do Last.fm (leitura de histórico/loved). O scrobbling usa [LastFmScrobbler]. */
     private val _lastFmUsername = MutableStateFlow(prefs.getString(KEY_LASTFM_USER, null)?.takeIf { it.isNotBlank() })
     val lastFmUsername: StateFlow<String?> = _lastFmUsername.asStateFlow()
 
@@ -2357,6 +2404,9 @@ private val _firstPlayedAt = MutableStateFlow(
             viewModelScope.launch(Dispatchers.IO) {
                 appendPlaybackHistoryCsv(track, now)
             }
+            // Scrobble no Last.fm no mesmo instante em que o play é contado.
+            // O timestamp é o INÍCIO da reprodução (agora - tempo já tocado).
+            LastFmScrobbler.scrobble(track, now - _positionMs.value.coerceAtLeast(0L))
         }
     }
 
@@ -2461,8 +2511,9 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     /**
-     * Lê o CSV e reconstrói histórico, contagens e primeira/última reprodução.
+     * Lê o CSV e reconstrói histórico, contagens, eventos por período e primeira/última reprodução.
      * Aceita o cabeçalho antigo (sem epochMs/path/…) e o novo.
+     * Fonte de verdade: playback history.csv
      */
     fun reloadStatsFromCsv() {
         try {
@@ -2479,7 +2530,8 @@ private val _firstPlayedAt = MutableStateFlow(
             val counts = linkedMapOf<String, Int>()
             val first = mutableMapOf<String, Long>()
             val last = mutableMapOf<String, Long>()
-            val recentOrder = mutableListOf<String>() // mais recente primeiro
+            val recentOrder = mutableListOf<String>() // ordem de primeira aparição (mais antigo primeiro)
+            val rawEvents = mutableListOf<Pair<String, Long>>() // key to epoch
 
             for (raw in data) {
                 val cols = parseCsvLine(raw)
@@ -2507,18 +2559,25 @@ private val _firstPlayedAt = MutableStateFlow(
                     if (f == null || epoch < f) first[key] = epoch
                     val l = last[key]
                     if (l == null || epoch > l) last[key] = epoch
+                    rawEvents.add(key to epoch)
                 }
                 if (key !in recentOrder) recentOrder.add(key)
             }
-            // recentOrder was built oldest-first if reading top to bottom; reverse for most-recent-first
-            // Actually CSV appends newest at end, so reverse
+            // CSV appenda no fim → mais recente por último; inverte para histórico
             val ordered = recentOrder.asReversed().distinct()
 
-            // Map keys to library track ids when possible
-            val lib = tracks.value
+            // Mapear keys para ids da biblioteca quando possível
+            val lib = tracks.value.ifEmpty { _library.value }
+            val byId = lib.associateBy { it.id }
+            val byPath = lib.associateBy { it.path }
             fun resolveId(key: String): String {
-                lib.firstOrNull { it.id == key }?.id?.let { return it }
-                lib.firstOrNull { it.path == key }?.id?.let { return it }
+                byId[key]?.id?.let { return it }
+                byPath[key]?.id?.let { return it }
+                // path normalizado / sufixo
+                if (key.startsWith("/")) {
+                    lib.firstOrNull { it.path.equals(key, true) }?.id?.let { return it }
+                    lib.firstOrNull { it.path.endsWith(key.substringAfterLast('/'), true) }?.id?.let { return it }
+                }
                 if (key.contains('\t')) {
                     val parts = key.split('\t', limit = 2)
                     if (parts.size == 2) {
@@ -2527,6 +2586,7 @@ private val _firstPlayedAt = MutableStateFlow(
                         }?.id?.let { return it }
                     }
                 }
+                // artista - título em path
                 return key
             }
 
@@ -2549,15 +2609,24 @@ private val _firstPlayedAt = MutableStateFlow(
             }
             val histIds = ordered.map { resolveId(it) }.distinct().take(HISTORY_MAX)
 
+            // Eventos por play (mais recente primeiro) — necessário para "esta semana" etc.
+            val eventsById = rawEvents
+                .asReversed()
+                .map { (k, ts) -> resolveId(k) to ts }
+                .filter { it.second > 0L }
+                .take(PLAY_EVENTS_MAX)
+
             _playCounts.value = countById
             _firstPlayedAt.value = firstById
             _lastPlayedAt.value = lastById
             _historyIds.value = histIds
+            _playEvents.value = eventsById
             prefs.edit()
                 .putString(KEY_PLAY_COUNTS, countById.entries.joinToString("\n") { "${it.key}=${it.value}" })
                 .putString(KEY_FIRST_PLAYED, firstById.entries.joinToString("\n") { "${it.key}=${it.value}" })
                 .putString(KEY_LAST_PLAYED, lastById.entries.joinToString("\n") { "${it.key}=${it.value}" })
                 .putString(KEY_HISTORY, histIds.joinToString("\n"))
+                .putString(KEY_PLAY_EVENTS, eventsById.joinToString("\n") { "${it.first}\t${it.second}" })
                 .apply()
         } catch (e: Exception) {
             android.util.Log.w("MusicVM", "Falha ao ler playback history.csv", e)
@@ -2667,6 +2736,19 @@ private val _firstPlayedAt = MutableStateFlow(
             kotlinx.coroutines.delay(1500)
             reloadStatsFromCsv()
         }
+        // Quando a biblioteca carrega/atualiza, re-lê o CSV para resolver trackIds → Track
+        // (o reload precoce pode ter rodado com lib vazia e IDs ficarem "soltos").
+        viewModelScope.launch {
+            var hadLib = false
+            tracks.collect { lib ->
+                if (lib.isNotEmpty()) {
+                    if (!hadLib) {
+                        hadLib = true
+                        withContext(Dispatchers.IO) { reloadStatsFromCsv() }
+                    }
+                }
+            }
+        }
         // Atualiza histórico de ordem quando a faixa atual muda (sem contar play ainda)
         viewModelScope.launch {
             _nowPlaying.collect { t ->
@@ -2677,23 +2759,26 @@ private val _firstPlayedAt = MutableStateFlow(
         // Conta play só ao atingir o percentual configurado da duração.
         // Usa a duração do player quando disponível; ignora posições residual da faixa anterior.
         viewModelScope.launch {
-            combine(_nowPlaying, _positionMs, _durationMs, _playCountThreshold) { track, pos, playerDur, threshold ->
-                arrayOf(track, pos, playerDur, threshold)
+            combine(_nowPlaying, _positionMs, _durationMs, _playCountThreshold, _playCountMinutes) { track, pos, playerDur, threshold, minutes ->
+                arrayOf<Any?>(track, pos, playerDur, threshold, minutes)
             }.collect { arr ->
                 val track = arr[0] as Track?
                 val pos = arr[1] as Long
                 val playerDur = arr[2] as Long
                 val threshold = arr[3] as Int
+                val minutes = arr[4] as Int
                 val t = track ?: return@collect
                 // Ainda não recebemos posição real desta faixa (ou ficou residual da anterior)
                 if (pos <= 0L) return@collect
                 val dur = when {
                     playerDur > 0L -> playerDur
                     t.duration > 0L -> t.duration
-                    else -> return@collect
+                    else -> 0L
                 }
-                val pct = ((pos * 100L) / dur).toInt()
-                if (pct >= threshold) {
+                val reachedPercent = dur > 0L && ((pos * 100L) / dur).toInt() >= threshold
+                // Conta pelo que vier primeiro: porcentagem OU minutos tocados (o "valor menor")
+                val reachedTime = minutes > 0 && pos >= minutes * 60_000L
+                if (reachedPercent || reachedTime) {
                     recordPlay(t.id)
                 }
             }
@@ -2704,9 +2789,34 @@ private val _firstPlayedAt = MutableStateFlow(
     private val _lyricsFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_FONT, null))
     val lyricsFontPath: StateFlow<String?> = _lyricsFontPath.asStateFlow()
 
+    /** "lyrics" ou "translation" — o picker externo chama setLyricsFontPath ao terminar. */
+    private var fontPickTarget: String = "lyrics"
+    fun beginFontPickForTranslation() { fontPickTarget = "translation" }
+    fun beginFontPickForLyrics() { fontPickTarget = "lyrics" }
+
     fun setLyricsFontPath(path: String?) {
+        if (fontPickTarget == "translation") {
+            fontPickTarget = "lyrics"
+            setLyricsTranslationFontPath(path)
+            return
+        }
         _lyricsFontPath.value = path
         prefs.edit().putString(KEY_LYRICS_FONT, path).apply()
+    }
+
+    private val _lyricsTranslationFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_TRANSLATION_FONT, null))
+    val lyricsTranslationFontPath: StateFlow<String?> = _lyricsTranslationFontPath.asStateFlow()
+    fun setLyricsTranslationFontPath(path: String?) {
+        _lyricsTranslationFontPath.value = path
+        prefs.edit().putString(KEY_LYRICS_TRANSLATION_FONT, path).apply()
+    }
+
+    /** Fonte opcional para palavras/sílabas marcadas {des}; null usa a fonte padrão da letra/sistema. */
+    private val _lyricsEmphasisFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_EMPHASIS_FONT, null))
+    val lyricsEmphasisFontPath: StateFlow<String?> = _lyricsEmphasisFontPath.asStateFlow()
+    fun setLyricsEmphasisFontPath(path: String?) {
+        _lyricsEmphasisFontPath.value = path
+        prefs.edit().putString(KEY_LYRICS_EMPHASIS_FONT, path).apply()
     }
 
     /** Fonte padrão do player (UI), independente da fonte das letras. */
@@ -2756,6 +2866,24 @@ private val _firstPlayedAt = MutableStateFlow(
         prefs.edit().putFloat(KEY_LYRICS_BORDER_W, v).apply()
     }
 
+    private val _lyricsTranslationColor = MutableStateFlow(
+        prefs.getInt(KEY_LYRICS_TRANSLATION, 0xFFB0BEC5.toInt())
+    )
+    val lyricsTranslationColor: StateFlow<Int> = _lyricsTranslationColor.asStateFlow()
+    fun setLyricsTranslationColor(argb: Int) {
+        _lyricsTranslationColor.value = argb
+        prefs.edit().putInt(KEY_LYRICS_TRANSLATION, argb).apply()
+    }
+
+    private val _lyricsBackingColor = MutableStateFlow(
+        prefs.getInt(KEY_LYRICS_BACKING, 0xFFCE93D8.toInt())
+    )
+    val lyricsBackingColor: StateFlow<Int> = _lyricsBackingColor.asStateFlow()
+    fun setLyricsBackingColor(argb: Int) {
+        _lyricsBackingColor.value = argb
+        prefs.edit().putInt(KEY_LYRICS_BACKING, argb).apply()
+    }
+
     // ---------- Splash ----------
     private val _splashEnabled = MutableStateFlow(prefs.getBoolean(KEY_SPLASH_ENABLED, true))
     val splashEnabled: StateFlow<Boolean> = _splashEnabled.asStateFlow()
@@ -2777,17 +2905,6 @@ private val _firstPlayedAt = MutableStateFlow(
     fun setFloatingIconsEnabled(enabled: Boolean) {
         _floatingIconsEnabled.value = enabled
         prefs.edit().putBoolean(KEY_FLOATING_ICONS, enabled).apply()
-    }
-
-    // Cor ARGB dos menus claros (pop-ups brancos). Default ~ branco translúcido.
-    private val _menuBgColor = MutableStateFlow(
-        prefs.getInt(KEY_MENU_BG_COLOR, 0xE8F2F2F7.toInt())
-    )
-    val menuBgColor: StateFlow<Int> = _menuBgColor.asStateFlow()
-
-    fun setMenuBgColor(argb: Int) {
-        _menuBgColor.value = argb
-        prefs.edit().putInt(KEY_MENU_BG_COLOR, argb).apply()
     }
 
     // Fonte e cor dos textos dos botões da tela Início
@@ -2952,14 +3069,46 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     // ---------- Persistência da fila ----------
-    private fun persistPlaybackState(paused: Boolean) {
+    /** Cache do JSON da fila: só é reconstruído quando a lista da fila muda (não a cada troca de faixa). */
+    @Volatile private var queueJsonCache: Pair<List<Track>, String>? = null
+    private var persistJob: Job? = null
+
+    /**
+     * Salva fila/posição para restaurar ao reabrir o app.
+     *
+     * Antes isso montava o JSON da fila INTEIRA na thread principal e regravava as preferências
+     * 3-4 vezes por troca de faixa (next + onMediaItemTransition + onIsPlayingChanged...). Com a
+     * fila grande e várias trocas seguidas, a thread principal engasgava e o app/sistema travava.
+     * Agora só tira um instantâneo barato na main e grava (com debounce) fora dela.
+     */
+    private fun persistPlaybackState(paused: Boolean, immediate: Boolean = false) {
+        val queue = _queue.value
+        val nowId = _nowPlaying.value?.id
+        val pos = try { controller?.currentPosition ?: 0L } catch (_: Exception) { 0L }
+        if (immediate) {
+            persistPlaybackStateNow(queue, nowId, pos, paused)
+            return
+        }
+        persistJob?.cancel()
+        persistJob = viewModelScope.launch(Dispatchers.Default) {
+            delay(400) // várias trocas rápidas viram uma única gravação
+            persistPlaybackStateNow(queue, nowId, pos, paused)
+        }
+    }
+
+    private fun persistPlaybackStateNow(queue: List<Track>, nowId: String?, pos: Long, paused: Boolean) {
         try {
-            val ids = org.json.JSONArray()
-            _queue.value.forEach { ids.put(it.id) }
-            val idx = _nowPlaying.value?.let { np -> _queue.value.indexOfFirst { it.id == np.id } } ?: -1
-            val pos = controller?.currentPosition ?: 0L
+            val cached = queueJsonCache
+            val idsJson = if (cached != null && cached.first === queue) {
+                cached.second
+            } else {
+                val ids = org.json.JSONArray()
+                queue.forEach { ids.put(it.id) }
+                ids.toString().also { queueJsonCache = queue to it }
+            }
+            val idx = if (nowId == null) -1 else queue.indexOfFirst { it.id == nowId }
             prefs.edit()
-                .putString(KEY_QUEUE_IDS, ids.toString())
+                .putString(KEY_QUEUE_IDS, idsJson)
                 .putInt(KEY_QUEUE_INDEX, idx)
                 .putLong(KEY_QUEUE_POS, pos)
                 .putBoolean(KEY_QUEUE_PAUSED, paused)
@@ -3035,6 +3184,7 @@ private val _firstPlayedAt = MutableStateFlow(
         })
         obj.put("theme", _themeId.value.name)
         obj.put("lyricsFont", _lyricsFontPath.value)
+        obj.put("lyricsEmphasisFont", _lyricsEmphasisFontPath.value)
         obj.put("uiFont", _uiFontPath.value)
         obj.put("lyricsFontSize", _lyricsFontSize.value.toDouble())
         obj.put("homeButtonFont", _homeButtonFontPath.value)
@@ -3067,10 +3217,10 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("changeSongWithMilkInterval", _changeSongWithMilkInterval.value)
         obj.put("changePresetOnSongChange", _changePresetOnSongChange.value)
         obj.put("playCountThreshold", _playCountThreshold.value)
+        obj.put("playCountMinutes", _playCountMinutes.value)
         obj.put("splashEnabled", _splashEnabled.value)
         obj.put("splashSoundEnabled", _splashSoundEnabled.value)
         obj.put("floatingIconsEnabled", _floatingIconsEnabled.value)
-        obj.put("menuBgColor", _menuBgColor.value)
         obj.put("dynamicDefaultColor", _dynamicDefaultColor.value)
         obj.put("groupSort", prefs.getString(KEY_GROUP_SORT, null))
         obj.put("groupOrder", prefs.getString(KEY_GROUP_ORDER, null))
@@ -3243,6 +3393,7 @@ private val _firstPlayedAt = MutableStateFlow(
                 try { setThemeId(AppThemeId.valueOf(it)) } catch (_: Exception) {}
             }
             if (obj.has("lyricsFont")) setLyricsFontPath(obj.optString("lyricsFont").ifBlank { null })
+            if (obj.has("lyricsEmphasisFont")) setLyricsEmphasisFontPath(obj.optString("lyricsEmphasisFont").ifBlank { null })
             if (obj.has("uiFont")) setUiFontPath(obj.optString("uiFont").ifBlank { null })
             if (obj.has("lyricsFontSize")) setLyricsFontSize(obj.getDouble("lyricsFontSize").toFloat())
             if (obj.has("homeButtonFont")) setHomeButtonFontPath(obj.optString("homeButtonFont").ifBlank { null })
@@ -3272,10 +3423,10 @@ private val _firstPlayedAt = MutableStateFlow(
             if (obj.has("changeSongWithMilkInterval")) setChangeSongWithMilkInterval(obj.getBoolean("changeSongWithMilkInterval"))
             if (obj.has("changePresetOnSongChange")) setChangePresetOnSongChange(obj.getBoolean("changePresetOnSongChange"))
             if (obj.has("playCountThreshold")) setPlayCountThreshold(obj.getInt("playCountThreshold"))
+            if (obj.has("playCountMinutes")) setPlayCountMinutes(obj.getInt("playCountMinutes"))
             if (obj.has("splashEnabled")) setSplashEnabled(obj.getBoolean("splashEnabled"))
             if (obj.has("splashSoundEnabled")) setSplashSoundEnabled(obj.getBoolean("splashSoundEnabled"))
             if (obj.has("floatingIconsEnabled")) setFloatingIconsEnabled(obj.getBoolean("floatingIconsEnabled"))
-            if (obj.has("menuBgColor")) setMenuBgColor(obj.getInt("menuBgColor"))
             if (obj.has("dynamicDefaultColor")) setDynamicDefaultColor(obj.getInt("dynamicDefaultColor"))
             if (obj.has("splitArtists")) setSplitArtists(obj.getBoolean("splitArtists"))
             if (obj.has("artistSeparators")) setArtistSeparators(obj.getString("artistSeparators"))
@@ -3436,7 +3587,9 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     override fun onCleared() {
-        persistPlaybackState(paused = true)
+        persistJob?.cancel()
+        // síncrono: o viewModelScope já foi cancelado quando o onCleared roda
+        persistPlaybackState(paused = true, immediate = true)
         if (FavoritesBridge.owner === favoritesOwner) FavoritesBridge.owner = null
         controller?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
@@ -3455,10 +3608,13 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_FIRST_PLAYED = "first_played_at"
         const val KEY_LAST_PLAYED = "last_played_at"
         const val KEY_PLAY_COUNT_THRESHOLD = "play_count_threshold"
+        const val KEY_PLAY_COUNT_MINUTES = "play_count_minutes"
         const val KEY_LASTFM_USER = "lastfm_username"
         const val KEY_LIBRARY_ROOT = "library_root_path"
         const val HISTORY_MAX = 50
         const val KEY_LYRICS_FONT = "lyrics_font_path"
+        const val KEY_LYRICS_TRANSLATION_FONT = "lyrics_translation_font_path"
+        const val KEY_LYRICS_EMPHASIS_FONT = "lyrics_emphasis_font_path"
         const val KEY_UI_FONT = "ui_font_path"
         const val KEY_SPLIT_ARTISTS = "split_artists"
         const val KEY_ARTIST_SEPARATORS = "artist_separators"
@@ -3485,10 +3641,11 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_LYRICS_SECONDARY = "lyrics_secondary_color"
         const val KEY_LYRICS_BORDER = "lyrics_border_color"
         const val KEY_LYRICS_BORDER_W = "lyrics_border_width"
+        const val KEY_LYRICS_TRANSLATION = "lyrics_translation_color"
+        const val KEY_LYRICS_BACKING = "lyrics_backing_color"
         const val KEY_SPLASH_ENABLED = "splash_enabled"
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
         const val KEY_FLOATING_ICONS = "floating_icons_enabled"
-        const val KEY_MENU_BG_COLOR = "menu_bg_color"
         const val KEY_HOME_BUTTON_FONT = "home_button_font_path"
         const val KEY_HOME_BUTTON_COLOR = "home_button_color"
         const val KEY_SHARE_FONT = "share_font_path"
@@ -3558,7 +3715,5 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
 }
-
-
 
 
