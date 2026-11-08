@@ -22,12 +22,17 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer
 import androidx.media3.decoder.ffmpeg.FfmpegLibrary
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import androidx.media3.common.MimeTypes
+import com.tolete.player.data.DsfExtractor
 import com.tolete.player.visualizer.AudioTapSink
 import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -35,8 +40,11 @@ import androidx.media3.session.SessionResult
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.tolete.player.data.AudioOutputInfo
+import com.tolete.player.data.AudioOutputPrefs
 import com.tolete.player.data.FavoritesBridge
 import com.tolete.player.data.FavoritesFile
+import com.tolete.player.data.HighRatePcmDownsampler
 import com.tolete.player.data.LastFmScrobbler
 import com.tolete.player.data.LibraryCache
 import com.tolete.player.data.Track
@@ -120,12 +128,12 @@ class PlaybackService : MediaSessionService() {
         @Volatile var appliedBackend: String = "DEFAULT"
         @Volatile var appliedPreferredSampleRate: Int = 0
         @Volatile var appliedFloatOutput: Boolean = false
-        @Volatile var appliedUsbDeviceLabel: String = ""
+        @Volatile var appliedDeviceLabel: String = ""
     }
 
     private var mediaSession: MediaSession? = null
-    private var backendIsUsbExclusive = false
-    private var usbDeviceCallback: android.media.AudioDeviceCallback? = null
+    private var backendIsHighQuality = false
+    private var deviceCallback: android.media.AudioDeviceCallback? = null
     private var consecutiveErrors = 0
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     /** Cancela notificação/serviço após 7 min seguidos sem reprodução. */
@@ -246,18 +254,17 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
 
         val prefs = getSharedPreferences("tolete", MODE_PRIVATE)
-        val bitPerfect = prefs.getBoolean("bit_perfect", false)
-        // Escolha de saída de áudio e taxa de amostragem foram removidas das configurações:
-        // o player sempre usa a saída padrão do sistema, sem pedido de taxa.
+        // Saída de áudio escolhida em Configurações > Player:
+        //  • Padrão do sistema: o Android decide a rota e o formato.
+        //  • Alta qualidade: prioriza DAC USB / fone com fio, mantém PCM float (sem cair para 16-bit)
+        //    e, no USB com Android 14+, pede ao sistema a taxa de amostragem da própria faixa.
+        val highQuality = AudioOutputPrefs.isHighQuality(prefs)
+        // Bit-perfect só vale no modo Alta qualidade (e só age no USB, Android 14+).
+        val bitPerfect = highQuality && prefs.getBoolean("bit_perfect", false)
         val preferredSr = 0
-        val backendName = "DEFAULT"
-        // Float PCM: ajuda em caminhos hi-res / AAudio e evita quantização extra em 24/32-bit
-        val wantFloat = !bitPerfect && (
-            preferredSr >= 96_000 ||
-                backendName == "AAUDIO" ||
-                backendName == "AUDIOTRACK" ||
-                backendName == "USB_EXCLUSIVE"
-        )
+        val backendName = if (highQuality) "HIGH_QUALITY" else "DEFAULT"
+        // Float PCM: ajuda em caminhos hi-res e evita quantização extra em 24/32-bit
+        val wantFloat = !bitPerfect && highQuality
         appliedBackend = backendName
         appliedPreferredSampleRate = preferredSr
         appliedFloatOutput = wantFloat
@@ -268,8 +275,8 @@ class PlaybackService : MediaSessionService() {
 
         // Visualizador .milk: o AudioTapSink (em buildAudioSink) só "espia" o PCM, sem alterar
         // o áudio nem o bit-perfect. Custa ~zero enquanto AudioTap.active == false.
-        // Extensão FFmpeg (AAR local): decodifica codecs que o MediaCodec do aparelho
-        // não cobre (ex.: alguns FLAC/Opus/WMA). Preferência: software FFmpeg antes do decoder nativo.
+        // Extensão FFmpeg local: decodifica codecs que o MediaCodec do aparelho
+        // não cobre (ex.: DSD/DSF, alguns FLAC/Opus/WMA). Preferência: software FFmpeg antes do decoder nativo.
         if (FfmpegLibrary.isAvailable()) {
             android.util.Log.i("PlaybackService", "FFmpeg decoder disponível: ${FfmpegLibrary.getVersion()}")
         } else {
@@ -282,13 +289,9 @@ class PlaybackService : MediaSessionService() {
                 enableFloatOutput: Boolean,
                 enableAudioOutputPlaybackParameters: Boolean
             ): AudioSink? {
-                val usbExclusive = backendName == "USB_EXCLUSIVE"
-                val usbDevice = if (usbExclusive) {
-                    com.tolete.player.data.UsbAudioRouter.findUsbOutput(context)
-                } else null
-                appliedUsbDeviceLabel = if (usbExclusive) {
-                    com.tolete.player.data.UsbAudioRouter.label(usbDevice)
-                } else ""
+                val usbExclusive = highQuality
+                val outDevice = if (highQuality) AudioOutputInfo.findHighQualityOutput(context) else null
+                appliedDeviceLabel = if (outDevice != null) AudioOutputInfo.describeDevice(outDevice) else ""
                 // Float: hi-res, USB DAC ou backends explícitos.
                 // CORREÇÃO: manter float também em bit-perfect. O Media3 só preserva
                 // 24/32 bits com a saída float ligada; sem ela ele converte hi-res para
@@ -298,16 +301,18 @@ class PlaybackService : MediaSessionService() {
                 appliedFloatOutput = useFloat
                 val builder = DefaultAudioSink.Builder(context)
                     .setEnableFloatOutput(useFloat)
+                    .setAudioProcessors(arrayOf(HighRatePcmDownsampler()))
                     .setEnableAudioOutputPlaybackParameters(true)
                 android.util.Log.i(
                     "PlaybackService",
-                    "AudioSink: usbExclusive=$usbExclusive device=${appliedUsbDeviceLabel.ifBlank { "-" }} float=$useFloat"
+                    "AudioSink: highQuality=$usbExclusive device=${appliedDeviceLabel.ifBlank { "-" }} float=$useFloat"
                 )
                 val sink = builder.build()
                 // AudioTapSink (visualizador .milk) fica por fora de tudo e só espia o PCM.
                 if (!usbExclusive) return AudioTapSink(sink)
-                // USB exclusivo: antes de cada AudioTrack ser criado, pede ao Android 14+ que
+                // Alta qualidade: antes de cada AudioTrack ser criado, pede ao Android 14+ que
                 // reabra a saída USB na taxa da faixa (senão o DAC fica preso em 48 kHz).
+                // Sem DAC USB conectado, o UsbMixer simplesmente não faz nada.
                 val appCtx = context.applicationContext
                 return AudioTapSink(object : ForwardingAudioSink(sink) {
                     // Media3 1.11: o override agora é configure(AudioSinkConfig)
@@ -317,6 +322,17 @@ class PlaybackService : MediaSessionService() {
                             inputFormat.sampleRate > 0
                         ) {
                             val pcm = inputFormat.pcmEncoding
+                            val inputChannels = audioSinkConfig.outputChannelMapping?.length()?.takeIf { it > 0 }
+                                ?: inputFormat.channelCount
+                            val channels = HighRatePcmDownsampler.outputChannelCount(
+                                inputFormat.sampleRate,
+                                inputChannels
+                            )
+                            val outputSampleRate = HighRatePcmDownsampler.outputSampleRate(
+                                inputFormat.sampleRate,
+                                channels,
+                                pcm
+                            )
                             val highRes = pcm == C.ENCODING_PCM_24BIT ||
                                 pcm == C.ENCODING_PCM_32BIT ||
                                 pcm == C.ENCODING_PCM_FLOAT
@@ -328,11 +344,9 @@ class PlaybackService : MediaSessionService() {
                                 pcm == C.ENCODING_PCM_8BIT -> AudioFormat.ENCODING_PCM_8BIT
                                 else -> AudioFormat.ENCODING_PCM_16BIT
                             }
-                            val channels = audioSinkConfig.outputChannelMapping?.length()?.takeIf { it > 0 }
-                                ?: inputFormat.channelCount
                             com.tolete.player.data.UsbMixer.applyForTrack(
                                 appCtx,
-                                sampleRate = inputFormat.sampleRate,
+                                sampleRate = outputSampleRate,
                                 channelCount = channels,
                                 encoding = trackEncoding,
                                 preferredHz = preferredSr,
@@ -374,7 +388,15 @@ class PlaybackService : MediaSessionService() {
         // Preferir extensão quando disponível (ordem de renderers já coloca FFmpeg primeiro)
         renderersFactory.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
 
+        val mediaSourceFactory = DefaultMediaSourceFactory(
+            this,
+            ExtractorsFactory {
+                arrayOf(DsfExtractor(), *DefaultExtractorsFactory().createExtractors())
+            }
+        )
+
         val player = ExoPlayer.Builder(this, renderersFactory)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -395,17 +417,17 @@ class PlaybackService : MediaSessionService() {
         currentAudioSessionId = player.audioSessionId
         exoPlayerRef = player
 
-        // Saída USB exclusiva: roteia ao DAC e reage a conectar/desconectar
-        backendIsUsbExclusive = backendName == "USB_EXCLUSIVE"
-        if (backendIsUsbExclusive) {
-            applyUsbRouting(player)
+        // Alta qualidade: roteia ao DAC USB (ou ao fone com fio) e reage a conectar/desconectar
+        backendIsHighQuality = highQuality
+        if (highQuality) {
+            applyOutputRouting(player)
             val cb = object : android.media.AudioDeviceCallback() {
                 override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) =
-                    applyUsbRouting(player)
+                    applyOutputRouting(player)
                 override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) =
-                    applyUsbRouting(player)
+                    applyOutputRouting(player)
             }
-            usbDeviceCallback = cb
+            deviceCallback = cb
             (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
                 .registerAudioDeviceCallback(cb, android.os.Handler(android.os.Looper.getMainLooper()))
         }
@@ -531,6 +553,13 @@ class PlaybackService : MediaSessionService() {
                 if (playWhenReady) play() else pause()
             }
         }
+
+        // Ícone pequeno da notificação de mídia: a lira do Lyron (silhueta monocromática).
+        setMediaNotificationProvider(
+            DefaultMediaNotificationProvider.Builder(this).build().also {
+                it.setSmallIcon(R.drawable.ic_notif_lyre)
+            }
+        )
 
         mediaSession = MediaSession.Builder(this, fadingPlayer)
             .setCallback(sessionCallback)
@@ -745,21 +774,21 @@ class PlaybackService : MediaSessionService() {
 
 
     /**
-     * Roteia a saída do ExoPlayer para o DAC USB (Media3 1.3.x não tem AudioTrackProvider,
-     * então usamos a API oficial [ExoPlayer.setPreferredAudioDevice], que internamente chama
-     * AudioTrack.setPreferredDevice). Passar null devolve o roteamento automático do sistema.
+     * Roteia a saída do ExoPlayer para o DAC USB ou, se não houver, para o fone com fio, usando a API
+     * oficial [ExoPlayer.setPreferredAudioDevice] (por baixo, AudioTrack.setPreferredDevice).
+     * Sem nenhum dos dois, passa null e o sistema volta a escolher a rota (alto-falante, Bluetooth...).
      */
-    private fun applyUsbRouting(player: ExoPlayer) {
-        if (backendIsUsbExclusive.not()) return
-        val usb = com.tolete.player.data.UsbAudioRouter.findUsbOutput(this)
-        appliedUsbDeviceLabel = com.tolete.player.data.UsbAudioRouter.label(usb)
+    private fun applyOutputRouting(player: ExoPlayer) {
+        if (!backendIsHighQuality) return
+        val device = AudioOutputInfo.findHighQualityOutput(this)
+        appliedDeviceLabel = if (device != null) AudioOutputInfo.describeDevice(device) else ""
         // DAC conectado/desconectado: reaplica o formato do mixer na próxima faixa
         com.tolete.player.data.UsbMixer.invalidate()
         try {
-            player.setPreferredAudioDevice(usb)
-            android.util.Log.i("PlaybackService", "setPreferredAudioDevice → $appliedUsbDeviceLabel")
+            player.setPreferredAudioDevice(device)
+            android.util.Log.i("PlaybackService", "setPreferredAudioDevice → ${appliedDeviceLabel.ifBlank { "automático" }}")
         } catch (e: Throwable) {
-            android.util.Log.w("PlaybackService", "Falha ao rotear para USB: ${e.message}")
+            android.util.Log.w("PlaybackService", "Falha ao rotear a saída: ${e.message}")
         }
     }
 
@@ -778,14 +807,14 @@ class PlaybackService : MediaSessionService() {
         idleStopJob?.cancel()
         idleStopJob = null
         scope.cancel()
-        usbDeviceCallback?.let {
+        deviceCallback?.let {
             try {
                 (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
                     .unregisterAudioDeviceCallback(it)
             } catch (_: Exception) {}
         }
-        usbDeviceCallback = null
-        if (backendIsUsbExclusive) {
+        deviceCallback = null
+        if (backendIsHighQuality) {
             // Devolve o DAC ao formato padrão do sistema para os outros apps
             try { com.tolete.player.data.UsbMixer.clear(this) } catch (_: Exception) {}
         }

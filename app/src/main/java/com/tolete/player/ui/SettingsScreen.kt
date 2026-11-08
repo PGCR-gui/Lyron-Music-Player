@@ -171,6 +171,8 @@ fun SettingsScreen(
     onSplashSoundChange: (Boolean) -> Unit = {},
     floatingIconsEnabled: Boolean = true,
     onFloatingIconsChange: (Boolean) -> Unit = {},
+    glassQuality: GlassQuality = GlassQuality.FULL,
+    onGlassQualityChange: (GlassQuality) -> Unit = {},
     homeButtonFontPath: String? = null,
     onHomeButtonFontSelect: (String?) -> Unit = {},
     homeButtonColor: Int = 0xFFFFFFFF.toInt(),
@@ -191,6 +193,10 @@ fun SettingsScreen(
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
     onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
+    audioOutput: MusicViewModel.AudioOutputBackend = MusicViewModel.AudioOutputBackend.DEFAULT,
+    onAudioOutputChange: (MusicViewModel.AudioOutputBackend) -> Unit = {},
+    bitPerfect: Boolean = false,
+    onBitPerfectChange: (Boolean) -> Unit = {},
     playCountThreshold: Int = 70,
     onPlayCountThresholdChange: (Int) -> Unit = {},
     playCountMinutes: Int = 0,
@@ -311,7 +317,11 @@ fun SettingsScreen(
                 seekBarStyle = seekBarStyle,
                 onSeekBarStyleChange = onSeekBarStyleChange,
                 immersiveNowPlaying = immersiveNowPlaying,
-                onImmersiveNowPlayingChange = onImmersiveNowPlayingChange
+                onImmersiveNowPlayingChange = onImmersiveNowPlayingChange,
+                audioOutput = audioOutput,
+                onAudioOutputChange = onAudioOutputChange,
+                bitPerfect = bitPerfect,
+                onBitPerfectChange = onBitPerfectChange
             )
             SettingsPage.ORGANIZE -> OrganizeLibraryPage(
                 libraryRootPath = libraryRootPath,
@@ -398,7 +408,9 @@ fun SettingsScreen(
                 onImport = onImportBackup
             )
             SettingsPage.ADVANCED -> AdvancedPage(
-                onPickCustomFolder = onPickDataFolder
+                onPickCustomFolder = onPickDataFolder,
+                glassQuality = glassQuality,
+                onGlassQualityChange = onGlassQualityChange
             )
             SettingsPage.SCROBBLE -> ScrobblePage()
             SettingsPage.ABOUT -> AboutPage(
@@ -511,7 +523,9 @@ internal fun EntryRow(e: SettingsEntry) {
 
 @Composable
 private fun AdvancedPage(
-    onPickCustomFolder: () -> Unit
+    onPickCustomFolder: () -> Unit,
+    glassQuality: GlassQuality,
+    onGlassQualityChange: (GlassQuality) -> Unit
 ) {
     val context = LocalContext.current
     var mode by remember {
@@ -570,6 +584,39 @@ private fun AdvancedPage(
             "Ao mudar a pasta, dados existentes na pasta anterior não são movidos automaticamente. Use Backup se precisar transferir.",
             fontSize = 12.sp,
             color = Color.White.copy(0.45f)
+        )
+
+        Spacer(Modifier.height(32.dp))
+        Text(
+            "Efeitos de vidro",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Barras, mini player e menus usam vidro. Os efeitos mais pesados gastam GPU e bateria; reduza se o app travar ou esquentar.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.6f),
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        DataFolderOption(
+            selected = glassQuality == GlassQuality.FULL,
+            title = "Completo",
+            subtitle = "Lente com distorção, desfoque e brilho. A distorção só funciona no Android 13+.",
+            onClick = { onGlassQualityChange(GlassQuality.FULL) }
+        )
+        DataFolderOption(
+            selected = glassQuality == GlassQuality.NO_DISTORTION,
+            title = "Sem distorção",
+            subtitle = "Mantém o desfoque do fundo, sem o efeito de lente.",
+            onClick = { onGlassQualityChange(GlassQuality.NO_DISTORTION) }
+        )
+        DataFolderOption(
+            selected = glassQuality == GlassQuality.LIGHT,
+            title = "Leve",
+            subtitle = "Sem desfoque nem distorção: fundo translúcido simples. O mais leve para o aparelho.",
+            onClick = { onGlassQualityChange(GlassQuality.LIGHT) }
         )
     }
 }

@@ -33,6 +33,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -85,6 +87,7 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.FileUpload
@@ -280,6 +283,9 @@ fun TolereApp(
     val crossfadeMs by vm.crossfadeMs.collectAsStateWithLifecycle()
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
+    val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
+    val glassQuality by vm.glassQuality.collectAsStateWithLifecycle()
+    val bitPerfect by vm.bitPerfect.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
     val playCountMinutes by vm.playCountMinutes.collectAsStateWithLifecycle()
     val lastFmUsername by vm.lastFmUsername.collectAsStateWithLifecycle()
@@ -366,6 +372,7 @@ fun TolereApp(
     var createPlaylistInitialTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     val selectionMode = selectedTrackIds.isNotEmpty()
 
+    var showLastFm by remember { mutableStateOf(false) }
     val backdrop = rememberGraphicsLayer()
     val bottomPadding = if (nowPlaying != null) 190.dp else 110.dp
     var navBarVisible by remember { mutableStateOf(true) }
@@ -485,8 +492,13 @@ fun TolereApp(
                 Modifier
                     .fillMaxSize()
                     .drawWithContent {
-                        backdrop.record { this@drawWithContent.drawContent() }
-                        drawLayer(backdrop)
+                        if (GlassConfig.quality == GlassQuality.LIGHT) {
+                            // Modo leve: o vidro não lê o fundo, então nem gravamos a camada
+                            drawContent()
+                        } else {
+                            backdrop.record { this@drawWithContent.drawContent() }
+                            drawLayer(backdrop)
+                        }
                     }
             ) {
                 Box(
@@ -527,6 +539,10 @@ fun TolereApp(
                                 title = when {
                                     filter != null && filter!!.tab == MusicViewModel.Tab.PLAYLISTS ->
                                         playlists.firstOrNull { it.id == filter!!.key }?.name ?: filter!!.key
+                                    filter != null && filter!!.tab == MusicViewModel.Tab.ALBUMS &&
+                                        filter!!.key.startsWith("album-key::") ->
+                                        albums.firstOrNull { it.key == filter!!.key.removePrefix("album-key::") }?.name
+                                            ?: visible.firstOrNull()?.album.orEmpty()
                                     filter != null -> filter!!.key.removePrefix("composer::")
                                     else -> tabTitle(tab)
                                 },
@@ -783,7 +799,13 @@ fun TolereApp(
                                 }
 
                                 filter != null && filter!!.tab == MusicViewModel.Tab.ALBUMS -> {
-                                    val albumName = filter!!.key
+                                    val albumName = if (filter!!.key.startsWith("album-key::")) {
+                                        albums.firstOrNull {
+                                            it.key == filter!!.key.removePrefix("album-key::")
+                                        }?.name ?: visible.firstOrNull()?.album.orEmpty()
+                                    } else {
+                                        filter!!.key
+                                    }
                                     val albumTracks = visible
                                     val art = albumTracks.firstOrNull { !it.artPath.isNullOrBlank() }?.artPath
                                     val artists = remember(albumTracks) {
@@ -970,7 +992,8 @@ fun TolereApp(
                                                 period = period,
                                                 items = items
                                             )
-                                        }
+                                        },
+                                        onOpenLastFm = { showLastFm = true }
                                     )
                                 }
 
@@ -989,7 +1012,12 @@ fun TolereApp(
                                             }
                                         }
                                         MusicViewModel.Tab.ALBUMS -> vm.sortedAlbums(albums).map {
-                                            GroupItem(it.name, "${it.artist} · ${faixas(it.trackCount)}", it.name, it.artPath)
+                                            GroupItem(
+                                                it.name,
+                                                "${it.artist} · ${faixas(it.trackCount)}",
+                                                "album-key::${it.key}",
+                                                it.artPath
+                                            )
                                         }
                                         MusicViewModel.Tab.GENRES -> vm.sortedGenres(genres).map {
                                             GroupItem(it.name, faixas(it.trackCount), it.name, it.artPath)
@@ -1077,6 +1105,19 @@ fun TolereApp(
                         vm.setTab(t)
                     },
                     backdrop = backdrop
+                )
+            }
+
+            // ---------- Dashboard do Last.fm ----------
+            AnimatedVisibility(
+                visible = showLastFm,
+                enter = slideInHorizontally(tween(300)) { it } + fadeIn(tween(220)),
+                exit = slideOutHorizontally(tween(260)) { it } + fadeOut(tween(180))
+            ) {
+                LastFmDashboardScreen(
+                    tracks = tracks,
+                    appColors = appColors,
+                    onBack = { showLastFm = false }
                 )
             }
 
@@ -1175,6 +1216,10 @@ fun TolereApp(
                     onSeekBarStyleChange = vm::setSeekBarStyle,
                     immersiveNowPlaying = immersiveNowPlaying,
                     onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
+                    audioOutput = audioOutput,
+                    onAudioOutputChange = { vm.setAudioOutput(it, applyNow = true) },
+                    bitPerfect = bitPerfect,
+                    onBitPerfectChange = { vm.setBitPerfect(it, applyNow = true) },
                     playCountThreshold = playCountThreshold,
                     onPlayCountThresholdChange = vm::setPlayCountThreshold,
                     playCountMinutes = playCountMinutes,
@@ -1251,6 +1296,8 @@ fun TolereApp(
                     onSplashSoundChange = vm::setSplashSoundEnabled,
                     floatingIconsEnabled = floatingIconsEnabled,
                     onFloatingIconsChange = vm::setFloatingIconsEnabled,
+                    glassQuality = glassQuality,
+                    onGlassQualityChange = vm::setGlassQuality,
                     homeButtonFontPath = homeButtonFontPath,
                     onHomeButtonFontSelect = vm::setHomeButtonFontPath,
                     homeButtonColor = homeButtonColor,
@@ -1464,6 +1511,7 @@ fun TolereApp(
                         lyricsFontPath = lyricsFontPath,
                         lyricsTranslationFontPath = lyricsTranslationFontPath,
                         lyricsEmphasisFontPath = lyricsEmphasisFontPath,
+                        highQualityOutput = audioOutput == MusicViewModel.AudioOutputBackend.HIGH_QUALITY,
                         getPosition = vm::currentPosition,
                         onClose = { showNowPlaying = false },
                         onPrevious = vm::previous,
@@ -1563,6 +1611,7 @@ fun TolereApp(
                     GlassSurface(
                         backdrop = backdrop,
                         shape = CircleShape,
+                        style = GlassStyle.Lens,
                         modifier = Modifier
                             .size(56.dp)
                             .clickable { showSelectionActions = true }
@@ -2079,7 +2128,7 @@ private fun SearchResultsPanel(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { onOpenAlbum(al.name) }
+                        .clickable { onOpenAlbum("album-key::${al.key}") }
                         .padding(horizontal = 20.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -2737,6 +2786,8 @@ private fun MiniPlayer(
     GlassSurface(
         backdrop = backdrop,
         shape = RoundedCornerShape(28.dp),
+        style = GlassStyle.Bar,
+        blurRadius = 4.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -3055,7 +3106,7 @@ private fun AlbumWikiInfoSection(
 
     val displayInfo = manualInfo ?: savedAlbum?.text ?: wikiInfo?.extract ?: wikiInfo?.description ?: lastFmSummary
 
-    Column(Modifier.padding(top = 10.dp)) {
+    Column(Modifier.padding(top = 6.dp)) {
         if (editingInfo) {
             OutlinedTextField(
                 value = editText,
@@ -3091,7 +3142,7 @@ private fun AlbumWikiInfoSection(
                     displayInfo,
                     fontSize = 13.sp,
                     color = Color.White.copy(0.72f),
-                    maxLines = if (textExpanded) Int.MAX_VALUE else 5,
+                    maxLines = if (textExpanded) Int.MAX_VALUE else 3,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.clickable { textExpanded = !textExpanded }
                 )
@@ -3954,7 +4005,7 @@ private fun PlaylistTracksScreen(
 
 
 @Composable
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 private fun AlbumDetailScreen(
     albumName: String,
     artPath: String?,
@@ -4016,7 +4067,7 @@ private fun AlbumDetailScreen(
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(320.dp)
+                    .height(240.dp)
             ) {
                 if (artPath != null) {
                     AsyncImage(
@@ -4056,11 +4107,12 @@ private fun AlbumDetailScreen(
                 )
                 Spacer(Modifier.height(6.dp))
                 if (artists.isNotEmpty()) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        artists.forEachIndexed { idx, name ->
-                            if (idx > 0) {
-                                Text(", ", color = Color.White.copy(0.7f), fontSize = 15.sp)
-                            }
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        artists.forEach { name ->
                             Text(
                                 name,
                                 color = Color(0xFF82B1FF),
@@ -4414,7 +4466,8 @@ private fun LysPlaceHome(
     onTrackLongClick: (Track) -> Unit = {},
     mostPlayedRanked: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod) -> List<MusicViewModel.RankedItem> = { _, _ -> emptyList() },
     historyInPeriod: (MusicViewModel.StatsPeriod) -> List<Track> = { emptyList() },
-    onExportTopStats: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod, List<MusicViewModel.RankedItem>) -> Unit = { _, _, _ -> }
+    onExportTopStats: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod, List<MusicViewModel.RankedItem>) -> Unit = { _, _, _ -> },
+    onOpenLastFm: () -> Unit = {}
 ) {
     val homeFontFamily = rememberFontFamily(homeButtonFontPath)
     val homeTextColor = Color(homeButtonColor)
@@ -4540,6 +4593,32 @@ private fun LysPlaceHome(
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
+                    if (section == "most") {
+                        Spacer(Modifier.weight(1f))
+                        // Atalho para o dashboard do Last.fm
+                        Row(
+                            Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(appColors.accent.copy(0.15f))
+                                .clickable { onOpenLastFm() }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.BarChart,
+                                contentDescription = "Dashboard do Last.fm",
+                                tint = appColors.accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "Last.fm",
+                                color = appColors.accent,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
                 when (section) {
                     "most" -> {

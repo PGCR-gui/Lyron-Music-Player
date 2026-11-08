@@ -92,7 +92,7 @@ object ScrobbleNotifier {
         // Scrobble já enviado: troca o ícone por um de confirmação e some com os botões.
         val sent = track != null && scrobbled && !skipped
         val b = NotificationCompat.Builder(ctx, CHANNEL_ID)
-            .setSmallIcon(if (sent) R.drawable.ic_notif_check else R.drawable.ic_notif_scrobble)
+            .setSmallIcon(if (sent) R.drawable.ic_notif_check else R.drawable.ic_notif_lyre)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)

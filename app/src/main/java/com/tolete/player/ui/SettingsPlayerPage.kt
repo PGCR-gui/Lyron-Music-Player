@@ -35,11 +35,18 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tolete.player.PlaybackService
+import com.tolete.player.data.AudioOutputInfo
 import com.tolete.player.data.LibrarySettings
+import com.tolete.player.data.OutputSummary
 import com.tolete.player.data.SourceFolder
 import com.tolete.player.ui.MusicViewModel.AppThemeId
+import com.tolete.player.ui.MusicViewModel.AudioOutputBackend
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun PlayerPage(
@@ -58,7 +65,11 @@ internal fun PlayerPage(
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
-    onImmersiveNowPlayingChange: (Boolean) -> Unit = {}
+    onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
+    audioOutput: AudioOutputBackend = AudioOutputBackend.DEFAULT,
+    onAudioOutputChange: (AudioOutputBackend) -> Unit = {},
+    bitPerfect: Boolean = false,
+    onBitPerfectChange: (Boolean) -> Unit = {}
 ) {
     Column(
         Modifier
@@ -93,6 +104,50 @@ internal fun PlayerPage(
             selected = shuffleType == ShuffleType.QUEUE,
             onClick = { onShuffleTypeChange(ShuffleType.QUEUE) }
         )
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Saída de áudio",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Escolha como o áudio é enviado ao DAC USB ou ao fone com fio. A troca vale na hora (a fila e a posição são mantidas).",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+        ShuffleTypeOption(
+            title = "Padrão do sistema",
+            subtitle = "O Android escolhe a saída e o formato",
+            selected = audioOutput == AudioOutputBackend.DEFAULT,
+            onClick = { onAudioOutputChange(AudioOutputBackend.DEFAULT) }
+        )
+        Spacer(Modifier.height(8.dp))
+        ShuffleTypeOption(
+            title = "Alta qualidade (DAC USB / fone com fio)",
+            subtitle = "Prioriza o DAC USB ou o fone com fio, mantém 24/32-bit sem reduzir para 16-bit e, no USB (Android 14+), usa a taxa de amostragem da faixa",
+            selected = audioOutput == AudioOutputBackend.HIGH_QUALITY,
+            onClick = { onAudioOutputChange(AudioOutputBackend.HIGH_QUALITY) }
+        )
+        if (audioOutput == AudioOutputBackend.HIGH_QUALITY) {
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Bit-perfect (USB)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Envia o áudio sem alteração ao DAC USB, usando o driver de áudio USB do próprio Android 14+ (não precisa de driver extra). Só engata quando o DAC publica bit-perfect no mesmo formato da faixa; o volume do Android, o fade e o crossfade deixam de agir (use o volume do DAC). Veja o resultado em \"Saída em uso\".",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.55f)
+                    )
+                }
+                Switch(checked = bitPerfect, onCheckedChange = onBitPerfectChange)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        AudioOutputInfoCard(highQuality = audioOutput == AudioOutputBackend.HIGH_QUALITY)
 
         Spacer(Modifier.height(24.dp))
         Text(
@@ -293,5 +348,100 @@ internal fun ShuffleTypeOption(
         if (selected) {
             Text("✓", fontSize = 18.sp, color = MaterialTheme.colorScheme.primary)
         }
+    }
+}
+
+
+/** Abre o card "Saída em uso" num diálogo (usado pelo menu de três pontos do Now Playing). */
+@Composable
+internal fun AudioOutputInfoDialog(highQuality: Boolean, onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalContentColor provides Color.White
+        ) {
+            Column(
+                Modifier
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color(0xFF1E1E22).copy(alpha = 0.96f))
+                    .padding(16.dp)
+            ) {
+                AudioOutputInfoCard(highQuality = highQuality)
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End
+                ) {
+                    androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Fechar") }
+                }
+            }
+        }
+    }
+}
+
+/** Campo de informação: mostra a saída que está sendo usada e o formato, atualizado ao vivo. */
+@Composable
+internal fun AudioOutputInfoCard(highQuality: Boolean) {
+    val ctx = LocalContext.current
+    var info by remember { mutableStateOf<OutputSummary?>(null) }
+    LaunchedEffect(highQuality) {
+        // Releitura periódica: pega o DAC sendo plugado/desplugado e o formato aplicado à faixa atual.
+        while (true) {
+            info = withContext(Dispatchers.Default) {
+                AudioOutputInfo.summary(ctx, highQuality, PlaybackService.appliedFloatOutput)
+            }
+            delay(1500)
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(0.06f))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Rounded.Info,
+                contentDescription = null,
+                tint = Color.White.copy(0.7f),
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                "Saída em uso",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+        val i = info
+        if (i == null) {
+            Text(
+                "Lendo a saída de áudio…",
+                fontSize = 13.sp,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        } else {
+            Spacer(Modifier.height(8.dp))
+            OutputInfoRow("Dispositivo", i.deviceName)
+            OutputInfoRow("Tipo", i.deviceType)
+            OutputInfoRow("Formato", i.format)
+            if (i.route.isNotBlank()) OutputInfoRow("Origem", i.route)
+            i.notes.forEach { n ->
+                Text(
+                    n,
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OutputInfoRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(label, fontSize = 13.sp, color = Color.White.copy(0.55f), modifier = Modifier.width(92.dp))
+        Text(value, fontSize = 13.sp, color = Color.White.copy(0.9f), modifier = Modifier.weight(1f))
     }
 }

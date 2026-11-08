@@ -8,6 +8,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
@@ -20,7 +21,7 @@ import java.util.UUID
 class MusicScanner(private val context: Context) {
 
     private val supportedExtensions = setOf(
-        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "aiff", "alac"
+        "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "aiff", "alac", "dsf"
     )
 
     // Capas extraídas ficam em files/art/<sha1>.jpg (mesma capa = mesmo arquivo)
@@ -39,7 +40,15 @@ class MusicScanner(private val context: Context) {
             DocumentsContract.getTreeDocumentId(treeUri)
         )
 
-        scanRecursive(childrenUri, treeUri, sourceTree, tracks, onTrack, existingById)
+        scanRecursive(
+            childrenUri,
+            treeUri,
+            sourceTree,
+            tracks,
+            onTrack,
+            existingById,
+            DocumentsContract.getTreeDocumentId(treeUri)
+        )
         tracks
     }
 
@@ -66,12 +75,13 @@ class MusicScanner(private val context: Context) {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.YEAR,
             MediaStore.Audio.Media.TRACK,
+            MediaStore.Audio.Media.ALBUM_ID,
             MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.MIME_TYPE,
             MediaStore.Audio.Media.SIZE,
             MediaStore.Audio.Media.DATE_MODIFIED
         )
-        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+        val selection = "(${MediaStore.Audio.Media.IS_MUSIC} != 0 OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE '%.dsf')"
         try {
             context.contentResolver.query(
                 collection, projection, selection, null,
@@ -85,6 +95,7 @@ class MusicScanner(private val context: Context) {
                 val durCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
                 val yearCol = cursor.getColumnIndex(MediaStore.Audio.Media.YEAR)
                 val trackCol = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
+                val albumIdCol = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
                 val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
                 val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
                 val modCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
@@ -98,6 +109,21 @@ class MusicScanner(private val context: Context) {
 
                     val docId = "media_store:$id"
                     val trackId = UUID.nameUUIDFromBytes(docId.toByteArray()).toString()
+                    val filePath = if (dataCol >= 0 && !cursor.isNull(dataCol)) {
+                        cursor.getString(dataCol).orEmpty()
+                    } else {
+                        fileName
+                    }
+                    val albumId = if (albumIdCol >= 0 && !cursor.isNull(albumIdCol)) {
+                        cursor.getLong(albumIdCol)
+                    } else {
+                        0L
+                    }
+                    val albumKey = if (albumId > 0L) {
+                        "media:${collection}:$albumId"
+                    } else {
+                        "folder:${filePath.substringBeforeLast('/', filePath).lowercase()}"
+                    }
                     val size = if (sizeCol >= 0 && !cursor.isNull(sizeCol)) cursor.getLong(sizeCol) else 0L
                     val modified = if (modCol >= 0 && !cursor.isNull(modCol)) cursor.getLong(modCol) * 1000L else 0L
 
@@ -118,7 +144,8 @@ class MusicScanner(private val context: Context) {
                         extension = extension,
                         size = size,
                         sourceTree = "all_files",
-                        lastModified = modified
+                        lastModified = modified,
+                        albumKey = albumKey
                     )
                     if (track != null) {
                         tracks += track
@@ -135,7 +162,7 @@ class MusicScanner(private val context: Context) {
                         val trackNum = if (trackCol >= 0) {
                             cursor.getInt(trackCol).let { if (it > 1000) it % 1000 else it }.takeIf { it > 0 }
                         } else null
-                        val path = if (dataCol >= 0) cursor.getString(dataCol) ?: fileName else fileName
+                        val path = filePath
                         tracks += Track(
                             id = trackId,
                             title = title,
@@ -153,14 +180,114 @@ class MusicScanner(private val context: Context) {
                             sourceTree = "all_files",
                             codec = null,
                             fileSize = size,
-                            lastModified = modified
+                            lastModified = modified,
+                            albumKey = albumKey
                         )
                         onTrack()
                     }
                 }
             }
         } catch (_: Exception) { }
+        // Nem todo Android registra DSF como áudio no MediaStore (IS_MUSIC pode ser 0 ou
+        // o arquivo pode nem estar em Audio.Media). Com acesso total, localiza esses arquivos
+        // diretamente nos volumes compartilhados, sem depender da classificação do sistema.
+        val hasBroadStorageAccess = Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+            Environment.isExternalStorageManager()
+        if (hasBroadStorageAccess) {
+            tracks += scanDsfFilesFromStorage(existingById, tracks, onTrack)
+        }
         tracks
+    }
+
+    private fun scanDsfFilesFromStorage(
+        existingById: Map<String, Track>,
+        alreadyFound: List<Track>,
+        onTrack: () -> Unit
+    ): List<Track> {
+        val roots = linkedMapOf<String, File>()
+        fun addRoot(root: File?) {
+            if (root == null || !root.isDirectory) return
+            val path = try { root.canonicalPath } catch (_: Exception) { root.absolutePath }
+            roots[path] = root
+        }
+
+        addRoot(Environment.getExternalStorageDirectory())
+        try {
+            context.getExternalFilesDirs(null).forEach { appDir ->
+                if (appDir != null) {
+                    val path = appDir.absolutePath
+                    val marker = "/Android/data/"
+                    val markerIndex = path.indexOf(marker)
+                    if (markerIndex > 0) addRoot(File(path.substring(0, markerIndex)))
+                }
+            }
+        } catch (_: Exception) { }
+
+        val foundPaths = (alreadyFound + existingById.values)
+            .mapNotNull { canonicalTrackPath(it.path) }
+            .toMutableSet()
+        val visitedDirectories = HashSet<String>()
+        val pending = java.util.ArrayDeque<File>()
+        roots.values.forEach(pending::addLast)
+        val found = mutableListOf<Track>()
+
+        while (pending.isNotEmpty()) {
+            val directory = pending.removeLast()
+            val directoryPath = try { directory.canonicalPath } catch (_: Exception) { continue }
+            if (!visitedDirectories.add(directoryPath)) continue
+            val children = try { directory.listFiles() } catch (_: Exception) { null } ?: continue
+
+            for (child in children) {
+                if (child.isDirectory) {
+                    // Evita entrar em dados privados/volumosos de outros apps, mas mantém
+                    // Android/media, onde alguns usuários guardam bibliotecas de áudio.
+                    if (directory.name == "Android" && child.name in setOf("data", "obb")) continue
+                    if (child.name in setOf(".thumbnails", ".Trash", "\$RECYCLE.BIN")) continue
+                    pending.addLast(child)
+                    continue
+                }
+                if (!child.isFile || !child.extension.equals("dsf", ignoreCase = true)) continue
+
+                val canonicalPath = try { child.canonicalPath } catch (_: Exception) { child.absolutePath }
+                if (!foundPaths.add(canonicalPath)) continue
+                val docId = "dsf_file:$canonicalPath"
+                val trackId = UUID.nameUUIDFromBytes(docId.toByteArray()).toString()
+                val size = child.length()
+                val modified = child.lastModified()
+                val cached = existingById[trackId]
+                val track = if (cached != null && cached.fileSize == size && cached.lastModified == modified) {
+                    cached
+                } else {
+                    extractMetadata(
+                        uri = Uri.fromFile(child),
+                        docId = docId,
+                        fileName = child.name,
+                        extension = "dsf",
+                        size = size,
+                        sourceTree = "all_files",
+                        lastModified = modified,
+                        albumKey = "folder:${canonicalPath.substringBeforeLast('/').lowercase()}"
+                    )
+                }
+                if (track != null) {
+                    found += track
+                    onTrack()
+                }
+            }
+        }
+        return found
+    }
+
+    private fun canonicalTrackPath(path: String): String? {
+        return try {
+            val file = if (path.startsWith("/")) File(path) else {
+                val uri = Uri.parse(path)
+                if (uri.scheme == "file") File(uri.path ?: return null) else return null
+            }
+            file.canonicalPath
+        } catch (_: Exception) {
+            null
+        }
     }
 
 
@@ -170,7 +297,8 @@ class MusicScanner(private val context: Context) {
         sourceTree: String,
         tracks: MutableList<Track>,
         onTrack: () -> Unit,
-        existingById: Map<String, Track> = emptyMap()
+        existingById: Map<String, Track> = emptyMap(),
+        albumFolderId: String = ""
     ) {
         context.contentResolver.query(
             childrenUri,
@@ -198,7 +326,7 @@ class MusicScanner(private val context: Context) {
 
                 if (DocumentsContract.Document.MIME_TYPE_DIR == mime) {
                     val childUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
-                    scanRecursive(childUri, treeUri, sourceTree, tracks, onTrack, existingById)
+                    scanRecursive(childUri, treeUri, sourceTree, tracks, onTrack, existingById, docId)
                 } else {
                     val extension = name.substringAfterLast('.', "").lowercase()
                     if (extension in supportedExtensions) {
@@ -213,7 +341,16 @@ class MusicScanner(private val context: Context) {
                             tracks.add(cached)
                             onTrack()
                         } else {
-                            extractMetadata(documentUri, docId, name, extension, size, sourceTree, modified)?.let {
+                            extractMetadata(
+                                documentUri,
+                                docId,
+                                name,
+                                extension,
+                                size,
+                                sourceTree,
+                                modified,
+                                albumKey = "saf:${treeUri.authority}:$albumFolderId"
+                            )?.let {
                                 tracks.add(it)
                                 onTrack()
                             }
@@ -284,6 +421,7 @@ class MusicScanner(private val context: Context) {
         mime == "audio/mp4a-latm" -> "AAC"
         mime == "audio/opus" || ext == "opus" -> "Opus"
         mime == "audio/vorbis" || ext == "ogg" -> "Vorbis"
+        ext == "dsf" -> "DSF / DSD"
         ext == "wav" -> "WAV"
         ext == "aiff" -> "AIFF"
         ext == "wma" -> "WMA"
@@ -309,7 +447,8 @@ class MusicScanner(private val context: Context) {
             extension = extension,
             size = size,
             sourceTree = track.sourceTree,
-            lastModified = modified
+            lastModified = modified,
+            albumKey = track.albumKey
         ) ?: return null
         // Mantém o id original para não quebrar playlists / favoritos / contagens
         return extracted.copy(id = track.id)
@@ -322,8 +461,13 @@ class MusicScanner(private val context: Context) {
         extension: String,
         size: Long,
         sourceTree: String,
-        lastModified: Long = 0L
+        lastModified: Long = 0L,
+        albumKey: String = ""
     ): Track? {
+        if (extension == "dsf") {
+            return extractDsfMetadata(uri, docId, fileName, size, sourceTree, lastModified, albumKey)
+        }
+
         // Preferência: JAudioTagger quando há path de ficheiro legível
         val resolvedPath = resolveFilePath(uri, fileName)
         val jt = resolvedPath?.let { p ->
@@ -407,12 +551,89 @@ class MusicScanner(private val context: Context) {
                 channels = channels,
                 fileSize = size,
                 lastModified = lastModified,
-                bitDepth = bitDepth
+                bitDepth = bitDepth,
+                albumKey = albumKey
             )
         } catch (e: Exception) {
             null
         } finally {
             retriever.release()
+        }
+    }
+
+    private fun extractDsfMetadata(
+        uri: Uri,
+        docId: String,
+        fileName: String,
+        size: Long,
+        sourceTree: String,
+        lastModified: Long,
+        albumKey: String
+    ): Track? {
+        val header = readDsfHeader(uri) ?: return null
+        val resolvedPath = resolveFilePath(uri, fileName)
+        val tags = resolvedPath?.let { path ->
+            try { TagReader.read(File(path)) } catch (_: Exception) { null }
+        }
+        val title = tags?.title?.takeIf { it.isNotBlank() }
+            ?: fileName.substringBeforeLast('.')
+        val dsdFactor = header.dsdSampleRateHz / 2_822_400
+        val codec = if (dsdFactor >= 1 && header.dsdSampleRateHz % 2_822_400 == 0) {
+            "DSF (DSD$dsdFactor)"
+        } else {
+            "DSF / DSD"
+        }
+        val artPath = try {
+            resolvedPath?.let { TagReader.readArtworkBytes(File(it))?.let(::saveArt) }
+        } catch (_: Exception) {
+            null
+        }
+        val path = resolvedPath ?: fileName
+        val bitrate = (header.dsdSampleRateHz.toLong() * header.channelCount)
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+        return Track(
+            id = UUID.nameUUIDFromBytes(docId.toByteArray()).toString(),
+            title = title,
+            artist = tags?.artist?.takeIf { it.isNotBlank() } ?: "Artista desconhecido",
+            album = tags?.album?.takeIf { it.isNotBlank() } ?: "Álbum desconhecido",
+            albumArtist = tags?.albumArtist.orEmpty(),
+            genre = tags?.genre?.takeIf { it.isNotBlank() } ?: "Desconhecido",
+            duration = header.durationUs / 1000L,
+            uri = uri,
+            path = path,
+            folder = path.substringBeforeLast('/').substringAfterLast('/').ifBlank { "Raiz" },
+            year = tags?.year?.take(4)?.toIntOrNull(),
+            trackNumber = tags?.track?.toIntOrNull(),
+            discNumber = tags?.disc?.toIntOrNull(),
+            composer = tags?.composer.orEmpty(),
+            artPath = artPath,
+            sourceTree = sourceTree,
+            codec = codec,
+            bitrate = bitrate,
+            sampleRate = header.dsdSampleRateHz,
+            channels = header.channelCount,
+            fileSize = size,
+            lastModified = lastModified,
+            bitDepth = 1,
+            albumKey = albumKey
+        )
+    }
+
+    private fun readDsfHeader(uri: Uri): DsfHeader? {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = ByteArray(DsfHeader.HEADER_SIZE)
+                var offset = 0
+                while (offset < bytes.size) {
+                    val count = input.read(bytes, offset, bytes.size - offset)
+                    if (count <= 0) return@use null
+                    offset += count
+                }
+                DsfHeader.parse(bytes)
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -595,4 +816,3 @@ class MusicScanner(private val context: Context) {
         const val ART_MIN_SIZE = 512
     }
 }
-

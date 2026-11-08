@@ -65,16 +65,16 @@ dependencies {
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("androidx.palette:palette-ktx:1.0.0")
 
-    // Media3 1.11.x. O AAR do FFmpeg em app/libs PRECISA ser compilado dessa mesma linha (1.11.x):
+    // Media3 1.11.x. O wrapper FFmpeg local em src/main/java corresponde a esta mesma linha;
     // a API de decoders é @UnstableApi e muda entre versões minor.
     val media3Version = "1.11.1"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
 
-    // Locais em app/libs — listados uma vez só (evita D8 duplicate classes)
+    // JAudioTagger local; o wrapper FFmpeg alinhado ao Media3 fica em src/main/java e
+    // suas bibliotecas nativas existentes ficam em src/main/jniLibs.
     implementation(files(
-        "libs/jaudiotagger-3.0.1.jar",
-        "libs/lib-decoder-ffmpeg-release.aar"
+        "libs/jaudiotagger-3.0.1.jar"
     ))
 }

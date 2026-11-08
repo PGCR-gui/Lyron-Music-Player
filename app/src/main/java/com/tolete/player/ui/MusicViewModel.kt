@@ -738,12 +738,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _bitPerfect = MutableStateFlow(prefs.getBoolean(KEY_BIT_PERFECT, false))
     val bitPerfect: StateFlow<Boolean> = _bitPerfect.asStateFlow()
 
-    fun setBitPerfect(enabled: Boolean) {
+    /** Liga/desliga o bit-perfect (USB, Android 14+). O serviço lê a preferência ao ser criado. */
+    fun setBitPerfect(enabled: Boolean, applyNow: Boolean = false) {
+        val changed = _bitPerfect.value != enabled
         _bitPerfect.value = enabled
         prefs.edit().putBoolean(KEY_BIT_PERFECT, enabled).apply()
-        // avisa o serviço via SharedPreferences; o player precisa ser recriado na prática
-        // para aplicar de forma completa — guardamos a preferência para a próxima sessão
-        // e tentamos sinalizar via sessão se possível
+        // só faz diferença no modo "Alta qualidade"; recria o player para valer já
+        if (applyNow && changed && _audioOutput.value == AudioOutputBackend.HIGH_QUALITY) {
+            applyAudioSettingsNow()
+        }
     }
 
     /** Modo imersivo na tela Now Playing (esconde barras de status e navegação). */
@@ -822,21 +825,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-    /** Saída de áudio preferida (UI + preferência; aplicação plena exige reinício da sessão). */
-    enum class AudioOutputBackend { DEFAULT, AUDIOTRACK, AAUDIO, OPENSLES, USB_EXCLUSIVE }
+    /**
+     * Saída de áudio: DEFAULT = o Android decide; HIGH_QUALITY = prioriza DAC USB / fone com fio,
+     * mantém PCM float (sem cair para 16-bit) e, no USB (Android 14+), segue a taxa da faixa.
+     */
+    enum class AudioOutputBackend { DEFAULT, HIGH_QUALITY }
 
-    private val _audioOutput = MutableStateFlow(
-        try {
-            AudioOutputBackend.valueOf(prefs.getString(KEY_AUDIO_OUTPUT, AudioOutputBackend.DEFAULT.name)!!)
-        } catch (_: Exception) {
-            AudioOutputBackend.DEFAULT
-        }
-    )
+    private fun audioOutputFromPrefs(): AudioOutputBackend =
+        if (com.tolete.player.data.AudioOutputPrefs.isHighQuality(prefs)) AudioOutputBackend.HIGH_QUALITY
+        else AudioOutputBackend.DEFAULT
+
+    private val _audioOutput = MutableStateFlow(audioOutputFromPrefs())
     val audioOutput: StateFlow<AudioOutputBackend> = _audioOutput.asStateFlow()
 
-    fun setAudioOutput(backend: AudioOutputBackend) {
+    /** Salva a escolha e recria o player para ela valer já (a fila e a posição são restauradas). */
+    fun setAudioOutput(backend: AudioOutputBackend, applyNow: Boolean = false) {
+        val changed = _audioOutput.value != backend
         _audioOutput.value = backend
         prefs.edit().putString(KEY_AUDIO_OUTPUT, backend.name).apply()
+        if (applyNow && changed) applyAudioSettingsNow()
     }
 
     /**
@@ -901,13 +908,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     android.util.Log.e("MusicVM", "applyAudioSettingsNow restore failed", e)
                 }
             }
-            val usb = com.tolete.player.data.UsbAudioRouter.findUsbOutput(app)
+            val out = com.tolete.player.data.AudioOutputInfo.findHighQualityOutput(app)
             val msg = when {
-                _audioOutput.value == AudioOutputBackend.USB_EXCLUSIVE && usb == null ->
-                    "Player recriado · nenhum DAC USB detectado"
-                _audioOutput.value == AudioOutputBackend.USB_EXCLUSIVE ->
-                    "Player recriado · ${com.tolete.player.data.UsbAudioRouter.label(usb)}"
-                else -> "Player recriado com as preferências de áudio"
+                _audioOutput.value != AudioOutputBackend.HIGH_QUALITY ->
+                    "Saída de áudio: padrão do sistema"
+                out == null ->
+                    "Saída de áudio: alta qualidade · nenhum DAC USB ou fone com fio detectado"
+                else ->
+                    "Saída de áudio: alta qualidade · ${com.tolete.player.data.AudioOutputInfo.describeDevice(out)}"
             }
             android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -952,25 +960,42 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _filter.value = Filter(Tab.ARTISTS, "composer::$name")
     }
 
+    private fun albumIdentity(track: Track): String {
+        val name = track.album.trim().lowercase()
+        val albumArtist = track.albumArtist.trim().lowercase()
+        if (track.albumKey.startsWith("media:")) return "${track.albumKey}|$name"
+        if (albumArtist.isNotBlank()) return "tag:$name|$albumArtist"
+        if (track.albumKey.isNotBlank()) return "${track.albumKey}|$name"
+        val parent = track.path.substringBeforeLast('/', "").trim().lowercase()
+        return "folder:$parent|$name"
+    }
+
     val albums: StateFlow<List<Album>> = tracks.map { list ->
-        // Mescla álbuns com mesmo nome e mesmo artista do álbum (case-insensitive + trim)
-        // para evitar entradas duplicadas quando tags diferem só em maiúsculas/espaços.
-        list.groupBy { t ->
-            val albumName = t.album.trim()
-            val aa = (t.albumArtist.ifBlank { t.artist }).trim()
-            albumName.lowercase() to aa.lowercase()
-        }
-            .map { (_, l) ->
+        // Não usar o artista da faixa como artista do álbum: em coletâneas cada música
+        // pode ter um artista diferente, embora pertença ao mesmo álbum/pasta.
+        list.groupBy(::albumIdentity)
+            .map { (key, l) ->
                 val first = l.first()
                 val displayAlbum = first.album.trim().ifBlank { first.album }
-                val displayArtist = (first.albumArtist.ifBlank { first.artist }).trim()
+                val albumArtists = l.map { it.albumArtist.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase() }
+                val trackArtists = l.map { it.artist.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase() }
+                val displayArtist = when {
+                    albumArtists.size == 1 -> albumArtists.first()
+                    albumArtists.size > 1 || trackArtists.size > 1 -> "Vários artistas"
+                    else -> trackArtists.firstOrNull().orEmpty()
+                }
                 Album(
-                    displayAlbum,
-                    displayArtist,
-                    l.size,
-                    l.mapNotNull { it.year }.maxOrNull() ?: first.year,
-                    l.firstNotNullOfOrNull { it.artPath },
-                    l.sumOf { it.duration }
+                    name = displayAlbum,
+                    artist = displayArtist,
+                    trackCount = l.size,
+                    year = l.mapNotNull { it.year }.maxOrNull() ?: first.year,
+                    artPath = l.firstNotNullOfOrNull { it.artPath },
+                    totalDuration = l.sumOf { it.duration },
+                    key = key
                 )
             }
             .sortedBy { it.name.lowercase() }
@@ -1047,7 +1072,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 key in artistSplitter.split(it.artist) || it.artist.equals(key, ignoreCase = true)
                             }
                         }
-                        Tab.ALBUMS -> it.album.trim().equals(f.key.trim(), ignoreCase = true)
+                        Tab.ALBUMS -> if (f.key.startsWith("album-key::")) {
+                            albumIdentity(it) == f.key.removePrefix("album-key::")
+                        } else {
+                            it.album.trim().equals(f.key.trim(), ignoreCase = true)
+                        }
                         Tab.GENRES -> f.key in genreSplitter.split(it.genre)
                         Tab.PLAYLISTS -> false
                     }
@@ -2907,6 +2936,17 @@ private val _firstPlayedAt = MutableStateFlow(
         prefs.edit().putBoolean(KEY_FLOATING_ICONS, enabled).apply()
     }
 
+    // ---------- Nível dos efeitos de vidro ----------
+    private val _glassQuality = MutableStateFlow(
+        GlassQuality.fromName(prefs.getString(KEY_GLASS_QUALITY, null)).also { GlassConfig.quality = it }
+    )
+    val glassQuality: StateFlow<GlassQuality> = _glassQuality.asStateFlow()
+    fun setGlassQuality(quality: GlassQuality) {
+        _glassQuality.value = quality
+        GlassConfig.quality = quality
+        prefs.edit().putString(KEY_GLASS_QUALITY, quality.name).apply()
+    }
+
     // Fonte e cor dos textos dos botões da tela Início
     private val _homeButtonFontPath = MutableStateFlow(prefs.getString(KEY_HOME_BUTTON_FONT, null))
     val homeButtonFontPath: StateFlow<String?> = _homeButtonFontPath.asStateFlow()
@@ -3221,6 +3261,7 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("splashEnabled", _splashEnabled.value)
         obj.put("splashSoundEnabled", _splashSoundEnabled.value)
         obj.put("floatingIconsEnabled", _floatingIconsEnabled.value)
+        obj.put("glassQuality", _glassQuality.value.name)
         obj.put("dynamicDefaultColor", _dynamicDefaultColor.value)
         obj.put("groupSort", prefs.getString(KEY_GROUP_SORT, null))
         obj.put("groupOrder", prefs.getString(KEY_GROUP_ORDER, null))
@@ -3410,7 +3451,10 @@ private val _firstPlayedAt = MutableStateFlow(
                 try { setShuffleType(ShuffleType.valueOf(obj.getString("shuffleType"))) } catch (_: Exception) {}
             }
             if (obj.has("audioOutput")) {
-                try { setAudioOutput(AudioOutputBackend.valueOf(obj.getString("audioOutput"))) } catch (_: Exception) {}
+                try {
+                    val high = com.tolete.player.data.AudioOutputPrefs.isHighQuality(obj.getString("audioOutput"))
+                    setAudioOutput(if (high) AudioOutputBackend.HIGH_QUALITY else AudioOutputBackend.DEFAULT)
+                } catch (_: Exception) {}
             }
             if (obj.has("preferredSampleRate")) setPreferredSampleRate(obj.getInt("preferredSampleRate"))
             if (obj.has("fadeMs")) setFadeMs(obj.getInt("fadeMs"))
@@ -3427,6 +3471,7 @@ private val _firstPlayedAt = MutableStateFlow(
             if (obj.has("splashEnabled")) setSplashEnabled(obj.getBoolean("splashEnabled"))
             if (obj.has("splashSoundEnabled")) setSplashSoundEnabled(obj.getBoolean("splashSoundEnabled"))
             if (obj.has("floatingIconsEnabled")) setFloatingIconsEnabled(obj.getBoolean("floatingIconsEnabled"))
+            if (obj.has("glassQuality")) setGlassQuality(GlassQuality.fromName(obj.getString("glassQuality")))
             if (obj.has("dynamicDefaultColor")) setDynamicDefaultColor(obj.getInt("dynamicDefaultColor"))
             if (obj.has("splitArtists")) setSplitArtists(obj.getBoolean("splitArtists"))
             if (obj.has("artistSeparators")) setArtistSeparators(obj.getString("artistSeparators"))
@@ -3631,7 +3676,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_MILK_INTERVAL = "milk_interval_sec"
         const val KEY_MILK_CHANGE_SONG = "milk_change_song_with_interval"
         const val KEY_MILK_PRESET_ON_SONG = "milk_preset_on_song_change"
-        const val KEY_AUDIO_OUTPUT = "audio_output_backend"
+        const val KEY_AUDIO_OUTPUT = com.tolete.player.data.AudioOutputPrefs.KEY
         const val KEY_FORCE_MAX_SR = "force_max_sample_rate" // legado
         const val KEY_PREFERRED_SAMPLE_RATE = "preferred_sample_rate"
         const val KEY_PLAY_EVENTS = "play_events_log"
@@ -3646,6 +3691,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_SPLASH_ENABLED = "splash_enabled"
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
         const val KEY_FLOATING_ICONS = "floating_icons_enabled"
+        const val KEY_GLASS_QUALITY = "glass_quality"
         const val KEY_HOME_BUTTON_FONT = "home_button_font_path"
         const val KEY_HOME_BUTTON_COLOR = "home_button_color"
         const val KEY_SHARE_FONT = "share_font_path"
@@ -3715,5 +3761,3 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
 }
-
-

@@ -190,6 +190,30 @@ object ScrobbleEdits {
         return cur
     }
 
+    /**
+     * Caminho inverso de [apply]: dado o que está no Last.fm ([artist]/[track]), devolve o
+     * título/artista/álbum originais quando existe uma edição manual que produz exatamente isso.
+     * Os campos "orig*" ficam salvos normalizados (minúsculos); por isso o ideal é usar antes o
+     * índice da biblioteca (ver LastFmDashboard), que devolve as tags reais do arquivo.
+     * Retorna null se nenhuma edição manual leva a esse nome.
+     */
+    fun reverseManual(artist: String, track: String): Meta? = synchronized(lock) {
+        val a = norm(artist)
+        val t = norm(track)
+        edits.firstOrNull { e ->
+            e.origTrack != null &&
+                norm(e.track.ifBlank { e.origTrack }) == t &&
+                (e.origArtist == null || norm(e.artist.ifBlank { e.origArtist }) == a)
+        }?.let { e ->
+            Meta(
+                track = e.origTrack.orEmpty().ifBlank { track },
+                artist = e.origArtist ?: artist,
+                album = e.origAlbum.orEmpty(),
+                albumArtist = e.origAlbumArtist.orEmpty()
+            )
+        }
+    }
+
     /** True se existe edição manual salva para esta faixa (orig track+artist). */
     fun hasManualEdit(original: Meta): Boolean = findFor(original) != null
 

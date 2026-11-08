@@ -51,6 +51,7 @@ class LibraryCache(context: Context) {
         put("title", title)
         put("artist", artist)
         put("album", album)
+        put("albumKey", albumKey)
         put("genre", genre)
         put("duration", duration)
         put("uri", uri.toString())
@@ -76,6 +77,7 @@ class LibraryCache(context: Context) {
         title = getString("title"),
         artist = getString("artist"),
         album = getString("album"),
+        albumKey = optString("albumKey", ""),
         genre = getString("genre"),
         duration = getLong("duration"),
         uri = Uri.parse(getString("uri")),
@@ -97,6 +99,6 @@ class LibraryCache(context: Context) {
     )
 
     private companion object {
-        const val VERSION = 2
+        const val VERSION = 3
     }
 }

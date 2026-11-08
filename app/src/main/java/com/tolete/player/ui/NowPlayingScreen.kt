@@ -364,7 +364,8 @@ fun NowPlayingScreen(
     immersiveNowPlaying: Boolean = true,
     getPlaybackSpeed: () -> Float = { 1f },
     onPlaybackSpeed: (Float) -> Unit = {},
-    lyricsEmphasisFontPath: String? = null
+    lyricsEmphasisFontPath: String? = null,
+    highQualityOutput: Boolean = false
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
@@ -398,6 +399,7 @@ fun NowPlayingScreen(
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showTechDetails by remember { mutableStateOf(false) }
+    var showOutputInfo by remember { mutableStateOf(false) }
     var pendingDeleteTrack by remember { mutableStateOf<Track?>(null) }
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
     var showLyricsSearch by remember { mutableStateOf(false) }
@@ -748,6 +750,15 @@ fun NowPlayingScreen(
                                     // Também abre sem letra: o gerador faz vídeo só com capa/visualizador
                                     else -> showVideoDialog = true
                                 }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("Saída de áudio", color = MaterialTheme.colorScheme.onSurface)
+                            },
+                            onClick = {
+                                showMenu = false
+                                showOutputInfo = true
                             }
                         )
                         DropdownMenuItem(
@@ -1534,6 +1545,13 @@ fun NowPlayingScreen(
                         Text("Cancelar")
                     }
                 }
+            )
+        }
+
+        if (showOutputInfo) {
+            AudioOutputInfoDialog(
+                highQuality = highQualityOutput,
+                onDismiss = { showOutputInfo = false }
             )
         }
 

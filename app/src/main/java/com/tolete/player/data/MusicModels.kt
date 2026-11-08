@@ -25,7 +25,9 @@ data class Track(
     val channels: Int = 0,
     val fileSize: Long = 0L,
     val lastModified: Long = 0L,
-    val bitDepth: Int = 0        // 16, 24, 32 (0 = desconhecido)
+    val bitDepth: Int = 0,       // 16, 24, 32 (0 = desconhecido)
+    /** Identidade estável do álbum (MediaStore, pasta SAF ou tags), não do artista da faixa. */
+    val albumKey: String = ""
 ) {
     val isHiRes: Boolean get() = sampleRate >= 96_000
 }
@@ -43,7 +45,9 @@ data class Album(
     val trackCount: Int,
     val year: Int? = null,
     val artPath: String? = null,
-    val totalDuration: Long = 0L
+    val totalDuration: Long = 0L,
+    /** Chave interna para diferenciar álbuns homônimos na navegação. */
+    val key: String = name
 )
 
 data class Genre(

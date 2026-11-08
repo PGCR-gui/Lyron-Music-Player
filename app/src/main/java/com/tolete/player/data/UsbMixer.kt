@@ -28,6 +28,9 @@ object UsbMixer {
 
     private const val TAG = "UsbMixer"
 
+    /** Abaixo disto o mixer USB não é reconfigurado (usa o padrão do sistema). */
+    private const val LOW_RATE_HZ = 48_000
+
     /** Estado aplicado (lido pela tela de Informações técnicas). */
     @Volatile var trackSampleRate: Int = 0
         private set
@@ -44,6 +47,9 @@ object UsbMixer {
 
     private var lastKey: String? = null
     private var lastDeviceId: Int = -1
+    /** Combinações que o sistema já recusou (evita repetir a tentativa a cada faixa). */
+    private val rejectedKeys = mutableSetOf<String>()
+    private var dumpedDeviceId: Int = -1
 
     val isSupported: Boolean get() = Build.VERSION.SDK_INT >= 34
 
@@ -102,8 +108,86 @@ object UsbMixer {
                 Log.w(TAG, "getSupportedMixerAttributes vazio para ${usb.productName}")
                 return
             }
+
+            fun isBp(m: AudioMixerAttributes) = m.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
+            fun keyOf(m: AudioMixerAttributes) = "${usb.id}:${m.format.sampleRate}:${m.format.encoding}:" +
+                "${m.format.channelMask}:${m.mixerBehavior}"
+
+            // Registra uma vez por DAC tudo o que ele publica (ajuda a diagnosticar recusas).
+            if (dumpedDeviceId != usb.id) {
+                dumpedDeviceId = usb.id
+                Log.i(TAG, "Mixer suportado por ${usb.productName}: " + supported.joinToString(" | ") {
+                    "${it.format.sampleRate}Hz/${bitsOf(it.format.encoding)}b" +
+                        "(enc=${it.format.encoding})/ch${it.format.channelCount}/" + (if (isBp(it)) "BP" else "DEF")
+                })
+            }
+
+            /** Pede o formato ao sistema; lembra o que foi recusado para não repetir a cada faixa. */
+            fun tryApply(m: AudioMixerAttributes): Boolean {
+                val k = keyOf(m)
+                if (k in rejectedKeys) return false
+                val ok = am.setPreferredMixerAttributes(mediaAttributes(), usb, m)
+                Log.i(
+                    TAG,
+                    "setPreferredMixerAttributes ok=$ok rate=${m.format.sampleRate} enc=${m.format.encoding} " +
+                        "behavior=${if (isBp(m)) "BP" else "DEF"} bitPerfect=$bitPerfect track=${sampleRate}Hz"
+                )
+                if (!ok) rejectedKeys += k
+                return ok
+            }
+
+            fun remember(m: AudioMixerAttributes) {
+                lastKey = keyOf(m)
+                lastDeviceId = usb.id
+                mixerSampleRate = m.format.sampleRate
+                mixerEncoding = m.format.encoding
+                mixerBitPerfect = isBp(m)
+            }
+
+            // 1) Bit-perfect (opcional). Pela documentação do Android, só engata se a reprodução tiver
+            //    exatamente a mesma codificação, canais e taxa do mixer escolhido; por isso o filtro é estrito.
+            var bpNote = ""
+            if (bitPerfect) {
+                val exactBp = supported.filter {
+                    isBp(it) && it.format.sampleRate == sampleRate &&
+                        it.format.encoding == encoding && it.format.channelCount == channelCount
+                }
+                if (exactBp.isNotEmpty()) {
+                    exactBp.firstOrNull { keyOf(it) == lastKey }?.let { return }
+                    val m = exactBp.firstOrNull { tryApply(it) }
+                    if (m != null) {
+                        remember(m)
+                        status = "Bit-perfect ativo · ${formatHz(m.format.sampleRate)} · ${encodingLabel(m.format.encoding)}"
+                        return
+                    }
+                    bpNote = "O sistema recusou o bit-perfect · "
+                } else {
+                    val published = supported.filter { isBp(it) }
+                        .map { "${formatHz(it.format.sampleRate)}/${encodingLabel(it.format.encoding)}" }
+                        .distinct()
+                    bpNote = if (published.isEmpty()) {
+                        "Este DAC/aparelho não publica bit-perfect · "
+                    } else {
+                        "Bit-perfect indisponível para ${formatHz(sampleRate)}/${encodingLabel(encoding)} " +
+                            "(o DAC publica: ${published.take(6).joinToString(", ")}) · "
+                    }
+                }
+            }
+
+            // 2) Taxas baixas (abaixo de 48 kHz): fica no mixer padrão do sistema. Pedir mixer USB
+            //    nessas taxas deixava o som distorcido neste tipo de DAC.
+            if (sampleRate < LOW_RATE_HZ) {
+                if (lastKey != null) {
+                    try { am.clearPreferredMixerAttributes(mediaAttributes(), usb) } catch (_: Throwable) { }
+                    resetState()
+                }
+                status = bpNote + "Faixa de ${formatHz(sampleRate)}: mixer padrão do sistema"
+                return
+            }
+
+            // 3) Mixer padrão na taxa da faixa (a partir de 48 kHz), com fallback de formato.
             val rates = supported.map { it.format.sampleRate }.filter { it > 0 }.distinct().sorted()
-            // 1) taxa da faixa; 2) taxa preferida; 3) a mais próxima acima; 4) a maior
+            // taxa da faixa; senão a preferida; senão a mais próxima acima; senão a maior
             val target = when {
                 sampleRate in rates -> sampleRate
                 preferredHz > 0 && preferredHz in rates -> preferredHz
@@ -112,61 +196,66 @@ object UsbMixer {
             val atRate = supported.filter { it.format.sampleRate == target }
             val sameCh = atRate.filter { it.format.channelCount == channelCount }.ifEmpty { atRate }
 
-            val exact = sameCh.filter { it.format.encoding == encoding }
-            val defaultEntries = sameCh.filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_DEFAULT }
-            val bitPerfectEntries = sameCh.filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
-
-            // CORREÇÃO: antes, o bit-perfect só engajava se o encoding do mixer batesse
-            // EXATAMENTE com o do AudioTrack (que só pode ser 16-bit ou float). DACs que
-            // publicam BIT_PERFECT apenas em 24/32-bit packed ficavam sempre no modo
-            // padrão. Agora aceitamos qualquer entrada BIT_PERFECT na taxa da faixa:
-            // encoding exato em primeiro lugar, depois o de maior precisão.
-            val chosen: AudioMixerAttributes? = if (bitPerfect) {
-                bitPerfectEntries.firstOrNull { it.format.encoding == encoding }
-                    ?: bitPerfectEntries.maxByOrNull { encodingRank(it.format.encoding) }
-                    ?: exact.firstOrNull()
-                    ?: defaultEntries.maxByOrNull { encodingRank(it.format.encoding) }
-            } else {
-                exact.firstOrNull { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_DEFAULT }
-                    ?: defaultEntries.maxByOrNull { encodingRank(it.format.encoding) }
-            }
-
-            if (chosen == null) {
-                status = "Nenhum formato compatível em ${formatHz(target)}"
+            fun byPreference(list: List<AudioMixerAttributes>) = list.sortedWith(
+                compareByDescending<AudioMixerAttributes> { it.format.encoding == encoding }
+                    .thenByDescending { encodingRank(it.format.encoding) }
+            )
+            // 16-bit só entra se a própria faixa for 16-bit: reduzir hi-res para 16 bits anularia o objetivo.
+            val minRank = if (encoding == AudioFormat.ENCODING_PCM_16BIT) 1 else 2
+            val candidates = byPreference(
+                sameCh.filter { !isBp(it) && encodingRank(it.format.encoding) >= minRank }
+            )
+            if (candidates.isEmpty()) {
+                status = bpNote + "Nenhum formato compatível em ${formatHz(target)}"
                 return
             }
 
-            val key = "${usb.id}:${chosen.format.sampleRate}:${chosen.format.encoding}:" +
-                "${chosen.format.channelMask}:${chosen.mixerBehavior}"
-            if (key == lastKey) return // já aplicado — evita reabrir a saída (clique/glitch)
+            // Já aplicado e ainda válido? Não reabre a saída (evita clique/glitch).
+            candidates.firstOrNull { keyOf(it) == lastKey }?.let { return }
 
-            val ok = am.setPreferredMixerAttributes(mediaAttributes(), usb, chosen)
-            if (ok) {
-                lastKey = key
-                lastDeviceId = usb.id
-                mixerSampleRate = chosen.format.sampleRate
-                mixerEncoding = chosen.format.encoding
-                mixerBitPerfect = chosen.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
-                // Status honesto: diz exatamente o que o sistema aceitou (ou recusou).
-                status = when {
-                    mixerBitPerfect ->
-                        "Mixer USB bit-perfect · ${formatHz(chosen.format.sampleRate)} · ${encodingLabel(chosen.format.encoding)}"
-                    bitPerfect ->
-                        "DAC não publica bit-perfect em ${formatHz(target)} · saída no mixer padrão ${encodingLabel(chosen.format.encoding)}"
-                    else ->
-                        "Mixer USB configurado · ${formatHz(chosen.format.sampleRate)} · ${encodingLabel(chosen.format.encoding)}"
-                }
-            } else {
-                status = "O sistema recusou o formato pedido (fica no padrão)"
+            val refused = mutableListOf<String>()
+            var applied: AudioMixerAttributes? = null
+            for (m in candidates) {
+                if (tryApply(m)) { applied = m; break }
+                refused += encodingLabel(m.format.encoding)
             }
-            Log.i(
-                TAG,
-                "setPreferredMixerAttributes ok=$ok rate=${chosen.format.sampleRate} " +
-                    "enc=${chosen.format.encoding} bitPerfect=$mixerBitPerfect track=${sampleRate}Hz"
-            )
+            val chosen = applied
+            if (chosen == null) {
+                status = bpNote + "O sistema recusou todos os formatos testados em ${formatHz(target)} " +
+                    "(${refused.distinct().joinToString(", ")}); fica no padrão"
+                return
+            }
+            remember(chosen)
+            val fallbackNote = if (refused.isNotEmpty()) " (recusados antes: ${refused.distinct().joinToString(", ")})" else ""
+            status = bpNote + "Mixer USB configurado · ${formatHz(chosen.format.sampleRate)} · " +
+                "${encodingLabel(chosen.format.encoding)}$fallbackNote"
         } catch (e: Throwable) {
             status = "Falha ao configurar mixer USB: ${e.message}"
             Log.w(TAG, "setPreferredMixerAttributes falhou", e)
+        }
+    }
+
+    /**
+     * Resumo de suporte a bit-perfect para a tela de configurações:
+     * diz se o DAC conectado publica algum formato bit-perfect (não precisa de driver extra:
+     * usa o driver USB de áudio do próprio Android 14+).
+     */
+    fun bitPerfectSupport(context: Context): String {
+        if (Build.VERSION.SDK_INT < 34) return "Requer Android 14 ou mais novo"
+        val usb = UsbAudioRouter.findUsbOutput(context) ?: return "Conecte um DAC USB para verificar"
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return "Indisponível"
+        return try {
+            val bp = am.getSupportedMixerAttributes(usb)
+                .filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
+            if (bp.isEmpty()) {
+                "Este DAC/aparelho não publica bit-perfect"
+            } else {
+                val fmts = bp.map { "${formatHz(it.format.sampleRate)}/${encodingLabel(it.format.encoding)}" }
+                    .distinct()
+                "Disponível: " + fmts.take(6).joinToString(", ") + if (fmts.size > 6) "…" else ""
+            }
+        } catch (_: Throwable) {
+            "Não foi possível consultar o DAC"
         }
     }
 
@@ -199,6 +288,8 @@ object UsbMixer {
     /** Esquece o último formato aplicado (ex.: DAC reconectado) para reaplicar no próximo configure. */
     fun invalidate() {
         lastKey = null
+        rejectedKeys.clear()
+        dumpedDeviceId = -1
     }
 
     private fun resetState() {

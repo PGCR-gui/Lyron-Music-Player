@@ -199,4 +199,193 @@ object LastFmClient {
         }
     }
 
+
+    // ------------------------------------------------------------------
+    // Dashboard do Last.fm (leitura pública; basta o username)
+    // ------------------------------------------------------------------
+
+    data class UserInfo(
+        val name: String,
+        val realName: String?,
+        val url: String?,
+        val country: String?,
+        val imageUrl: String?,
+        val playCount: Long,
+        val artistCount: Long,
+        val trackCount: Long,
+        val albumCount: Long,
+        val lovedCount: Long,
+        val registeredAtMs: Long?
+    )
+
+    data class ScrobbleItem(
+        val title: String,
+        val artist: String,
+        val album: String? = null,
+        val dateMs: Long? = null,
+        val nowPlaying: Boolean = false
+    )
+
+    data class Page<T>(val items: List<T>, val page: Int, val totalPages: Int, val total: Int)
+
+    enum class ChartKind { TRACKS, ARTISTS, ALBUMS }
+
+    data class ChartItem(
+        val name: String,
+        val artist: String,
+        val plays: Int
+    )
+
+    /** O JSON do Last.fm devolve objeto em vez de array quando há um único item. */
+    private fun jsonItems(o: JSONObject?, key: String): List<JSONObject> {
+        val v = o?.opt(key) ?: return emptyList()
+        return when (v) {
+            is org.json.JSONArray -> (0 until v.length()).mapNotNull { v.optJSONObject(it) }
+            is JSONObject -> kotlin.collections.listOf(v)
+            else -> emptyList()
+        }
+    }
+
+    private fun artistOf(o: JSONObject): String {
+        val a = o.opt("artist")
+        return when (a) {
+            is JSONObject -> a.optString("name").ifBlank { a.optString("#text") }
+            is String -> a
+            else -> ""
+        }.trim()
+    }
+
+    private fun userUrl(method: String, user: String, extra: String = ""): String =
+        "${BASE}?method=$method&user=${enc(user)}&api_key=$API_KEY&format=json$extra"
+
+    suspend fun getUserInfo(user: String): UserInfo? = withContext(Dispatchers.IO) {
+        if (user.isBlank()) return@withContext null
+        val u = getJson(userUrl("user.getinfo", user))?.optJSONObject("user") ?: return@withContext null
+        val lovedTotal = getJson(userUrl("user.getlovedtracks", user, "&limit=1"))
+            ?.optJSONObject("lovedtracks")?.optJSONObject("@attr")?.optString("total")
+            ?.toLongOrNull() ?: 0L
+        UserInfo(
+            name = u.optString("name").ifBlank { user },
+            realName = u.optString("realname").takeIf { it.isNotBlank() },
+            url = u.optString("url").takeIf { it.isNotBlank() },
+            country = u.optString("country").takeIf { it.isNotBlank() && it != "None" },
+            imageUrl = pickImage(u.optJSONArray("image")),
+            playCount = u.optString("playcount").toLongOrNull() ?: 0L,
+            artistCount = u.optString("artist_count").toLongOrNull() ?: 0L,
+            trackCount = u.optString("track_count").toLongOrNull() ?: 0L,
+            albumCount = u.optString("album_count").toLongOrNull() ?: 0L,
+            lovedCount = lovedTotal,
+            registeredAtMs = u.optJSONObject("registered")?.optString("unixtime")?.toLongOrNull()?.times(1000L)
+        )
+    }
+
+    /** Uma página de scrobbles (mais recentes primeiro). [fromSec]/[toSec] em epoch segundos. */
+    suspend fun getScrobblePage(
+        user: String,
+        page: Int,
+        limit: Int = 50,
+        fromSec: Long? = null,
+        toSec: Long? = null
+    ): Page<ScrobbleItem>? = withContext(Dispatchers.IO) {
+        if (user.isBlank()) return@withContext null
+        val extra = buildString {
+            append("&limit=${limit.coerceIn(1, 200)}&page=${page.coerceAtLeast(1)}")
+            if (fromSec != null) append("&from=$fromSec")
+            if (toSec != null) append("&to=$toSec")
+        }
+        val root = getJson(userUrl("user.getrecenttracks", user, extra))
+            ?.optJSONObject("recenttracks") ?: return@withContext null
+        val attr = root.optJSONObject("@attr")
+        val items = jsonItems(root, "track").mapNotNull { o ->
+            val title = o.optString("name").trim()
+            if (title.isBlank()) return@mapNotNull null
+            ScrobbleItem(
+                title = title,
+                artist = artistOf(o),
+                album = o.optJSONObject("album")?.optString("#text")?.takeIf { it.isNotBlank() },
+                dateMs = o.optJSONObject("date")?.optString("uts")?.toLongOrNull()?.times(1000L),
+                nowPlaying = o.optJSONObject("@attr")?.optString("nowplaying") == "true"
+            )
+        }
+        Page(
+            items = items,
+            page = attr?.optString("page")?.toIntOrNull() ?: page,
+            totalPages = attr?.optString("totalPages")?.toIntOrNull() ?: 1,
+            total = attr?.optString("total")?.toIntOrNull() ?: items.size
+        )
+    }
+
+    /** Quantidade de scrobbles no intervalo [fromSec, toSec) — 1 chamada por intervalo. */
+    suspend fun getScrobbleCount(user: String, fromSec: Long, toSec: Long): Int? =
+        getScrobblePage(user, page = 1, limit = 1, fromSec = fromSec, toSec = (toSec - 1).coerceAtLeast(fromSec))
+            ?.total
+
+    /** Faixas amadas (mais recentes primeiro), paginadas. */
+    suspend fun getLovedPage(user: String, page: Int, limit: Int = 50): Page<ScrobbleItem>? =
+        withContext(Dispatchers.IO) {
+            if (user.isBlank()) return@withContext null
+            val root = getJson(
+                userUrl("user.getlovedtracks", user, "&limit=${limit.coerceIn(1, 200)}&page=${page.coerceAtLeast(1)}")
+            )?.optJSONObject("lovedtracks") ?: return@withContext null
+            val attr = root.optJSONObject("@attr")
+            val items = jsonItems(root, "track").mapNotNull { o ->
+                val title = o.optString("name").trim()
+                if (title.isBlank()) return@mapNotNull null
+                ScrobbleItem(
+                    title = title,
+                    artist = artistOf(o),
+                    dateMs = o.optJSONObject("date")?.optString("uts")?.toLongOrNull()?.times(1000L)
+                )
+            }
+            Page(
+                items = items,
+                page = attr?.optString("page")?.toIntOrNull() ?: page,
+                totalPages = attr?.optString("totalPages")?.toIntOrNull() ?: 1,
+                total = attr?.optString("total")?.toIntOrNull() ?: items.size
+            )
+        }
+
+    /**
+     * Ranking dentro de um intervalo arbitrário (weekly charts aceitam qualquer from/to).
+     * [fromSec]/[toSec] em epoch segundos. Se ambos forem null, usa o total (overall).
+     */
+    suspend fun getChart(
+        user: String,
+        kind: ChartKind,
+        fromSec: Long?,
+        toSec: Long?,
+        limit: Int = 0
+    ): List<ChartItem>? = withContext(Dispatchers.IO) {
+        if (user.isBlank()) return@withContext null
+        val (method, rootKey, itemKey) = when (kind) {
+            ChartKind.TRACKS -> Triple("user.getweeklytrackchart", "weeklytrackchart", "track")
+            ChartKind.ARTISTS -> Triple("user.getweeklyartistchart", "weeklyartistchart", "artist")
+            ChartKind.ALBUMS -> Triple("user.getweeklyalbumchart", "weeklyalbumchart", "album")
+        }
+        val range = if (fromSec != null && toSec != null) "&from=$fromSec&to=$toSec" else ""
+        val root = if (range.isNotEmpty()) {
+            getJson(userUrl(method, user, range))?.optJSONObject(rootKey)
+        } else {
+            val (m2, k2, i2) = when (kind) {
+                ChartKind.TRACKS -> Triple("user.gettoptracks", "toptracks", "track")
+                ChartKind.ARTISTS -> Triple("user.gettopartists", "topartists", "artist")
+                ChartKind.ALBUMS -> Triple("user.gettopalbums", "topalbums", "album")
+            }
+            val lim = if (limit > 0) limit else 50
+            getJson(userUrl(m2, user, "&period=overall&limit=$lim"))?.optJSONObject(k2)
+        } ?: return@withContext null
+        val itemName = if (range.isNotEmpty()) itemKey else when (kind) {
+            ChartKind.TRACKS -> "track"; ChartKind.ARTISTS -> "artist"; ChartKind.ALBUMS -> "album"
+        }
+        jsonItems(root, itemName).mapNotNull { o ->
+            val name = o.optString("name").trim()
+            if (name.isBlank()) return@mapNotNull null
+            ChartItem(
+                name = name,
+                artist = if (kind == ChartKind.ARTISTS) "" else artistOf(o),
+                plays = o.optString("playcount").toIntOrNull() ?: 0
+            )
+        }.sortedByDescending { it.plays }.let { if (limit > 0) it.take(limit) else it }
+    }
+
 }
