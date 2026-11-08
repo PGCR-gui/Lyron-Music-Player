@@ -11,7 +11,7 @@ val hasProjectM = file("src/main/cpp/projectm/CMakeLists.txt").exists()
 
 android {
     namespace = "com.tolete.player"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "gui.pgcr.music"
@@ -65,9 +65,12 @@ dependencies {
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("androidx.palette:palette-ktx:1.0.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.3.1")
-    implementation("androidx.media3:media3-session:1.3.1")
-    implementation("androidx.media3:media3-ui:1.3.1")
+    // Media3 1.11.x. O AAR do FFmpeg em app/libs PRECISA ser compilado dessa mesma linha (1.11.x):
+    // a API de decoders é @UnstableApi e muda entre versões minor.
+    val media3Version = "1.11.1"
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-session:$media3Version")
+    implementation("androidx.media3:media3-ui:$media3Version")
 
     // Locais em app/libs — listados uma vez só (evita D8 duplicate classes)
     implementation(files(

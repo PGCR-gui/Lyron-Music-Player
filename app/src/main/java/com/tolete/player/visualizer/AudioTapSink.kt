@@ -2,7 +2,6 @@
 
 package com.tolete.player.visualizer
 
-import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.AudioSink
@@ -21,17 +20,16 @@ class AudioTapSink(sink: AudioSink) : ForwardingAudioSink(sink) {
 
     private var tapEnabled = false
 
-    override fun configure(
-        inputFormat: Format,
-        specifiedBufferSize: Int,
-        outputChannels: IntArray?
-    ) {
+    // Media3 1.11: configure(Format, Int, IntArray?) virou `final` e deprecated em
+    // ForwardingAudioSink. O ponto de override agora é configure(AudioSinkConfig).
+    override fun configure(audioSinkConfig: AudioSink.AudioSinkConfig) {
+        val inputFormat = audioSinkConfig.format
         tapEnabled = MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
             inputFormat.sampleRate > 0 && inputFormat.channelCount > 0
         if (tapEnabled) {
             AudioTap.onConfigure(inputFormat.sampleRate, inputFormat.channelCount, inputFormat.pcmEncoding)
         }
-        super.configure(inputFormat, specifiedBufferSize, outputChannels)
+        super.configure(audioSinkConfig)
     }
 
     override fun handleBuffer(

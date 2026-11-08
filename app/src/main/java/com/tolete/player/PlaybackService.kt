@@ -25,7 +25,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
-import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import com.tolete.player.visualizer.AudioTapSink
 import androidx.media3.session.CommandButton
@@ -84,7 +83,7 @@ class PlaybackService : MediaSessionService() {
             val s = speed.coerceIn(0.5f, 2f)
             val apply = Runnable {
                 try {
-                    // Duas formas: API dedicada + PlaybackParameters (Media3 1.3)
+                    // Duas formas: API dedicada + PlaybackParameters
                     p.setPlaybackSpeed(s)
                     p.playbackParameters =
                         androidx.media3.common.PlaybackParameters(s, /* pitch= */ 1f)
@@ -281,7 +280,7 @@ class PlaybackService : MediaSessionService() {
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
-                enableAudioTrackPlaybackParams: Boolean
+                enableAudioOutputPlaybackParameters: Boolean
             ): AudioSink? {
                 val usbExclusive = backendName == "USB_EXCLUSIVE"
                 val usbDevice = if (usbExclusive) {
@@ -299,7 +298,7 @@ class PlaybackService : MediaSessionService() {
                 appliedFloatOutput = useFloat
                 val builder = DefaultAudioSink.Builder(context)
                     .setEnableFloatOutput(useFloat)
-                    .setEnableAudioTrackPlaybackParams(true)
+                    .setEnableAudioOutputPlaybackParameters(true)
                 android.util.Log.i(
                     "PlaybackService",
                     "AudioSink: usbExclusive=$usbExclusive device=${appliedUsbDeviceLabel.ifBlank { "-" }} float=$useFloat"
@@ -311,11 +310,9 @@ class PlaybackService : MediaSessionService() {
                 // reabra a saída USB na taxa da faixa (senão o DAC fica preso em 48 kHz).
                 val appCtx = context.applicationContext
                 return AudioTapSink(object : ForwardingAudioSink(sink) {
-                    override fun configure(
-                        inputFormat: Format,
-                        specifiedBufferSize: Int,
-                        outputChannels: IntArray?
-                    ) {
+                    // Media3 1.11: o override agora é configure(AudioSinkConfig)
+                    override fun configure(audioSinkConfig: AudioSink.AudioSinkConfig) {
+                        val inputFormat = audioSinkConfig.format
                         if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
                             inputFormat.sampleRate > 0
                         ) {
@@ -331,7 +328,7 @@ class PlaybackService : MediaSessionService() {
                                 pcm == C.ENCODING_PCM_8BIT -> AudioFormat.ENCODING_PCM_8BIT
                                 else -> AudioFormat.ENCODING_PCM_16BIT
                             }
-                            val channels = outputChannels?.size?.takeIf { it > 0 }
+                            val channels = audioSinkConfig.outputChannelMapping?.length()?.takeIf { it > 0 }
                                 ?: inputFormat.channelCount
                             com.tolete.player.data.UsbMixer.applyForTrack(
                                 appCtx,
@@ -342,12 +339,12 @@ class PlaybackService : MediaSessionService() {
                                 bitPerfect = bitPerfect
                             )
                         }
-                        super.configure(inputFormat, specifiedBufferSize, outputChannels)
+                        super.configure(audioSinkConfig)
                     }
                 })
             }
 
-            // Media3 1.3.x: (context, extensionRendererMode, mediaCodecSelector,
+            // Media3 1.11 (assinatura igual à 1.3): (context, extensionRendererMode, mediaCodecSelector,
             // enableDecoderFallback, audioSink, eventHandler, eventListener, out)
             override fun buildAudioRenderers(
                 context: Context,
@@ -387,6 +384,12 @@ class PlaybackService : MediaSessionService() {
             )
             .setHandleAudioBecomingNoisy(true) // pausa ao desconectar o fone
             .setWakeMode(C.WAKE_MODE_LOCAL)
+            // Media3 1.11 ligou o "dynamic scheduling" por padrão (era desligado na 1.10.1).
+            // Nele, getCurrentPosition() fica defasado em até ~200 ms e atualiza em degraus
+            // (androidx/media#3286, só corrigido na 1.12). Como o karaokê lê a posição a cada
+            // ~48 ms, a palavra enchia, esvaziava e enchia de novo, e a letra atrasava.
+            // Voltar ao agendamento fixo restaura a posição contínua da versão anterior.
+            .experimentalSetDynamicSchedulingEnabled(false)
             .build()
 
         currentAudioSessionId = player.audioSessionId
