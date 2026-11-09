@@ -31,6 +31,61 @@ object ArtistImageResolver {
         val mbid: String? = null
     )
 
+    /** Opção individual para busca manual com preview e fonte. */
+    data class Candidate(
+        val imageUrl: String?,
+        val bio: String? = null,
+        val source: String,
+        val label: String = source
+    )
+
+    /**
+     * Busca manual: retorna várias opções (com fonte) para o usuário escolher
+     * com preview antes de aplicar.
+     */
+    suspend fun searchCandidates(artistName: String): List<Candidate> = withContext(Dispatchers.IO) {
+        if (artistName.isBlank()) return@withContext emptyList()
+        val out = mutableListOf<Candidate>()
+        val seen = mutableSetOf<String>()
+
+        fun add(url: String?, bio: String?, source: String) {
+            val key = (url ?: "") + "|" + (bio?.take(40) ?: "")
+            if (key in seen) return
+            if (url.isNullOrBlank() && bio.isNullOrBlank()) return
+            seen += key
+            out += Candidate(imageUrl = url, bio = bio, source = source, label = source)
+        }
+
+        val mbid = musicBrainzArtistId(artistName)
+        if (!mbid.isNullOrBlank() && FANART_API_KEY.isNotBlank()) {
+            fanartImage(mbid)?.let { add(it, null, "Fanart.tv") }
+        }
+        try {
+            audioDbArtist(artistName)?.let { (img, adbBio) ->
+                add(img, adbBio, "TheAudioDB")
+            }
+        } catch (_: Exception) { }
+        try {
+            deezerArtistImage(artistName)?.let { add(it, null, "Deezer") }
+        } catch (_: Exception) { }
+        try {
+            val lfm = LastFmClient.getArtistInfo(artistName)
+            if (lfm != null) add(lfm.imageUrl, lfm.bio, "Last.fm")
+        } catch (_: Exception) { }
+        try {
+            val wiki = WikidataClient.searchArtist(artistName)
+            if (wiki != null) {
+                add(
+                    wiki.imageUrl,
+                    wiki.extract?.takeIf { it.isNotBlank() } ?: wiki.description,
+                    "Wikidata"
+                )
+            }
+        } catch (_: Exception) { }
+
+        out
+    }
+
     suspend fun resolve(artistName: String): Result = withContext(Dispatchers.IO) {
         if (artistName.isBlank()) return@withContext Result(null)
 

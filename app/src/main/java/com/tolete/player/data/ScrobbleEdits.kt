@@ -207,12 +207,19 @@ object ScrobbleEdits {
         }?.let { e ->
             Meta(
                 track = e.origTrack.orEmpty().ifBlank { track },
-                artist = e.origArtist ?: artist,
+                // reverso sempre devolve um único artista (o primeiro, pelos separadores da biblioteca)
+                artist = firstArtist(e.origArtist ?: artist),
                 album = e.origAlbum.orEmpty(),
-                albumArtist = e.origAlbumArtist.orEmpty()
+                albumArtist = firstArtist(e.origAlbumArtist.orEmpty())
             )
         }
     }
+
+    /**
+     * Só o primeiro artista de um valor de tag ("A; B" → "A"), usando os separadores e as
+     * exceções configurados na Biblioteca. Usado pelo editor reverso (dashboard/retrospectiva).
+     */
+    fun firstArtist(raw: String): String = firstArtistOnly(raw)
 
     /** True se existe edição manual salva para esta faixa (orig track+artist). */
     fun hasManualEdit(original: Meta): Boolean = findFor(original) != null
@@ -266,9 +273,9 @@ object ScrobbleEdits {
      */
     fun saveEdit(original: Meta, edited: Meta): Boolean {
         val newEdit = Edit(
-            origTrack = norm(original.track),
-            origArtist = norm(original.artist),
-            origAlbum = original.album.takeIf { it.isNotBlank() }?.let(::norm),
+            origTrack = original.track.trim(),
+            origArtist = original.artist.trim(),
+            origAlbum = original.album.takeIf { it.isNotBlank() }?.trim(),
             origAlbumArtist = null,
             track = edited.track.trim(),
             artist = edited.artist.trim(),
@@ -277,9 +284,7 @@ object ScrobbleEdits {
             continueMatching = true
         )
         synchronized(lock) {
-            edits = edits.filterNot {
-                it.origTrack == newEdit.origTrack && it.origArtist == newEdit.origArtist
-            } + newEdit
+            edits = edits.filterNot { sameTarget(it, newEdit) } + newEdit
         }
         _version.value = _version.value + 1
         return writeFile()
@@ -289,7 +294,8 @@ object ScrobbleEdits {
     fun removeEditFor(original: Meta): Boolean {
         synchronized(lock) {
             edits = edits.filterNot {
-                it.origTrack == norm(original.track) && it.origArtist == norm(original.artist)
+                it.origTrack?.let(::norm) == norm(original.track) &&
+                    it.origArtist?.let(::norm) == norm(original.artist)
             }
         }
         _version.value = _version.value + 1
@@ -297,6 +303,37 @@ object ScrobbleEdits {
     }
 
     fun count(): Int = synchronized(lock) { edits.size }
+
+    private fun sameTarget(a: Edit, b: Edit) =
+        a.origTrack?.let(::norm) == b.origTrack?.let(::norm) &&
+            a.origArtist?.let(::norm) == b.origArtist?.let(::norm)
+
+    // ---------- gerenciamento (tela Scrobble › Gerenciar edições) ----------
+
+    /** Cópia da lista de edições salvas, na ordem do arquivo. */
+    fun list(): List<Edit> = synchronized(lock) { edits.toList() }
+
+    /** Troca [old] por [new] (mesma posição) e grava o arquivo. */
+    fun replace(old: Edit, new: Edit): Boolean {
+        var found = false
+        synchronized(lock) {
+            edits = edits.map { if (!found && it == old) { found = true; new } else it }
+        }
+        if (!found) return false
+        _version.value = _version.value + 1
+        return writeFile()
+    }
+
+    /** Apaga [edit]; a faixa volta às tags originais no próximo scrobble. */
+    fun remove(edit: Edit): Boolean {
+        var found = false
+        synchronized(lock) {
+            edits = edits.filter { if (!found && it == edit) { found = true; false } else true }
+        }
+        if (!found) return false
+        _version.value = _version.value + 1
+        return writeFile()
+    }
 
     // ---------- arquivo ----------
 
@@ -387,10 +424,7 @@ object ScrobbleEdits {
         val incoming = try { parse(text) } catch (_: Exception) { return -1 }
         if (incoming.isEmpty()) return 0
         synchronized(lock) {
-            val kept = edits.filterNot { old ->
-                incoming.any { it.origTrack == old.origTrack && it.origArtist == old.origArtist &&
-                    it.origAlbum == old.origAlbum }
-            }
+            val kept = edits.filterNot { old -> incoming.any { sameTarget(it, old) && norm(it.origAlbum.orEmpty()) == norm(old.origAlbum.orEmpty()) } }
             edits = kept + incoming
         }
         _version.value = _version.value + 1

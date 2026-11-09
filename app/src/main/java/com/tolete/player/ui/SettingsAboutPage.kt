@@ -155,7 +155,8 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
             Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null, tint = Color.White.copy(0.5f))
         }
 
-Row(
+        Spacer(Modifier.height(10.dp))
+        Row(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))

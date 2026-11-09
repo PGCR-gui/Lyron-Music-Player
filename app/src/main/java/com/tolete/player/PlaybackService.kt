@@ -603,15 +603,15 @@ class PlaybackService : MediaSessionService() {
             syncScrobbleCurrent(newPlay = false)
         }
 
-        // end-crossfade watcher: fade out no final da faixa (+ rede de segurança contra volume preso em 0)
+        // Crossfade cruzado: no início do fade-out já avança para a próxima faixa e faz fade-in.
+        // Com um único ExoPlayer não há sobreposição real de PCM, mas a troca acontece no
+        // começo da janela de crossfade (não só no fim natural), com fade-out→next→fade-in.
         scope.launch {
             while (true) {
-                delay(200)
+                delay(100)
                 val p = exoPlayerRef ?: continue
                 val cf = crossfadeMs()
                 if (!p.isPlaying) {
-                    // Pausa por foco de áudio/sistema no meio do fade: não deixa terminar em 0,
-                    // senão ao retomar a faixa toca muda.
                     if (endFadeJob?.isActive == true) endFadeJob?.cancel()
                     endFadeJob = null
                     endCrossfadeStarted = false
@@ -621,7 +621,6 @@ class PlaybackService : MediaSessionService() {
                 val remain = if (dur > 0) dur - p.currentPosition else Long.MAX_VALUE
                 val inEndZone = cf > 0 && remain in 1 until cf.toLong()
                 val fading = fadeVolumeJob?.isActive == true || endFadeJob?.isActive == true
-                // Rede de segurança: tocando, sem nenhum fade ativo, fora do trecho final -> volume 100%.
                 if (!fading && p.volume < 0.99f && (!endCrossfadeStarted || !inEndZone)) {
                     p.volume = 1f
                     if (!inEndZone) endCrossfadeStarted = false
@@ -633,7 +632,22 @@ class PlaybackService : MediaSessionService() {
                 if (inEndZone && !endCrossfadeStarted) {
                     endCrossfadeStarted = true
                     val start = p.volume.coerceIn(0.05f, 1f)
-                    rampVolume(p, start, 0f, remain.toInt().coerceAtLeast(50), isEndFade = true)
+                    val half = (cf / 2).coerceAtLeast(80)
+                    // 1) Fade-out da faixa atual na primeira metade da janela
+                    rampVolume(p, start, 0f, half, isEndFade = true) {
+                        // 2) Assim que o fade-out termina (ainda dentro da janela), pula para a próxima
+                        //    e inicia o fade-in — efeito cruzado percebido pelo usuário.
+                        try {
+                            if (p.hasNextMediaItem()) {
+                                p.seekToNextMediaItem()
+                            }
+                            // onMediaItemTransition também faz fade-in; reforça se ainda estiver em 0
+                            if (p.volume < 0.05f) {
+                                p.volume = 0f
+                                rampVolume(p, 0f, 1f, half)
+                            }
+                        } catch (_: Exception) { }
+                    }
                 }
             }
         }

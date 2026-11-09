@@ -32,8 +32,10 @@ object ScrobbleNotifier {
     const val ACTION_FAVORITE = "com.tolete.player.SCROBBLE_FAVORITE"
     /** Disparada ao dispensar a notificação: ela é recriada. */
     const val ACTION_REFRESH = "com.tolete.player.SCROBBLE_REFRESH"
-    /** Toque no corpo da notificação: o app abre as informações da música tocando. */
-    const val ACTION_SHOW_TRACK_INFO = "com.tolete.player.SHOW_TRACK_INFO"
+    /** Toque no corpo da notificação: o app abre o dashboard do Last.fm. */
+    const val ACTION_OPEN_LASTFM_DASHBOARD = "com.tolete.player.OPEN_LASTFM_DASHBOARD"
+    /** @deprecated Mantido só por compatibilidade com PendingIntents antigos. */
+    const val ACTION_SHOW_TRACK_INFO = ACTION_OPEN_LASTFM_DASHBOARD
 
     private const val SYMBOL_SKIP = "\uD83D\uDEAB"          // 🚫 bloqueio
     private const val SYMBOL_EDIT = "\u270F\uFE0F"          // ✏️ lápis
@@ -105,7 +107,7 @@ object ScrobbleNotifier {
                 PendingIntent.getActivity(
                     ctx, 10,
                     Intent(ctx, MainActivity::class.java).apply {
-                        action = ACTION_SHOW_TRACK_INFO
+                        action = ACTION_OPEN_LASTFM_DASHBOARD
                         flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

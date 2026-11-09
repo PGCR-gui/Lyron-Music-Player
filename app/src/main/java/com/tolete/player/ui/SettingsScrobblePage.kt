@@ -65,6 +65,7 @@ internal fun ScrobblePage() {
     var secret by remember { mutableStateOf(LastFmScrobbler.getApiSecret()) }
     var apiKey by remember { mutableStateOf(LastFmScrobbler.getApiKey()) }
     var showSecret by remember { mutableStateOf(false) }
+    var showEditsManager by remember { mutableStateOf(false) }
     val editsCount = remember(editsVersion) { ScrobbleEdits.count() }
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -294,9 +295,22 @@ internal fun ScrobblePage() {
             color = Color.White.copy(0.7f)
         )
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }) {
-            Text("Importar edições")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { showEditsManager = true }, enabled = editsCount > 0) {
+                Text("Gerenciar edições")
+            }
+            OutlinedButton(onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }) {
+                Text("Importar edições")
+            }
         }
+        Text(
+            "No dashboard e na retrospectiva o nome volta ao original do arquivo, sempre só com o primeiro artista " +
+                "(separadores da Biblioteca).",
+            fontSize = 12.sp,
+            color = Color.White.copy(0.45f),
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        if (showEditsManager) ScrobbleEditsManagerDialog(onDismiss = { showEditsManager = false })
 
         Spacer(Modifier.height(24.dp))
         Text(

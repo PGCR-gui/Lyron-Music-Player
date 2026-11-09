@@ -3,9 +3,22 @@ package com.tolete.player.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -53,16 +66,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.tolete.player.data.ArtistImageResolver
@@ -89,7 +108,7 @@ import java.util.Locale
 private enum class LfTab { SCROBBLES, LOVED, DATA, PROFILE }
 
 private enum class LfRange(val label: String) {
-    WEEK("Semanal"), MONTH("Mensal"), YEAR("Anual")
+    WEEK("Semanal"), MONTH("Mensal"), YEAR("Anual"), ALL("Tempo todo")
 }
 
 private val ptBr = Locale("pt", "BR")
@@ -158,12 +177,14 @@ private class OriginalResolver(tracks: List<Track>) {
 
     /** (artista, título) originais. */
     fun track(artist: String, title: String): Pair<String, String> {
-        trackByKey[ScrobbleEdits.key(artist, title)]?.let { return it.artist to it.title }
+        trackByKey[ScrobbleEdits.key(artist, title)]?.let { return ScrobbleEdits.firstArtist(it.artist) to it.title }
         ScrobbleEdits.reverseManual(artist, title)?.let { return it.artist to it.track }
-        return artist to title
+        return ScrobbleEdits.firstArtist(artist) to title
     }
 
-    fun artist(name: String): String = artistByKey[ScrobbleEdits.key(name, "")] ?: name
+    /** Sempre um único artista: o primeiro, pelos separadores da Biblioteca. */
+    fun artist(name: String): String =
+        ScrobbleEdits.firstArtist(artistByKey[ScrobbleEdits.key(name, "")] ?: name)
 
     // ----- capas locais (arquivos do app) -----
 
@@ -180,7 +201,8 @@ private class OriginalResolver(tracks: List<Track>) {
 
     /** (artista, álbum) originais. */
     fun album(artist: String, album: String): Pair<String, String> =
-        albumByKey[ScrobbleEdits.key(artist, album)] ?: (artist to album)
+        (albumByKey[ScrobbleEdits.key(artist, album)] ?: (artist to album))
+            .let { (a, al) -> ScrobbleEdits.firstArtist(a) to al }
 }
 
 private fun mergeTracks(items: List<ChartItem>, r: OriginalResolver?): List<ChartItem> {
@@ -254,19 +276,21 @@ private fun buildRange(range: LfRange, offset: Int, nowMs: Long): RangeSpec {
     fun isNow(fromSec: Long, toSec: Long) = nowMs / 1000L in fromSec until toSec
 
     return when (range) {
-        // Plays por dia da semana
+        // Plays por dia da semana (domingo → sábado)
         LfRange.WEEK -> {
-            cal.set(Calendar.DAY_OF_WEEK, cal.firstDayOfWeek)
+            val dow = cal.get(Calendar.DAY_OF_WEEK) // 1=Dom … 7=Sáb
+            val daysFromSunday = dow - Calendar.SUNDAY
+            cal.add(Calendar.DAY_OF_YEAR, -daysFromSunday)
             cal.add(Calendar.WEEK_OF_YEAR, offset)
             val fmt = SimpleDateFormat("dd/MM", ptBr)
             val startLabel = fmt.format(cal.time)
             val buckets = ArrayList<BucketSpec>(7)
-            repeat(7) {
+            val labels = arrayOf("Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb")
+            repeat(7) { i ->
                 val from = sec(cal)
-                val label = weekdayNames[cal.get(Calendar.DAY_OF_WEEK) - 1]
                 cal.add(Calendar.DAY_OF_YEAR, 1)
                 val to = sec(cal)
-                buckets.add(BucketSpec(label, from, to, isNow(from, to)))
+                buckets.add(BucketSpec(labels[i], from, to, isNow(from, to)))
             }
             val endLabel = fmt.format(java.util.Date((buckets.last().toSec - 1) * 1000L))
             val title = when (offset) {
@@ -275,6 +299,32 @@ private fun buildRange(range: LfRange, offset: Int, nowMs: Long): RangeSpec {
                 else -> "$startLabel – $endLabel"
             }
             RangeSpec(title, buckets)
+        }
+        // Todo o histórico — gráfico por ano
+        LfRange.ALL -> {
+            val nowYear = cal.get(Calendar.YEAR)
+            val startYear = maxOf(2002, nowYear - 15)
+            val buckets = ArrayList<BucketSpec>()
+            for (y in startYear..nowYear) {
+                val a = Calendar.getInstance().apply {
+                    clear()
+                    set(Calendar.YEAR, y)
+                    set(Calendar.MONTH, Calendar.JANUARY)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    startOfDay(this)
+                }
+                val b = Calendar.getInstance().apply {
+                    clear()
+                    set(Calendar.YEAR, y + 1)
+                    set(Calendar.MONTH, Calendar.JANUARY)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    startOfDay(this)
+                }
+                val from = sec(a)
+                val to = sec(b)
+                buckets.add(BucketSpec(y.toString(), from, to, isNow(from, to)))
+            }
+            RangeSpec("Tempo todo", buckets)
         }
         // Plays por semana do mês (blocos de 7 dias a partir do dia 1)
         LfRange.MONTH -> {
@@ -320,23 +370,38 @@ private fun buildRange(range: LfRange, offset: Int, nowMs: Long): RangeSpec {
     }
 }
 
-/** Carrega contagens por bucket + rankings do intervalo. Poucas chamadas em paralelo (limite do Last.fm). */
+/** Carrega contagens por bucket + rankings do intervalo. Resiliente a falhas parciais da API. */
 private suspend fun loadRaw(user: String, spec: RangeSpec, sem: Semaphore): RawData? = coroutineScope {
     val nowSec = System.currentTimeMillis() / 1000L
+    // "Tempo todo" (vários anos) ou ranking overall: charts sem from/to
+    val isAllTimeYears = spec.title == "Tempo todo" && spec.buckets.size > 1
     val countJobs = spec.buckets.map { b ->
         async {
-            if (b.fromSec > nowSec) 0
-            else sem.withPermit { LastFmClient.getScrobbleCount(user, b.fromSec, b.toSec) }
+            when {
+                b.fromSec > nowSec -> 0
+                else -> sem.withPermit { LastFmClient.getScrobbleCount(user, b.fromSec, b.toSec) }
+            }
         }
     }
-    val tracksJob = async { sem.withPermit { LastFmClient.getChart(user, ChartKind.TRACKS, spec.fromSec, spec.toSec) } }
-    val artistsJob = async { sem.withPermit { LastFmClient.getChart(user, ChartKind.ARTISTS, spec.fromSec, spec.toSec) } }
-    val albumsJob = async { sem.withPermit { LastFmClient.getChart(user, ChartKind.ALBUMS, spec.fromSec, spec.toSec) } }
+    // Ranking overall no Tempo todo; nos demais períodos usa from/to
+    val fromForChart = if (isAllTimeYears) null else spec.fromSec
+    val toForChart = if (isAllTimeYears) null else spec.toSec
+    val tracksJob = async {
+        sem.withPermit { LastFmClient.getChart(user, ChartKind.TRACKS, fromForChart, toForChart) } ?: emptyList()
+    }
+    val artistsJob = async {
+        sem.withPermit { LastFmClient.getChart(user, ChartKind.ARTISTS, fromForChart, toForChart) } ?: emptyList()
+    }
+    val albumsJob = async {
+        sem.withPermit { LastFmClient.getChart(user, ChartKind.ALBUMS, fromForChart, toForChart) } ?: emptyList()
+    }
     val counts = countJobs.awaitAll()
     val tracks = tracksJob.await()
     val artists = artistsJob.await()
     val albums = albumsJob.await()
-    if (counts.any { it == null } || tracks == null || artists == null || albums == null) {
+    // Só falha de verdade se nenhuma contagem veio e rankings estão vazios
+    val anyCount = counts.any { it != null }
+    if (!anyCount && tracks.isEmpty() && artists.isEmpty() && albums.isEmpty()) {
         null
     } else {
         RawData(counts.map { it ?: 0 }, tracks, artists, albums)
@@ -389,6 +454,7 @@ fun LastFmDashboardScreen(
                 }
                 .background(rememberFloatingGradient(appColors))
         ) {
+            FloatingIconsBackground(kind = "lastfm")
             Column(Modifier.fillMaxSize().statusBarsPadding()) {
                 // Cabeçalho
                 Row(
@@ -465,6 +531,7 @@ private fun ScrobbleList(
     var loading by remember(user, loved, refreshKey) { mutableStateOf(false) }
     var failed by remember(user, loved, refreshKey) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    var detail by remember { mutableStateOf<ScrobbleItem?>(null) }
 
     fun loadNext() {
         if (loading || page >= totalPages) return
@@ -523,7 +590,9 @@ private fun ScrobbleList(
                             else -> ""
                         },
                         trailingColor = if (it.nowPlaying) appColors.accent else Color.White.copy(0.5f),
-                        art = { TrackArt(resolver, it.artist, it.title, it.album) }
+                        nowPlaying = it.nowPlaying,
+                        art = { TrackArt(resolver, it.artist, it.title, it.album) },
+                        onClick = { detail = it.copy(artist = artist, title = title, album = album) }
                     )
                 }
                 if (page < totalPages) {
@@ -545,6 +614,17 @@ private fun ScrobbleList(
             }
         }
     }
+
+    detail?.let { item ->
+        LfEntityDetailSheet(
+            user = user,
+            artist = item.artist,
+            title = item.title,
+            album = item.album,
+            appColors = appColors,
+            onDismiss = { detail = null }
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -562,6 +642,8 @@ private fun DataTab(
     var range by remember { mutableStateOf(LfRange.WEEK) }
     var offset by remember { mutableIntStateOf(0) }
     var kind by remember { mutableStateOf(ChartKind.TRACKS) }
+    var showPeriodSummary by remember { mutableStateOf(false) }
+    var showExportRetrospective by remember { mutableStateOf(false) }
     val sem = remember { Semaphore(4) }
     val cache = remember(user) { HashMap<String, RawData>() }
 
@@ -607,27 +689,58 @@ private fun DataTab(
                 }
             }
         }
-        // Navegação entre períodos
+        // Navegação entre períodos — toque no título abre sumário
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { offset-- }) {
-                    Icon(Icons.Rounded.ChevronLeft, contentDescription = "Período anterior", tint = Color.White)
-                }
+            if (range == LfRange.ALL) {
                 Text(
                     spec.title,
                     color = Color.White,
                     fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .clickable { showPeriodSummary = true }
                 )
-                IconButton(onClick = { if (offset < 0) offset++ }, enabled = offset < 0) {
-                    Icon(
-                        Icons.Rounded.ChevronRight,
-                        contentDescription = "Próximo período",
-                        tint = if (offset < 0) Color.White else Color.White.copy(0.25f)
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { offset-- }) {
+                        Icon(Icons.Rounded.ChevronLeft, contentDescription = "Período anterior", tint = Color.White)
+                    }
+                    Text(
+                        spec.title,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showPeriodSummary = true }
+                            .padding(vertical = 6.dp)
                     )
+                    IconButton(onClick = { if (offset < 0) offset++ }, enabled = offset < 0) {
+                        Icon(
+                            Icons.Rounded.ChevronRight,
+                            contentDescription = "Próximo período",
+                            tint = if (offset < 0) Color.White else Color.White.copy(0.25f)
+                        )
+                    }
                 }
             }
+        }
+        item {
+            Text(
+                "Exportar retrospectiva",
+                color = Color.Black,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(appColors.accent)
+                    .clickable(enabled = data != null) { showExportRetrospective = true }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            )
         }
         when {
             data == null && !failed -> item {
@@ -667,6 +780,7 @@ private fun DataTab(
                                 LfRange.WEEK -> "por dia da semana"
                                 LfRange.MONTH -> "por semana do mês (dias 1–7, 8–14, …)"
                                 LfRange.YEAR -> "por mês do ano"
+                                LfRange.ALL -> "por ano"
                             },
                             color = Color.White.copy(0.5f),
                             fontSize = 12.sp,
@@ -708,6 +822,602 @@ private fun DataTab(
                             }
                         )
                     }
+                }
+            }
+        }
+    }
+
+    if (showPeriodSummary && data != null) {
+        PeriodSummarySheet(
+            range = range,
+            spec = spec,
+            data = data,
+            appColors = appColors,
+            onDismiss = { showPeriodSummary = false }
+        )
+    }
+    if (showExportRetrospective && data != null) {
+        RetrospectiveExportSheet(
+            user = user,
+            range = range,
+            spec = spec,
+            data = data,
+            resolver = resolver,
+            appColors = appColors,
+            libraryTracks = emptyList(), // resolver já carrega a lib; fotos usam LibraryCache
+            onDismiss = { showExportRetrospective = false }
+        )
+    }
+}
+
+@Composable
+private fun PeriodSummarySheet(
+    range: LfRange,
+    spec: RangeSpec,
+    data: RawData,
+    appColors: AppColors,
+    onDismiss: () -> Unit
+) {
+    val total = data.counts.sum()
+    val peakIdx = data.counts.indices.maxByOrNull { data.counts[it] } ?: 0
+    val peakLabel = spec.buckets.getOrNull(peakIdx)?.label ?: "—"
+    val peakCount = data.counts.getOrElse(peakIdx) { 0 }
+    val activeBuckets = data.counts.count { it > 0 }
+    val topTrack = data.tracks.firstOrNull()
+    val topArtist = data.artists.firstOrNull()
+    val topAlbum = data.albums.firstOrNull()
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xE61A1528),
+        title = {
+            Text(spec.title, color = Color.White, fontWeight = FontWeight.SemiBold)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    when (range) {
+                        LfRange.WEEK -> "Sumário da semana"
+                        LfRange.MONTH -> "Sumário do mês"
+                        LfRange.YEAR -> "Sumário do ano"
+                        LfRange.ALL -> "Sumário de todo o tempo"
+                    },
+                    color = Color.White.copy(0.6f),
+                    fontSize = 13.sp
+                )
+                SummaryLine("Total de plays", "$total")
+                SummaryLine("Pico ($peakLabel)", "$peakCount plays")
+                SummaryLine("Períodos ativos", "$activeBuckets / ${spec.buckets.size}")
+                topTrack?.let {
+                    SummaryLine("Música #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
+                }
+                topArtist?.let {
+                    SummaryLine("Artista #1", "${it.name} (${it.plays})")
+                }
+                topAlbum?.let {
+                    SummaryLine("Álbum #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
+                }
+            }
+        },
+        confirmButton = {
+            Text(
+                "Fechar",
+                color = appColors.accent,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clickable(onClick = onDismiss)
+                    .padding(8.dp)
+            )
+        }
+    )
+}
+
+@Composable
+private fun SummaryLine(label: String, value: String) {
+    Column {
+        Text(label, color = Color.White.copy(0.5f), fontSize = 12.sp)
+        Text(value, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/**
+ * Exportação de retrospectiva: fotos estilo stories (+ opção de gerar vídeos 8s).
+ * Nomes passam por [OriginalResolver]/edições de scrobble como no dashboard.
+ */
+@Composable
+private fun RetrospectiveExportSheet(
+    user: String,
+    range: LfRange,
+    spec: RangeSpec,
+    data: RawData,
+    resolver: OriginalResolver?,
+    appColors: AppColors,
+    libraryTracks: List<Track> = emptyList(),
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var busy by remember { mutableStateOf(false) }
+    var resultMsg by remember { mutableStateOf<String?>(null) }
+    var photoFiles by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
+    var exportDir by remember { mutableStateOf<java.io.File?>(null) }
+    var showStories by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    // Ranking com nomes revertidos (edições + biblioteca)
+    val mergedTracks = remember(data, resolver) { mergeTracks(data.tracks, resolver) }
+    val mergedArtists = remember(data, resolver) { mergeArtists(data.artists, resolver) }
+    val mergedAlbums = remember(data, resolver) { mergeAlbums(data.albums, resolver) }
+
+    val retroTheme = remember(appColors) {
+        com.tolete.player.data.RetrospectiveCardRenderer.ThemeColors(
+            primary = appColors.accent.toArgb(),
+            secondary = appColors.gradientTop.toArgb(),
+            surface = appColors.surface.toArgb(),
+            isLight = appColors.isLight
+        )
+    }
+
+    var videoFiles by remember { mutableStateOf<Map<String, java.io.File>>(emptyMap()) }
+    var videoBusy by remember { mutableStateOf(false) }
+    var videoMsg by remember { mutableStateOf<String?>(null) }
+
+    fun runExport() {
+        busy = true
+        resultMsg = null
+        videoFiles = emptyMap()
+        videoMsg = null
+        scope.launch {
+            try {
+                resultMsg = "Salvando manifesto…"
+                val path = withContext(Dispatchers.IO) {
+                    com.tolete.player.data.RetrospectiveExporter.exportFromRaw(
+                        context = context,
+                        user = user,
+                        rangeLabel = range.label,
+                        periodTitle = spec.title,
+                        totalPlays = data.counts.sum(),
+                        bucketLabels = spec.buckets.map { it.label },
+                        bucketCounts = data.counts,
+                        topTracks = mergedTracks.map {
+                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                        },
+                        topArtists = mergedArtists.map {
+                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                        },
+                        topAlbums = mergedAlbums.map {
+                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                        }
+                    )
+                }
+                val dir = java.io.File(path)
+                exportDir = dir
+                resultMsg = "Gerando fotos…"
+                val lib = withContext(Dispatchers.IO) {
+                    libraryTracks.ifEmpty {
+                        com.tolete.player.data.LibraryCache(context).load().orEmpty()
+                    }
+                }
+                val photos = withContext(Dispatchers.IO) {
+                    com.tolete.player.data.RetrospectivePhotoGenerator.generateAll(context, dir, lib, retroTheme)
+                }
+                photoFiles = photos.photos
+                resultMsg = if (photos.photos.isEmpty()) {
+                    "Falha: ${photos.failed.firstOrNull() ?: "nenhuma foto gerada"}"
+                } else "${photos.photos.size} fotos prontas"
+                if (photos.photos.isNotEmpty()) showStories = true
+            } catch (e: Exception) {
+                resultMsg = "Falha: ${e.message}"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    var videoCards by remember { mutableStateOf<List<com.tolete.player.video.RetrospectiveVideoGenerator.CardAudioOptions>?>(null) }
+    var videoOpts by remember { mutableStateOf(com.tolete.player.video.RetrospectiveVideoGenerator.VideoOptions()) }
+
+    /** Abre as opções (duração e música de cada card) antes de renderizar os vídeos. */
+    fun openVideoOptions() {
+        val dir = exportDir ?: return
+        if (videoBusy) return
+        videoBusy = true
+        videoMsg = "Carregando músicas da biblioteca…"
+        scope.launch {
+            try {
+                val lib = withContext(Dispatchers.IO) {
+                    libraryTracks.ifEmpty {
+                        com.tolete.player.data.LibraryCache(context).load().orEmpty()
+                    }
+                }
+                videoCards = com.tolete.player.video.RetrospectiveVideoGenerator.audioOptions(context, dir, lib)
+                videoMsg = null
+            } catch (e: Exception) {
+                videoMsg = "Falha ao carregar as opções: ${e.message}"
+            } finally {
+                videoBusy = false
+            }
+        }
+    }
+
+    /** Renderiza os vídeos na mesma pasta das fotos (sem refazer o manifesto nem as fotos). */
+    fun runVideos(options: com.tolete.player.video.RetrospectiveVideoGenerator.VideoOptions) {
+        val dir = exportDir ?: return
+        if (videoBusy) return
+        videoBusy = true
+        videoMsg = "Preparando vídeos…"
+        scope.launch {
+            try {
+                val lib = withContext(Dispatchers.IO) {
+                    libraryTracks.ifEmpty {
+                        com.tolete.player.data.LibraryCache(context).load().orEmpty()
+                    }
+                }
+                val vid = com.tolete.player.video.RetrospectiveVideoGenerator.generateAll(
+                    context = context,
+                    exportDir = dir,
+                    libraryTracks = lib,
+                    theme = retroTheme,
+                    options = options
+                ) { idx, total, frac ->
+                    scope.launch { videoMsg = "Vídeo ${idx + 1}/$total · ${(frac * 100).toInt()}%" }
+                }
+                videoFiles = vid.videos.associateBy { it.nameWithoutExtension }
+                videoMsg = when {
+                    vid.videos.isEmpty() -> "Nenhum vídeo gerado: ${vid.failed.firstOrNull() ?: "erro desconhecido"}"
+                    vid.failed.isNotEmpty() -> "${vid.videos.size} vídeos prontos · falhou: ${vid.failed.first()}"
+                    else -> "${vid.videos.size} vídeos prontos"
+                }
+            } catch (e: Exception) {
+                videoMsg = "Falha nos vídeos: ${e.message}"
+            } finally {
+                videoBusy = false
+            }
+        }
+    }
+
+    if (showStories && photoFiles.isNotEmpty()) {
+        RetrospectiveStoriesViewer(
+            photos = photoFiles,
+            videos = videoFiles,
+            videoBusy = videoBusy,
+            videoMsg = videoMsg,
+            appColors = appColors,
+            onClose = {
+                if (videoBusy) com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
+                showStories = false
+                onDismiss()
+            },
+            onExportVideos = { openVideoOptions() },
+            onCancelVideos = {
+                com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
+                videoMsg = "Cancelando…"
+            }
+        )
+        videoCards?.let { cardsOpt ->
+            RetrospectiveVideoOptionsDialog(
+                cards = cardsOpt,
+                initial = videoOpts,
+                onDismiss = { videoCards = null },
+                onGenerate = { opts ->
+                    videoOpts = opts
+                    videoCards = null
+                    runVideos(opts)
+                }
+            )
+        }
+        return
+    }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        containerColor = Color(0xE61A1528),
+        title = { Text("Exportar retrospectiva", color = Color.White, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Período: ${spec.title}\n" +
+                        "Gera 10 cards em foto (stories). Nomes voltam ao original das tags (só o primeiro artista).\n" +
+                        "Depois você pode passar pelos cards, compartilhar/salvar e exportar os vídeos (3–15 s, com música).",
+                    color = Color.White.copy(0.75f),
+                    fontSize = 13.sp
+                )
+                resultMsg?.let {
+                    Text(it, color = appColors.accent, fontSize = 13.sp)
+                }
+                if (busy) {
+                    CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                }
+            }
+        },
+        confirmButton = {
+            Text(
+                if (busy) "Gerando…" else "Gerar fotos",
+                color = if (busy) Color.White.copy(0.4f) else appColors.accent,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clickable(enabled = !busy) { runExport() }
+                    .padding(8.dp)
+            )
+        },
+        dismissButton = {
+            Text(
+                if (busy) "Cancelar" else "Fechar",
+                color = Color.White.copy(0.7f),
+                modifier = Modifier
+                    .clickable {
+                        if (busy) {
+                            com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
+                            resultMsg = "Cancelando…"
+                        } else onDismiss()
+                    }
+                    .padding(8.dp)
+            )
+        }
+    )
+}
+
+/**
+ * Viewer fullscreen estilo stories. A foto é mostrada inteira (sem cortar as laterais em telas mais
+ * altas que 9:16); o fundo da tela usa a cor do próprio card, então as sobras ficam invisíveis.
+ */
+@Composable
+private fun RetrospectiveStoriesViewer(
+    photos: List<java.io.File>,
+    videos: Map<String, java.io.File>,
+    videoBusy: Boolean,
+    videoMsg: String?,
+    appColors: AppColors,
+    onClose: () -> Unit,
+    onExportVideos: () -> Unit,
+    onCancelVideos: () -> Unit
+) {
+    val context = LocalContext.current
+    var index by remember { mutableIntStateOf(0) }
+    val photo = photos.getOrNull(index) ?: return
+    val isLast = index >= photos.lastIndex
+    val video = videos[photo.nameWithoutExtension]
+
+    // Cor de fundo do card (amostrada na borda direita, longe das formas decorativas)
+    val bg by produceState(Color.Black, photo) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                val o = android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 }
+                val bmp = android.graphics.BitmapFactory.decodeFile(photo.absolutePath, o)
+                val c = bmp?.getPixel(bmp.width - 1, bmp.height / 2)
+                bmp?.recycle()
+                if (c != null) Color(c) else Color.Black
+            } catch (_: Exception) { Color.Black }
+        }
+    }
+    val fg = if (bg.luminance() > 0.5f) Color(0xFF14101C) else Color.White
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(bg)
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(start = 10.dp, end = 2.dp, top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        photos.forEachIndexed { i, _ ->
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(if (i <= index) fg else fg.copy(0.25f))
+                            )
+                        }
+                    }
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Rounded.ArrowBack, contentDescription = "Fechar", tint = fg)
+                    }
+                }
+
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    coil.compose.AsyncImage(
+                        model = photo,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Row(Modifier.fillMaxSize()) {
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .clickable(indication = null, interactionSource = remember {
+                                    androidx.compose.foundation.interaction.MutableInteractionSource()
+                                }) { if (index > 0) index-- else onClose() }
+                        )
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .clickable(indication = null, interactionSource = remember {
+                                    androidx.compose.foundation.interaction.MutableInteractionSource()
+                                }) { if (index < photos.lastIndex) index++ }
+                        )
+                    }
+                }
+
+                Column(
+                    Modifier
+                        .navigationBarsPadding()
+                        .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 36.dp)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Compartilhar",
+                            color = Color.Black,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(Color.White)
+                                .clickable {
+                                    ShareImageActions.shareFile(
+                                        context, photo, "Retrospectiva Lyron",
+                                        "Minha retrospectiva no Lyron", "image/jpeg"
+                                    )
+                                }
+                                .padding(vertical = 12.dp)
+                        )
+                        Text(
+                            "Salvar",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(appColors.accent.copy(0.9f))
+                                .clickable { ShareImageActions.saveToLyron(context, photo, "Retrospectives") }
+                                .padding(vertical = 12.dp)
+                        )
+                    }
+
+                    // ----- vídeos -----
+                    when {
+                        videoBusy -> {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = fg,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    videoMsg ?: "Gerando vídeos…",
+                                    color = fg,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "Cancelar",
+                                    color = fg.copy(0.8f),
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.clickable(onClick = onCancelVideos).padding(6.dp)
+                                )
+                            }
+                        }
+                        video != null -> {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    "Compartilhar vídeo",
+                                    color = fg,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(fg.copy(0.16f))
+                                        .clickable {
+                                            ShareImageActions.shareFile(
+                                                context, video, "Retrospectiva Lyron",
+                                                "Minha retrospectiva no Lyron", "video/mp4"
+                                            )
+                                        }
+                                        .padding(vertical = 12.dp)
+                                )
+                                Text(
+                                    "Salvar vídeo",
+                                    color = fg,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(fg.copy(0.16f))
+                                        .clickable { ShareImageActions.saveToLyron(context, video, "Retrospectives") }
+                                        .padding(vertical = 12.dp)
+                                )
+                            }
+                        }
+                        else -> {
+                            Text(
+                                if (videos.isEmpty()) "Exportar vídeos…" else "Este card não tem vídeo — exportar de novo…",
+                                color = fg,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(fg.copy(0.16f))
+                                    .clickable(onClick = onExportVideos)
+                                    .padding(vertical = 12.dp)
+                            )
+                        }
+                    }
+                    if (!videoBusy && !videoMsg.isNullOrBlank()) {
+                        Text(videoMsg, color = fg.copy(0.8f), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    }
+
+                    if (isLast) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                "Salvar todas as fotos",
+                                color = fg,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(fg.copy(0.10f))
+                                    .clickable {
+                                        photos.forEach { ShareImageActions.saveToLyron(context, it, "Retrospectives") }
+                                    }
+                                    .padding(vertical = 10.dp)
+                            )
+                            if (videos.isNotEmpty()) {
+                                Text(
+                                    "Salvar todos os vídeos",
+                                    color = fg,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(fg.copy(0.10f))
+                                        .clickable {
+                                            videos.values.sortedBy { it.name }.forEach {
+                                                ShareImageActions.saveToLyron(context, it, "Retrospectives")
+                                            }
+                                        }
+                                        .padding(vertical = 10.dp)
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "${index + 1} / ${photos.size}",
+                        color = fg.copy(0.6f),
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
@@ -926,10 +1636,25 @@ private fun ListRow(
     trailing: String,
     trailingColor: Color,
     rank: Int? = null,
-    art: (@Composable () -> Unit)? = null
+    art: (@Composable () -> Unit)? = null,
+    nowPlaying: Boolean = false,
+    onClick: (() -> Unit)? = null
 ) {
+    val shape = RoundedCornerShape(14.dp)
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 10.dp, horizontal = 4.dp),
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = if (nowPlaying) 4.dp else 6.dp, horizontal = 4.dp)
+            .clip(shape)
+            .then(
+                if (nowPlaying) {
+                    Modifier
+                        .background(trailingColor.copy(alpha = 0.18f))
+                        .border(1.dp, trailingColor.copy(alpha = 0.55f), shape)
+                } else Modifier
+            )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 8.dp, horizontal = if (nowPlaying) 10.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (rank != null) {
@@ -940,14 +1665,29 @@ private fun ListRow(
             Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                title,
+                color = Color.White,
+                fontWeight = if (nowPlaying) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             if (subtitle.isNotBlank()) {
                 Text(subtitle, color = Color.White.copy(0.55f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         if (trailing.isNotBlank()) {
             Spacer(Modifier.width(8.dp))
-            Text(trailing, color = trailingColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            if (nowPlaying) {
+                Text(
+                    "● $trailing",
+                    color = trailingColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            } else {
+                Text(trailing, color = trailingColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }
@@ -1069,6 +1809,198 @@ private fun formatWhen(ms: Long): String {
             val sameYear = Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.YEAR) ==
                 Calendar.getInstance().get(Calendar.YEAR)
             SimpleDateFormat(if (sameYear) "dd/MM HH:mm" else "dd/MM/yy HH:mm", ptBr).format(java.util.Date(ms))
+        }
+    }
+}
+
+private fun formatCount(n: Long): String = when {
+    n >= 1_000_000L -> String.format(ptBr, "%.1fM", n / 1_000_000.0)
+    n >= 1_000L -> String.format(ptBr, "%.1fk", n / 1_000.0)
+    else -> n.toString()
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LfEntityDetailSheet(
+    user: String,
+    artist: String,
+    title: String,
+    album: String?,
+    appColors: AppColors,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var mode by remember { mutableStateOf("track") } // track | artist | album
+    val trackStats by produceState<LastFmClient.TrackStats?>(null, artist, title, user) {
+        value = withContext(Dispatchers.IO) { LastFmClient.getTrackStats(artist, title, user) }
+    }
+    val artistStats by produceState<LastFmClient.EntityStats?>(null, artist, user) {
+        value = withContext(Dispatchers.IO) { LastFmClient.getArtistStats(artist, user) }
+    }
+    val albumStats by produceState<LastFmClient.EntityStats?>(null, artist, album, user) {
+        value = if (album.isNullOrBlank()) null
+        else withContext(Dispatchers.IO) { LastFmClient.getAlbumStats(artist, album, user) }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xE61A1528),
+        contentColor = Color.White,
+        dragHandle = {
+            Box(
+                Modifier
+                    .padding(top = 10.dp, bottom = 4.dp)
+                    .size(width = 40.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(0.35f))
+            )
+        }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    "track" to "Música",
+                    "artist" to "Artista",
+                    "album" to "Álbum"
+                ).forEach { (key, label) ->
+                    if (key == "album" && album.isNullOrBlank()) return@forEach
+                    Chip(label, mode == key, appColors) { mode = key }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+
+            when (mode) {
+                "track" -> {
+                    val s = trackStats
+                    Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(artist, color = Color.White.copy(0.7f), fontSize = 14.sp)
+                    album?.let {
+                        Text(it, color = Color.White.copy(0.5f), fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    if (s == null) {
+                        CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                    } else {
+                        StatsGrid(
+                            appColors,
+                            "Seus scrobbles" to formatCount(s.userPlayCount),
+                            "Ouvintes" to formatCount(s.listeners),
+                            "Scrobbles totais" to formatCount(s.globalPlayCount)
+                        )
+                        s.url?.let { url ->
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                "Abrir no Last.fm",
+                                color = appColors.accent,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(appColors.accent.copy(0.15f))
+                                    .clickable {
+                                        try {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        } catch (_: Exception) { }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+                "artist" -> {
+                    val s = artistStats
+                    Text(artist, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(16.dp))
+                    if (s == null) {
+                        CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                    } else {
+                        StatsGrid(
+                            appColors,
+                            "Seus scrobbles" to formatCount(s.userPlayCount),
+                            "Ouvintes" to formatCount(s.listeners),
+                            "Scrobbles totais" to formatCount(s.globalPlayCount)
+                        )
+                        s.url?.let { url ->
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                "Abrir artista no Last.fm",
+                                color = appColors.accent,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(appColors.accent.copy(0.15f))
+                                    .clickable {
+                                        try {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        } catch (_: Exception) { }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    val s = albumStats
+                    Text(album.orEmpty(), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(artist, color = Color.White.copy(0.7f), fontSize = 14.sp)
+                    Spacer(Modifier.height(16.dp))
+                    if (s == null) {
+                        CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                    } else {
+                        StatsGrid(
+                            appColors,
+                            "Seus scrobbles" to formatCount(s.userPlayCount),
+                            "Ouvintes" to formatCount(s.listeners),
+                            "Scrobbles totais" to formatCount(s.globalPlayCount)
+                        )
+                        s.url?.let { url ->
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                "Abrir álbum no Last.fm",
+                                color = appColors.accent,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(appColors.accent.copy(0.15f))
+                                    .clickable {
+                                        try {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        } catch (_: Exception) { }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun StatsGrid(appColors: AppColors, vararg rows: Pair<String, String>) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White.copy(0.08f))
+            .border(1.dp, Color.White.copy(0.12f), RoundedCornerShape(18.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        rows.forEach { (label, value) ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(label, color = Color.White.copy(0.65f), modifier = Modifier.weight(1f))
+                Text(value, color = appColors.accent, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
         }
     }
 }

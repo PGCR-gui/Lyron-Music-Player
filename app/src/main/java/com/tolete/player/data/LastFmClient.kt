@@ -345,6 +345,100 @@ object LastFmClient {
             )
         }
 
+    data class TrackStats(
+        val title: String,
+        val artist: String,
+        val album: String?,
+        val userPlayCount: Long,
+        val listeners: Long,
+        val globalPlayCount: Long,
+        val url: String?,
+        val imageUrl: String?
+    )
+
+    data class EntityStats(
+        val name: String,
+        val artist: String? = null,
+        val userPlayCount: Long,
+        val listeners: Long,
+        val globalPlayCount: Long,
+        val url: String?,
+        val imageUrl: String?
+    )
+
+    /** Stats públicas de uma faixa (user playcount exige username). */
+    suspend fun getTrackStats(artist: String, track: String, user: String? = null): TrackStats? =
+        withContext(Dispatchers.IO) {
+            if (artist.isBlank() || track.isBlank()) return@withContext null
+            try {
+                val extra = buildString {
+                    append("method=track.getInfo&artist=${enc(artist)}&track=${enc(track)}&api_key=$API_KEY&format=json")
+                    if (!user.isNullOrBlank()) append("&username=${enc(user)}")
+                }
+                val root = getJson("$BASE?$extra")?.optJSONObject("track") ?: return@withContext null
+                TrackStats(
+                    title = root.optString("name").ifBlank { track },
+                    artist = root.optJSONObject("artist")?.optString("name")
+                        ?: root.optString("artist").ifBlank { artist },
+                    album = root.optJSONObject("album")?.optString("title")?.takeIf { it.isNotBlank() },
+                    userPlayCount = root.optString("userplaycount").toLongOrNull() ?: 0L,
+                    listeners = root.optString("listeners").toLongOrNull() ?: 0L,
+                    globalPlayCount = root.optString("playcount").toLongOrNull() ?: 0L,
+                    url = root.optString("url").takeIf { it.isNotBlank() },
+                    imageUrl = pickImage(root.optJSONObject("album")?.optJSONArray("image")
+                        ?: root.optJSONArray("image"))
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    suspend fun getArtistStats(artist: String, user: String? = null): EntityStats? =
+        withContext(Dispatchers.IO) {
+            if (artist.isBlank()) return@withContext null
+            try {
+                val extra = buildString {
+                    append("method=artist.getInfo&artist=${enc(artist)}&api_key=$API_KEY&format=json")
+                    if (!user.isNullOrBlank()) append("&username=${enc(user)}")
+                }
+                val root = getJson("$BASE?$extra")?.optJSONObject("artist") ?: return@withContext null
+                val stats = root.optJSONObject("stats")
+                EntityStats(
+                    name = root.optString("name").ifBlank { artist },
+                    userPlayCount = stats?.optString("userplaycount")?.toLongOrNull() ?: 0L,
+                    listeners = stats?.optString("listeners")?.toLongOrNull() ?: 0L,
+                    globalPlayCount = stats?.optString("playcount")?.toLongOrNull() ?: 0L,
+                    url = root.optString("url").takeIf { it.isNotBlank() },
+                    imageUrl = pickImage(root.optJSONArray("image"))
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    suspend fun getAlbumStats(artist: String, album: String, user: String? = null): EntityStats? =
+        withContext(Dispatchers.IO) {
+            if (artist.isBlank() || album.isBlank()) return@withContext null
+            try {
+                val extra = buildString {
+                    append("method=album.getInfo&artist=${enc(artist)}&album=${enc(album)}&api_key=$API_KEY&format=json")
+                    if (!user.isNullOrBlank()) append("&username=${enc(user)}")
+                }
+                val root = getJson("$BASE?$extra")?.optJSONObject("album") ?: return@withContext null
+                EntityStats(
+                    name = root.optString("name").ifBlank { album },
+                    artist = root.optString("artist").takeIf { it.isNotBlank() } ?: artist,
+                    userPlayCount = root.optString("userplaycount").toLongOrNull() ?: 0L,
+                    listeners = root.optString("listeners").toLongOrNull() ?: 0L,
+                    globalPlayCount = root.optString("playcount").toLongOrNull() ?: 0L,
+                    url = root.optString("url").takeIf { it.isNotBlank() },
+                    imageUrl = pickImage(root.optJSONArray("image"))
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
     /**
      * Ranking dentro de um intervalo arbitrário (weekly charts aceitam qualquer from/to).
      * [fromSec]/[toSec] em epoch segundos. Se ambos forem null, usa o total (overall).

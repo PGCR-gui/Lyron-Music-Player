@@ -1846,7 +1846,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     // ---------- Aparência ----------
-    enum class AppThemeId { DYNAMIC, DEFAULT, AQUA, SUNSET, FOREST, MIDNIGHT, ROSE, EMBER, AMOLED }
+    enum class AppThemeId { DYNAMIC, DEFAULT, AQUA, SUNSET, FOREST, MIDNIGHT, ROSE, EMBER, AMOLED, TWILIGHT }
 
     private val _themeId = MutableStateFlow(
         try {
@@ -1873,6 +1873,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_DYNAMIC_DEFAULT_COLOR, argb).apply()
     }
 
+    /**
+     * Até 5 cores (ARGB) que "flutuam" no gradiente do tema dinâmico.
+     * Vazio = usa as cores extraídas automaticamente da capa.
+     */
+    private val _dynamicFloatColors = MutableStateFlow(
+        prefs.getString(KEY_DYNAMIC_FLOAT_COLORS, null)
+            ?.split(',')
+            ?.mapNotNull { it.toIntOrNull() }
+            ?.take(5)
+            ?: emptyList()
+    )
+    val dynamicFloatColors: StateFlow<List<Int>> = _dynamicFloatColors.asStateFlow()
+
+    fun setDynamicFloatColors(colors: List<Int>) {
+        val clipped = colors.take(5)
+        _dynamicFloatColors.value = clipped
+        prefs.edit()
+            .putString(KEY_DYNAMIC_FLOAT_COLORS, clipped.joinToString(","))
+            .apply()
+    }
 
     // ---------- Histórico de reprodução + contagem de plays ----------
     private val _historyIds = MutableStateFlow(
@@ -2400,6 +2420,14 @@ private val _firstPlayedAt = MutableStateFlow(
     /** IDs já contados nesta sessão de play (evita recontagem até trocar de faixa). */
     private val countedThisSession = mutableSetOf<String>()
 
+    /**
+     * Tempo realmente ouvido na faixa atual (ms), acumulado só enquanto [isPlaying].
+     * Não sobe com seek — avançar para o fim da música não dispara scrobble/play count.
+     */
+    private val _listenedMs = MutableStateFlow(0L)
+    private var listenTrackId: String? = null
+    private var lastListenWallMs: Long = 0L
+
     private fun recordPlay(id: String) {
         if (id in countedThisSession) return
         countedThisSession.add(id)
@@ -2433,9 +2461,9 @@ private val _firstPlayedAt = MutableStateFlow(
             viewModelScope.launch(Dispatchers.IO) {
                 appendPlaybackHistoryCsv(track, now)
             }
-            // Scrobble no Last.fm no mesmo instante em que o play é contado.
-            // O timestamp é o INÍCIO da reprodução (agora - tempo já tocado).
-            LastFmScrobbler.scrobble(track, now - _positionMs.value.coerceAtLeast(0L))
+            // Timestamp = início estimado pelo tempo REALMENTE ouvido (não pela posição do seek).
+            val listened = _listenedMs.value.coerceAtLeast(0L)
+            LastFmScrobbler.scrobble(track, now - listened)
         }
     }
 
@@ -2778,35 +2806,60 @@ private val _firstPlayedAt = MutableStateFlow(
                 }
             }
         }
-        // Atualiza histórico de ordem quando a faixa atual muda (sem contar play ainda)
+        // Nova faixa: zera sessão e tempo realmente ouvido
         viewModelScope.launch {
             _nowPlaying.collect { t ->
-                // Nova faixa (ou null): limpa sessão para não recontar nem herdar estado
                 countedThisSession.clear()
+                listenTrackId = t?.id
+                _listenedMs.value = 0L
+                lastListenWallMs = 0L
             }
         }
-        // Conta play só ao atingir o percentual configurado da duração.
-        // Usa a duração do player quando disponível; ignora posições residual da faixa anterior.
+        // Acumula tempo REAL de reprodução (só enquanto isPlaying) — ignores seek
         viewModelScope.launch {
-            combine(_nowPlaying, _positionMs, _durationMs, _playCountThreshold, _playCountMinutes) { track, pos, playerDur, threshold, minutes ->
-                arrayOf<Any?>(track, pos, playerDur, threshold, minutes)
+            while (true) {
+                delay(500)
+                val t = _nowPlaying.value
+                if (t == null) {
+                    lastListenWallMs = 0L
+                    continue
+                }
+                if (listenTrackId != t.id) {
+                    listenTrackId = t.id
+                    _listenedMs.value = 0L
+                    lastListenWallMs = 0L
+                }
+                val now = System.currentTimeMillis()
+                if (_isPlaying.value) {
+                    if (lastListenWallMs > 0L) {
+                        val delta = (now - lastListenWallMs).coerceIn(0L, 2000L)
+                        if (delta > 0L) _listenedMs.value = _listenedMs.value + delta
+                    }
+                    lastListenWallMs = now
+                } else {
+                    lastListenWallMs = 0L
+                }
+            }
+        }
+        // Conta play/scrobble pelo tempo REALMENTE ouvido (não pela posição do seek).
+        viewModelScope.launch {
+            combine(_nowPlaying, _listenedMs, _durationMs, _playCountThreshold, _playCountMinutes) { track, listened, playerDur, threshold, minutes ->
+                arrayOf<Any?>(track, listened, playerDur, threshold, minutes)
             }.collect { arr ->
                 val track = arr[0] as Track?
-                val pos = arr[1] as Long
+                val listened = arr[1] as Long
                 val playerDur = arr[2] as Long
                 val threshold = arr[3] as Int
                 val minutes = arr[4] as Int
                 val t = track ?: return@collect
-                // Ainda não recebemos posição real desta faixa (ou ficou residual da anterior)
-                if (pos <= 0L) return@collect
+                if (listened <= 0L) return@collect
                 val dur = when {
                     playerDur > 0L -> playerDur
                     t.duration > 0L -> t.duration
                     else -> 0L
                 }
-                val reachedPercent = dur > 0L && ((pos * 100L) / dur).toInt() >= threshold
-                // Conta pelo que vier primeiro: porcentagem OU minutos tocados (o "valor menor")
-                val reachedTime = minutes > 0 && pos >= minutes * 60_000L
+                val reachedPercent = dur > 0L && ((listened * 100L) / dur).toInt() >= threshold
+                val reachedTime = minutes > 0 && listened >= minutes * 60_000L
                 if (reachedPercent || reachedTime) {
                     recordPlay(t.id)
                 }
@@ -3647,6 +3700,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_LEGACY_TREE_URI = "tree_uri"
         const val KEY_THEME = "app_theme"
         const val KEY_DYNAMIC_DEFAULT_COLOR = "dynamic_default_color"
+        const val KEY_DYNAMIC_FLOAT_COLORS = "dynamic_float_colors"
         const val KEY_HISTORY = "play_history"
         const val KEY_TRACK_BLACKLIST = "track_blacklist"
         const val KEY_PLAY_COUNTS = "play_counts"

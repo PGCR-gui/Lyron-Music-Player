@@ -317,6 +317,8 @@ fun NowPlayingScreen(
     lyricsFontPath: String? = null,
     lyricsTranslationFontPath: String? = null,
     getPosition: () -> Long,
+    /** Duração real do player (Media3); usada quando a tag do arquivo está ausente (ex.: Dolby). */
+    playerDurationMs: Long = 0L,
     onClose: () -> Unit,
     onPrevious: () -> Unit,
     onToggle: () -> Unit,
@@ -496,7 +498,11 @@ fun NowPlayingScreen(
         lyrics = loadLyrics()
     }
 
-    val duration = track.duration.coerceAtLeast(1L)
+    val duration = when {
+        playerDurationMs > 0L -> playerDurationMs
+        track.duration > 0L -> track.duration
+        else -> 1L
+    }
     val fraction = dragFraction ?: (position.toFloat() / duration).coerceIn(0f, 1f)
     val shownPosition = dragFraction?.let { (it * duration).toLong() } ?: position
 

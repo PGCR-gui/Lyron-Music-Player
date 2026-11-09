@@ -111,6 +111,8 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -232,7 +234,9 @@ fun TolereApp(
     onDeleteTracks: (List<Track>) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
-    onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {}
+    onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
+    openLastFmDashboard: Boolean = false,
+    onOpenLastFmDashboardConsumed: () -> Unit = {}
 ) {
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val isScanning by vm.isScanning.collectAsStateWithLifecycle()
@@ -320,7 +324,10 @@ fun TolereApp(
     val trackOrder by vm.trackOrder.collectAsStateWithLifecycle()
 
     val dynamicDefaultArgb by vm.dynamicDefaultColor.collectAsStateWithLifecycle()
-    val appColors = rememberAppColors(themeId, nowPlaying?.artPath, isPlaying, dynamicDefaultArgb)
+    val dynamicFloatArgb by vm.dynamicFloatColors.collectAsStateWithLifecycle()
+    val appColors = rememberAppColors(
+        themeId, nowPlaying?.artPath, isPlaying, dynamicDefaultArgb, dynamicFloatArgb
+    )
     val layoutScale = rememberLayoutScale()
 
     val uiFontFamily = remember(uiFontPath) {
@@ -373,6 +380,12 @@ fun TolereApp(
     val selectionMode = selectedTrackIds.isNotEmpty()
 
     var showLastFm by remember { mutableStateOf(false) }
+    LaunchedEffect(openLastFmDashboard) {
+        if (openLastFmDashboard) {
+            showLastFm = true
+            onOpenLastFmDashboardConsumed()
+        }
+    }
     val backdrop = rememberGraphicsLayer()
     val bottomPadding = if (nowPlaying != null) 190.dp else 110.dp
     var navBarVisible by remember { mutableStateOf(true) }
@@ -507,8 +520,8 @@ fun TolereApp(
                         .background(rememberFloatingGradient(appColors))
                         .nestedScroll(navScrollConnection)
                 ) {
-                    // Ícones flutuantes de fundo (também em páginas de artista/álbum)
-                    if (floatingIconsEnabled) {
+                    // Ícones flutuantes: pausados enquanto o Now Playing cobre a tela (economiza GPU/CPU)
+                    if (floatingIconsEnabled && !showNowPlaying) {
                         if (isSearching) {
                             FloatingIconsBackground(kind = "search")
                         } else {
@@ -1166,6 +1179,8 @@ fun TolereApp(
                     onThemeSelected = vm::setThemeId,
                     dynamicDefaultColor = dynamicDefaultArgb,
                     onDynamicDefaultColorChange = vm::setDynamicDefaultColor,
+                    dynamicFloatColors = dynamicFloatArgb,
+                    onDynamicFloatColorsChange = vm::setDynamicFloatColors,
                     onPickFont = { vm.beginFontPickForLyrics(); onPickFont() },
                     onClearFont = { vm.setLyricsFontPath(null) },
                     onPickUiFont = onPickUiFont,
@@ -1501,6 +1516,7 @@ fun TolereApp(
                         .firstOrNull { it.isFavorites }
                         ?.trackIds
                         ?.contains(current.id) == true
+                    val playerDur by vm.durationMs.collectAsStateWithLifecycle()
                     NowPlayingScreen(
                         track = current,
                         isPlaying = isPlaying,
@@ -1513,6 +1529,7 @@ fun TolereApp(
                         lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                         highQualityOutput = audioOutput == MusicViewModel.AudioOutputBackend.HIGH_QUALITY,
                         getPosition = vm::currentPosition,
+                        playerDurationMs = playerDur,
                         onClose = { showNowPlaying = false },
                         onPrevious = vm::previous,
                         onToggle = vm::togglePlayPause,
@@ -3212,6 +3229,31 @@ private fun ArtistDetailScreen(
     var editingInfo by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf("") }
     var textExpanded by remember { mutableStateOf(false) }
+    // Busca manual com preview + fonte antes de aplicar
+    var showManualSearch by remember { mutableStateOf(false) }
+    var manualQuery by remember(artistName) { mutableStateOf(artistName) }
+    var manualCandidates by remember {
+        mutableStateOf<List<com.tolete.player.data.ArtistImageResolver.Candidate>>(emptyList())
+    }
+    var manualSearching by remember { mutableStateOf(false) }
+    var manualError by remember { mutableStateOf<String?>(null) }
+    fun runManualSearch(q: String) {
+        manualSearching = true
+        manualError = null
+        manualCandidates = emptyList()
+        scope.launch {
+            try {
+                manualCandidates = withContext(Dispatchers.IO) {
+                    com.tolete.player.data.ArtistImageResolver.searchCandidates(q.trim())
+                }
+                if (manualCandidates.isEmpty()) manualError = "Nenhum resultado encontrado"
+            } catch (e: Exception) {
+                manualError = e.message ?: "Falha na busca"
+            } finally {
+                manualSearching = false
+            }
+        }
+    }
 
     // Ordenação dos álbuns do artista: nome ou ano, crescente/decrescente
     var albumSortBy by remember { mutableStateOf("name") } // "name" | "year"
@@ -3230,16 +3272,21 @@ private fun ArtistDetailScreen(
     }
     var mbYears by remember(artistName) { mutableStateOf<Map<String, Int>>(emptyMap()) }
     LaunchedEffect(artistName, albums) {
-        val missing = albums.filter { it.year == null }.map { it.name }.distinct().take(8)
+        // Limita a 4 álbuns e busca em paralelo para não travar a UI do artista
+        val missing = albums.filter { it.year == null }.map { it.name }.distinct().take(4)
         if (missing.isEmpty()) return@LaunchedEffect
-        val map = mutableMapOf<String, Int>()
-        for (name in missing) {
-            try {
-                val y = withContext(Dispatchers.IO) {
-                    com.tolete.player.data.MusicBrainzClient.releaseYear(name, artistName)
-                }
-                if (y != null) map[name] = y
-            } catch (_: Exception) {}
+        val map = withContext(Dispatchers.IO) {
+            kotlinx.coroutines.coroutineScope {
+                missing.map { name ->
+                    async {
+                        try {
+                            name to com.tolete.player.data.MusicBrainzClient.releaseYear(name, artistName)
+                        } catch (_: Exception) {
+                            name to null
+                        }
+                    }
+                }.awaitAll().mapNotNull { (n, y) -> y?.let { n to it } }.toMap()
+            }
         }
         if (map.isNotEmpty()) mbYears = map
     }
@@ -3500,18 +3547,34 @@ private fun ArtistDetailScreen(
                                 color = Color.White.copy(0.45f)
                             )
                         }
-                        TextButton(
-                            onClick = {
-                                editText = displayInfo ?: ""
-                                editingInfo = true
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text(
-                                if (displayInfo.isNullOrBlank()) "Adicionar info" else "Editar info",
-                                fontSize = 12.sp,
-                                color = Color(0xFF82B1FF)
-                            )
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = {
+                                    editText = displayInfo ?: ""
+                                    editingInfo = true
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    if (displayInfo.isNullOrBlank()) "Adicionar info" else "Editar info",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF82B1FF)
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    showManualSearch = true
+                                    manualQuery = artistName
+                                    runManualSearch(artistName)
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    "Busca manual",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF82B1FF)
+                                )
+                            }
                         }
                     }
                 }
@@ -3747,6 +3810,155 @@ private fun ArtistDetailScreen(
         savedMeta = withContext(Dispatchers.IO) { ArtistMetaStore.load(context, metaKey) }
         loading = false
         refreshing = false
+    }
+
+    if (showManualSearch) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(0.55f))
+                .clickable(indication = null, interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }) {
+                    showManualSearch = false
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth(0.92f)
+                    .fillMaxHeight(0.78f)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color(0xE61A1528))
+                    .border(1.dp, Color.White.copy(0.14f), RoundedCornerShape(22.dp))
+                    .clickable(enabled = false) {}
+                    .padding(16.dp)
+            ) {
+                Text(
+                    "Busca manual",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "Escolha uma opção. A fonte é mostrada antes de aplicar.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                )
+                OutlinedTextField(
+                    value = manualQuery,
+                    onValueChange = { manualQuery = it },
+                    singleLine = true,
+                    label = { Text("Nome do artista") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.White.copy(0.5f),
+                        unfocusedBorderColor = Color.White.copy(0.25f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = Color.White,
+                        focusedLabelColor = Color.White.copy(0.7f),
+                        unfocusedLabelColor = Color.White.copy(0.5f)
+                    )
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { runManualSearch(manualQuery) },
+                        enabled = !manualSearching && manualQuery.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
+                    ) {
+                        Text("Buscar")
+                    }
+                    TextButton(onClick = { showManualSearch = false }) {
+                        Text("Fechar", color = Color.White.copy(0.8f))
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                when {
+                    manualSearching -> {
+                        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = Color(0xFF82B1FF), modifier = Modifier.size(28.dp))
+                        }
+                    }
+                    manualError != null -> {
+                        Text(manualError!!, color = Color(0xFFFF8A80))
+                    }
+                    else -> {
+                        androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f)) {
+                            items(manualCandidates.size) { idx ->
+                                val c = manualCandidates[idx]
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color.White.copy(0.08f))
+                                        .border(1.dp, Color.White.copy(0.1f), RoundedCornerShape(14.dp))
+                                        .clickable {
+                                            scope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    if (!c.imageUrl.isNullOrBlank()) {
+                                                        ArtistMetaStore.saveRemoteImage(
+                                                            context, metaKey, c.imageUrl, c.source
+                                                        )
+                                                    }
+                                                    if (!c.bio.isNullOrBlank()) {
+                                                        ArtistMetaStore.saveText(
+                                                            context, metaKey, c.bio, c.source
+                                                        )
+                                                    }
+                                                }
+                                                remoteImage = c.imageUrl
+                                                remoteText = c.bio
+                                                savedMeta = withContext(Dispatchers.IO) {
+                                                    ArtistMetaStore.load(context, metaKey)
+                                                }
+                                                showManualSearch = false
+                                            }
+                                        }
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (!c.imageUrl.isNullOrBlank()) {
+                                        coil.compose.AsyncImage(
+                                            model = c.imageUrl,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(56.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                    }
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            c.source,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF82B1FF)
+                                        )
+                                        if (!c.bio.isNullOrBlank()) {
+                                            Text(
+                                                c.bio!!.take(120) + if (c.bio!!.length > 120) "…" else "",
+                                                fontSize = 11.sp,
+                                                color = Color.White.copy(0.7f),
+                                                maxLines = 3,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        } else {
+                                            Text(
+                                                "Somente imagem",
+                                                fontSize = 11.sp,
+                                                color = Color.White.copy(0.5f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4971,6 +5183,11 @@ internal fun FloatingIconsBackground(kind: String) {
             R.drawable.ic_float_help_1,
             R.drawable.ic_float_help_2,
             R.drawable.ic_float_help_3
+        )
+        "lastfm" -> listOf(
+            R.drawable.ic_float_lastfm_1,
+            R.drawable.ic_float_lastfm_2,
+            R.drawable.ic_float_lastfm_3
         )
         else -> emptyList()
     }

@@ -48,8 +48,8 @@ class MainActivity : ComponentActivity() {
     private var externalAudioUri by mutableStateOf<Uri?>(null)
     private var externalTitle by mutableStateOf<String?>("Lyron")
     private var externalArtist by mutableStateOf<String?>("")
-    /** Toque na notificação do scrobbler: mostra as informações da música tocando. */
-    private var showTrackInfo by mutableStateOf(false)
+    /** Toque na notificação do scrobbler: abre o dashboard do Last.fm. */
+    private var openLastFmDashboard by mutableStateOf(false)
 
     private val pickFolder = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -384,9 +384,11 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingIntent(intent: Intent?, recreated: Boolean = false) {
         if (intent == null) return
         val action = intent.action
-        if (action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_SHOW_TRACK_INFO) {
-            // Activity recriada (girar a tela etc.) não reabre o diálogo.
-            if (!recreated) showTrackInfo = true
+        if (action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_OPEN_LASTFM_DASHBOARD ||
+            action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_SHOW_TRACK_INFO
+        ) {
+            // Activity recriada (girar a tela etc.) não reabre o dashboard.
+            if (!recreated) openLastFmDashboard = true
             intent.action = null
             return
         }
@@ -481,27 +483,15 @@ class MainActivity : ComponentActivity() {
                         onImportBackup = { opts ->
                             viewModel.pendingBackupOptions = opts
                             importBackup.launch(arrayOf("application/zip", "application/json", "*/*"))
-                        }
+                        },
+                        openLastFmDashboard = openLastFmDashboard,
+                        onOpenLastFmDashboardConsumed = { openLastFmDashboard = false }
                     )
                 }
 
                 if (!showSplash) {
                     ChangelogOnUpdateDialog()
                     UpdateHost()
-                }
-
-                if (showTrackInfo && !showSplash) {
-                    val playing by viewModel.nowPlaying.collectAsStateWithLifecycle()
-                    val infoTrack = playing ?: com.tolete.player.data.LastFmScrobbler.current.value
-                    if (infoTrack != null) {
-                        com.tolete.player.ui.TechDetailsDialog(
-                            track = infoTrack,
-                            onDismiss = { showTrackInfo = false },
-                            playCount = viewModel.playCountOf(infoTrack.id)
-                        )
-                    } else {
-                        androidx.compose.runtime.LaunchedEffect(Unit) { showTrackInfo = false }
-                    }
                 }
 
                 if (externalAudioUri != null && !showSplash) {

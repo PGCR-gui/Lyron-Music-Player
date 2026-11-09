@@ -55,6 +55,7 @@ internal fun themeLabel(id: AppThemeId) = when (id) {
     AppThemeId.ROSE -> "Rose"
     AppThemeId.EMBER -> "Ember"
     AppThemeId.AMOLED -> "AMOLED"
+    AppThemeId.TWILIGHT -> "Twilight"
 }
 
 
@@ -65,6 +66,8 @@ internal fun AppearancePage(
     onThemeSelected: (AppThemeId) -> Unit,
     dynamicDefaultColor: Int = 0xFFBB86FC.toInt(),
     onDynamicDefaultColorChange: (Int) -> Unit = {},
+    dynamicFloatColors: List<Int> = emptyList(),
+    onDynamicFloatColorsChange: (List<Int>) -> Unit = {},
     onPickUiFont: () -> Unit,
     onClearUiFont: () -> Unit,
     onSelectUiFont: (String?) -> Unit = {},
@@ -101,7 +104,8 @@ internal fun AppearancePage(
         AppThemeId.MIDNIGHT to "Midnight",
         AppThemeId.ROSE to "Rose",
         AppThemeId.EMBER to "Ember",
-        AppThemeId.AMOLED to "AMOLED"
+        AppThemeId.AMOLED to "AMOLED",
+        AppThemeId.TWILIGHT to "Twilight"
     )
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
@@ -136,7 +140,7 @@ internal fun AppearancePage(
                     Text(label, fontSize = 16.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
                     if (id == AppThemeId.DYNAMIC) {
                         Text(
-                            "Duas cores da capa enquanto toca",
+                            "Cores da capa flutuam enquanto toca",
                             fontSize = 12.sp,
                             color = Color.White.copy(0.5f)
                         )
@@ -170,6 +174,87 @@ internal fun AppearancePage(
                     label = "Cor padrão do tema dinâmico",
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Cores flutuantes (até 5)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                Text(
+                    "Estas cores derivam lentamente no fundo do tema dinâmico. Vazio = usa as cores da capa automaticamente.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    dynamicFloatColors.forEachIndexed { index, argb ->
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color(argb))
+                                .border(1.5.dp, Color.White.copy(0.35f), CircleShape)
+                                .clickable {
+                                    // Remove ao tocar de novo
+                                    onDynamicFloatColorsChange(
+                                        dynamicFloatColors.toMutableList().also { it.removeAt(index) }
+                                    )
+                                }
+                        )
+                    }
+                    if (dynamicFloatColors.size < 5) {
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(0.08f))
+                                .border(1.dp, Color.White.copy(0.25f), CircleShape)
+                                .clickable {
+                                    // Adiciona a cor padrão atual como ponto de partida
+                                    onDynamicFloatColorsChange(
+                                        dynamicFloatColors + dynamicDefaultColor
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Rounded.Add,
+                                contentDescription = "Adicionar cor",
+                                tint = Color.White.copy(0.7f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+                if (dynamicFloatColors.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    dynamicFloatColors.forEachIndexed { index, argb ->
+                        ColorPickerButton(
+                            color = argb,
+                            onColorChange = { newColor ->
+                                onDynamicFloatColorsChange(
+                                    dynamicFloatColors.toMutableList().also { it[index] = newColor }
+                                )
+                            },
+                            showAlpha = false,
+                            label = "Cor flutuante ${index + 1}",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                        )
+                    }
+                    Text(
+                        "Toque no círculo para remover uma cor.",
+                        fontSize = 11.sp,
+                        color = Color.White.copy(0.4f)
+                    )
+                }
             }
         }
         item {

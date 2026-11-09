@@ -34,7 +34,9 @@ data class AppColors(
     val gradientBottom: Color,
     val accent: Color,
     val surface: Color,
-    val isLight: Boolean = false
+    val isLight: Boolean = false,
+    /** Até 5 cores extraídas da capa que "flutuam" no gradiente dinâmico. */
+    val floatColors: List<Color> = emptyList()
 ) {
     val gradient: Brush get() = Brush.verticalGradient(listOf(gradientTop, gradientBottom))
     /** Segunda cor do tema (par com accent) — usada em barras, bordas e destaques. */
@@ -56,6 +58,24 @@ fun rememberFloatingGradient(colors: AppColors): Brush {
     )
     val wave = (sin(t * Math.PI.toFloat()) * 0.5f + 0.5f)
     val shift = 0.06f + wave * 0.08f
+    val floats = colors.floatColors.filter { it != Color.Unspecified }.take(5)
+    if (floats.size >= 2) {
+        // Interpola entre as cores selecionadas com deriva lenta (mais "vivo").
+        val n = floats.size
+        val phase = t * (n - 1).toFloat()
+        val i0 = phase.toInt().coerceIn(0, n - 2)
+        val i1 = (i0 + 1).coerceAtMost(n - 1)
+        val localT = (phase - i0).coerceIn(0f, 1f)
+        val cA = lerp(floats[i0], floats[i1], localT)
+        val cB = lerp(
+            floats[(i0 + n / 2) % n],
+            floats[(i1 + n / 2) % n],
+            localT
+        )
+        val top = lerp(cA, colors.gradientTop, 0.35f + shift * 0.4f)
+        val bot = lerp(cB, colors.gradientBottom, 0.45f + shift * 0.3f)
+        return Brush.verticalGradient(listOf(top, bot))
+    }
     val topA = lerp(colors.gradientTop, colors.accent.copy(alpha = colors.gradientTop.alpha), shift * 0.45f)
     val topB = lerp(colors.gradientTop, colors.surface, shift)
     val botA = lerp(colors.gradientBottom, colors.surface, shift * 0.5f)
@@ -125,6 +145,17 @@ val AmoledColors = AppColors(
     surface = Color(0xFF0A0A0A)
 )
 
+/**
+ * Twilight: tema baseado em cores de fundo de foto — crepúsculo (índigo profundo,
+ * violeta suave e um toque de âmbar no accent), como o céu após o pôr do sol.
+ */
+val TwilightColors = AppColors(
+    gradientTop = Color(0xFF1A1035),
+    gradientBottom = Color(0xFF0A0618),
+    accent = Color(0xFFC4A1FF),
+    surface = Color(0xFF1E1438)
+)
+
 fun staticTheme(id: AppThemeId): AppColors = when (id) {
     AppThemeId.AQUA -> AquaColors
     AppThemeId.SUNSET -> SunsetColors
@@ -133,13 +164,18 @@ fun staticTheme(id: AppThemeId): AppColors = when (id) {
     AppThemeId.ROSE -> RoseColors
     AppThemeId.EMBER -> EmberColors
     AppThemeId.AMOLED -> AmoledColors
+    AppThemeId.TWILIGHT -> TwilightColors
     AppThemeId.DEFAULT, AppThemeId.DYNAMIC -> DefaultAppColors
 }
 
 /**
- * Extrai duas cores dominantes da capa (topo + base) + accent vibrante.
+ * Extrai várias cores da capa (topo + base + accent + até 5 swatches para flutuarem).
  */
-fun colorsFromArt(artPath: String?, fallback: AppColors = DefaultAppColors): AppColors {
+fun colorsFromArt(
+    artPath: String?,
+    fallback: AppColors = DefaultAppColors,
+    preferredFloatIndices: List<Int> = emptyList()
+): AppColors {
     if (artPath.isNullOrBlank()) return fallback
     return try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -150,7 +186,7 @@ fun colorsFromArt(artPath: String?, fallback: AppColors = DefaultAppColors): App
             artPath,
             BitmapFactory.Options().apply { inSampleSize = sample }
         ) ?: return fallback
-        val palette = Palette.from(bmp).generate()
+        val palette = Palette.from(bmp).maximumColorCount(24).generate()
         bmp.recycle()
 
         val dominant = palette.getDominantColor(fallback.gradientBottom.toArgb())
@@ -161,8 +197,9 @@ fun colorsFromArt(artPath: String?, fallback: AppColors = DefaultAppColors): App
             palette.getMutedColor(fallback.accent.toArgb())
         )
         val lightVibrant = palette.getLightVibrantColor(vibrant)
+        val muted = palette.getMutedColor(dominant)
+        val darkMuted = palette.getDarkMutedColor(dominant)
 
-        // Duas cores principais derivadas da capa
         fun darken(argb: Int, maxV: Float): Color {
             val hsv = FloatArray(3)
             android.graphics.Color.colorToHSV(argb, hsv)
@@ -174,11 +211,34 @@ fun colorsFromArt(artPath: String?, fallback: AppColors = DefaultAppColors): App
         val bottom = darken(dominant, 0.16f)
         val accentColor = Color(if (vibrant != dominant) vibrant else lightVibrant)
 
+        // Coleta swatches distintos (até 8) ordenados por população
+        val candidates = palette.swatches
+            .sortedByDescending { it.population }
+            .map { Color(it.rgb) }
+            .distinctBy { (it.red * 10).toInt() * 100 + (it.green * 10).toInt() * 10 + (it.blue * 10).toInt() }
+            .take(8)
+            .ifEmpty {
+                listOf(
+                    accentColor,
+                    Color(vibrant),
+                    Color(muted),
+                    Color(darkMuted),
+                    Color(lightVibrant)
+                )
+            }
+
+        val selectedFloats = if (preferredFloatIndices.isNotEmpty()) {
+            preferredFloatIndices.mapNotNull { idx -> candidates.getOrNull(idx) }.take(5)
+        } else {
+            candidates.take(5)
+        }
+
         AppColors(
             gradientTop = top,
             gradientBottom = bottom,
             accent = accentColor,
-            surface = top.copy(alpha = 0.92f)
+            surface = top.copy(alpha = 0.92f),
+            floatColors = selectedFloats
         )
     } catch (_: Exception) {
         fallback
@@ -207,18 +267,29 @@ fun rememberAppColors(
     themeId: AppThemeId,
     artPath: String?,
     isPlaying: Boolean,
-    dynamicDefaultArgb: Int = 0xFFBB86FC.toInt()
+    dynamicDefaultArgb: Int = 0xFFBB86FC.toInt(),
+    /** Cores manuais (ARGB) para flutuarem no dinâmico; vazio = auto da capa. */
+    dynamicFloatArgb: List<Int> = emptyList()
 ): AppColors {
-    val dynamicIdle = remember(dynamicDefaultArgb) {
-        colorsFromSeed(Color(dynamicDefaultArgb))
+    val manualFloats = remember(dynamicFloatArgb) {
+        dynamicFloatArgb.map { Color(it) }.take(5)
     }
-    val fixed = remember(themeId, dynamicDefaultArgb) {
+    val dynamicIdle = remember(dynamicDefaultArgb, manualFloats) {
+        colorsFromSeed(Color(dynamicDefaultArgb)).copy(floatColors = manualFloats)
+    }
+    val fixed = remember(themeId, dynamicDefaultArgb, manualFloats) {
         if (themeId == AppThemeId.DYNAMIC) dynamicIdle else staticTheme(themeId)
     }
     val useArt = themeId == AppThemeId.DYNAMIC && isPlaying
-    val fromArt by produceState(initialValue = dynamicIdle, artPath, useArt, dynamicDefaultArgb) {
+    val fromArt by produceState(initialValue = dynamicIdle, artPath, useArt, dynamicDefaultArgb, manualFloats) {
         if (useArt) {
-            value = withContext(Dispatchers.Default) { colorsFromArt(artPath, dynamicIdle) }
+            val extracted = withContext(Dispatchers.Default) { colorsFromArt(artPath, dynamicIdle) }
+            // Preferência do usuário sobrepõe as cores auto da capa quando definida.
+            value = if (manualFloats.isNotEmpty()) {
+                extracted.copy(floatColors = manualFloats)
+            } else {
+                extracted
+            }
         } else {
             value = dynamicIdle
         }
@@ -233,7 +304,8 @@ fun rememberAppColors(
         gradientBottom = bottom,
         accent = accent,
         surface = surface,
-        isLight = target.isLight
+        isLight = target.isLight,
+        floatColors = target.floatColors
     )
 }
 
