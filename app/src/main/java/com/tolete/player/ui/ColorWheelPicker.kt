@@ -42,7 +42,9 @@ fun ColorWheelPickerDialog(
     title: String = "Escolher cor"
 ) {
     val initial = Color(initialColor)
-    val pal = menuPalette(LocalAppColors.current)
+    val menuStyle = LocalMenuVisualStyle.current
+    val pal = menuPalette(LocalAppColors.current, menuStyle)
+    val backdrop = LocalGlassBackdrop.current
     var hue by remember { mutableFloatStateOf(rgbToHsv(initial).first) }
     var sat by remember { mutableFloatStateOf(rgbToHsv(initial).second) }
     var value by remember { mutableFloatStateOf(rgbToHsv(initial).third) }
@@ -55,14 +57,7 @@ fun ColorWheelPickerDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .wrapContentHeight(),
-            shape = RoundedCornerShape(20.dp),
-            color = pal.container,
-            tonalElevation = 0.dp
-        ) {
+        val dialogContent: @Composable () -> Unit = {
             Column(
                 Modifier
                     .padding(20.dp)
@@ -200,6 +195,27 @@ fun ColorWheelPickerDialog(
                     }
                 }
             }
+        }
+        if (menuStyle == MenuVisualStyle.GLASS && backdrop != null) {
+            GlassSurface(
+                backdrop = backdrop,
+                sourceOrigin = LocalGlassBackdropOrigin.current,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.fillMaxWidth(0.92f).wrapContentHeight(),
+                style = GlassStyle.Panel.copy(
+                    refraction = 6.dp,
+                    edgeWidth = 14.dp,
+                    magnification = 0.015f,
+                    dispersion = 0.18f
+                )
+            ) { dialogContent() }
+        } else {
+            Surface(
+                modifier = Modifier.fillMaxWidth(0.92f).wrapContentHeight(),
+                shape = RoundedCornerShape(20.dp),
+                color = pal.container,
+                tonalElevation = 0.dp
+            ) { dialogContent() }
         }
     }
 }

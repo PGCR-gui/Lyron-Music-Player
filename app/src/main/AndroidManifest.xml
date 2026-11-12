@@ -29,6 +29,7 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:requestLegacyExternalStorage="true"
+        android:manageSpaceActivity="com.tolete.player.ManageSpaceActivity"
         android:usesCleartextTraffic="false">
 
         <activity
@@ -39,6 +40,26 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!-- Abre pelo botão "Gerenciar espaço" nas configurações do sistema (no lugar de "Limpar dados").
+             Precisa ser exported para o sistema conseguir iniciá-la.
+             O namespace (com.tolete.player) é diferente do applicationId (gui.pgcr.music): por isso o
+             android:manageSpaceActivity do <application> usa o nome COMPLETO da classe. Com ".ManageSpaceActivity"
+             o sistema resolvia gui.pgcr.music.ManageSpaceActivity, que não existe, e o botão não abria nada. -->
+        <activity
+            android:name="com.tolete.player.ManageSpaceActivity"
+            android:exported="true"
+            android:label="Gerenciar espaço"
+            android:theme="@style/AppTheme" />
+
+        <activity
+            android:name=".ExternalPlayerActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Lyron.ExternalPlayer">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -47,12 +68,14 @@
                 <data android:scheme="file" />
                 <data android:mimeType="audio/*" />
                 <data android:mimeType="audio/x-dsf" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="audio/*" />
                 <data android:mimeType="audio/x-dsf" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 

@@ -57,6 +57,31 @@ object LyricsEmbedder {
         }
     }
 
+    /** Caminho do sidecar TTML, para conversão explícita no editor (nunca grava ao ler). */
+    fun externalTtmlPath(track: Track): File? {
+        val base = when {
+            track.path.startsWith("/") -> track.path.substringBeforeLast('.')
+            track.uri.scheme == "file" && !track.uri.path.isNullOrBlank() -> track.uri.path!!.substringBeforeLast('.')
+            else -> return null
+        }
+        val lower = File("$base.ttml")
+        return if (lower.exists()) lower else File("$base.TTML")
+    }
+
+    fun hasExternalTtml(track: Track): Boolean {
+        val f = externalTtmlPath(track) ?: return false
+        return try { f.exists() && f.length() > 0 } catch (_: Exception) { false }
+    }
+
+    /** Lê e interpreta apenas o sidecar TTML; não cria nem altera qualquer arquivo. */
+    fun loadExternalTtml(track: Track): List<LyricLine> {
+        val f = externalTtmlPath(track) ?: return emptyList()
+        return try {
+            if (!f.isFile || f.length() <= 0L) emptyList()
+            else LyricsExtractor.parseTtml(f.readText(Charsets.UTF_8))
+        } catch (_: Exception) { emptyList() }
+    }
+
     private fun hasAllFilesAccess(): Boolean =
         if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
 
@@ -108,14 +133,15 @@ object LyricsEmbedder {
 
     /**
      * Serializa linhas em LRC ou eLRC (word-by-word). Formato único, também usado pelo editor de tags:
-     *  - tradução leva o prefixo {tr} logo após o timestamp da linha;
+     *  - backing vocal leva {bg} e tradução leva {tr} logo após o timestamp;
      *  - só palavras COM tempo recebem <mm:ss.xx> (nunca grava <00:00.00> para palavra sem tempo);
      *  - sílaba: <mm:ss.xx>{sil}texto (a ordem que o parser espera);
      *  - linha sem nenhuma palavra com tempo vira LRC simples.
      */
     fun linesToLrcText(lines: List<LyricLine>): String = buildString {
         lines.forEach { line ->
-            val tr = if (line.isTranslation) "{tr}" else ""
+            val lineMarkers = (if (line.isBackground) "{bg}" else "") +
+                (if (line.isTranslation) "{tr}" else "")
             val hasTimedWords = line.words.any { it.timeMs >= 0 }
             val hasWordMarkers = line.words.any {
                 it.isSyllable || it.animation != LyricAnimation.NONE
@@ -134,7 +160,7 @@ object LyricsEmbedder {
                 hasTimedWords -> {
                     val start = if (line.timeMs >= 0) line.timeMs
                     else line.words.first { it.timeMs >= 0 }.timeMs
-                    append('[').append(fmtTs(start)).append(']').append(tr)
+                    append('[').append(fmtTs(start)).append(']').append(lineMarkers)
                     line.words.forEachIndexed { i, w ->
                         if (w.timeMs >= 0) {
                             // Espaço entre palavras (formato eLRC padrão: "<t>You <t>said").
@@ -154,8 +180,8 @@ object LyricsEmbedder {
                     }
                     append('\n')
                 }
-                line.timeMs < 0 -> appendLine(tr + textWithMarkers)
-                else -> appendLine("[${fmtTs(line.timeMs)}]$tr$textWithMarkers")
+                line.timeMs < 0 -> appendLine(lineMarkers + textWithMarkers)
+                else -> appendLine("[${fmtTs(line.timeMs)}]$lineMarkers$textWithMarkers")
             }
         }
     }.trimEnd() + "\n"
@@ -233,9 +259,37 @@ object LyricsEmbedder {
     ): Boolean {
         val text = linesToLrcText(lines)
         if (text.isBlank()) return false
-        return when (target) {
+        val wrote = when (target) {
             Target.LRC_FILE -> embedLrc(context, track, text)
             Target.EMBEDDED -> embedInTags(context, track, text)
         }
+        if (!wrote) return false
+
+        // Releitura imediata: alguns formatos/tag handlers podem aceitar commit sem
+        // manter o campo LYRICS. Não feche o editor nem indique sucesso se os tempos sumiram.
+        val savedText = when (target) {
+            Target.LRC_FILE -> externalLrcPath(track)?.let { file ->
+                try { if (file.isFile) file.readText(Charsets.UTF_8) else null } catch (_: Exception) { null }
+            }
+            Target.EMBEDDED -> TagReader.read(context, track)?.lyrics
+        } ?: return false
+        if (savedText.isBlank()) return false
+        val expectedTimes = syncTimes(lines)
+        if (expectedTimes.isEmpty()) return true
+        val savedTimes = syncTimes(LyricsExtractor.parseLyricsContent(savedText))
+        val remaining = savedTimes.toMutableList()
+        for (expected in expectedTimes) {
+            val match = remaining.indices.minByOrNull { index ->
+                kotlin.math.abs(remaining[index] - expected)
+            }?.takeIf { kotlin.math.abs(remaining[it] - expected) <= 10L } ?: return false
+            remaining.removeAt(match)
+        }
+        return true
     }
+
+    private fun syncTimes(lines: List<LyricLine>): List<Long> = lines.flatMap { line ->
+        val wordTimes = line.words.mapNotNull { it.timeMs.takeIf { time -> time >= 0L } }
+        if (wordTimes.isNotEmpty()) wordTimes
+        else listOfNotNull(line.timeMs.takeIf { it >= 0L })
+    }.sorted()
 }

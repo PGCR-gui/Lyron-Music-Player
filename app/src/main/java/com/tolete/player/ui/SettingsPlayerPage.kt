@@ -127,12 +127,12 @@ internal fun PlayerPage(
         )
         Spacer(Modifier.height(8.dp))
         ShuffleTypeOption(
-            title = "Alta qualidade (DAC USB / fone com fio)",
-            subtitle = "Prioriza o DAC USB ou o fone com fio, mantém 24/32-bit sem reduzir para 16-bit e, no USB (Android 14+), usa a taxa de amostragem da faixa",
-            selected = audioOutput == AudioOutputBackend.HIGH_QUALITY,
-            onClick = { onAudioOutputChange(AudioOutputBackend.HIGH_QUALITY) }
+            title = "Fidelidade de Som",
+            subtitle = "Prioriza DAC USB/fone com fio, conserva a taxa da faixa (44,1 kHz é convertido para 48 kHz por compatibilidade) e oferece Bit-perfect quando suportado",
+            selected = audioOutput == AudioOutputBackend.FIDELITY,
+            onClick = { onAudioOutputChange(AudioOutputBackend.FIDELITY) }
         )
-        if (audioOutput == AudioOutputBackend.HIGH_QUALITY) {
+        if (audioOutput == AudioOutputBackend.FIDELITY) {
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
@@ -147,7 +147,7 @@ internal fun PlayerPage(
             }
         }
         Spacer(Modifier.height(12.dp))
-        AudioOutputInfoCard(highQuality = audioOutput == AudioOutputBackend.HIGH_QUALITY)
+        AudioOutputInfoCard(mode = audioOutput)
 
         Spacer(Modifier.height(24.dp))
         Text(
@@ -173,10 +173,10 @@ internal fun PlayerPage(
         )
 
         Spacer(Modifier.height(16.dp))
-        Text("Crossfade entre faixas", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        Text("Fade ao trocar de faixa", fontSize = 16.sp, fontWeight = FontWeight.Medium)
         Text(
             if (crossfadeMs == 0) "Desligado"
-            else "Duração: ${crossfadeMs} ms (fade no fim da faixa e no início da próxima)",
+            else "Duração: ${crossfadeMs} ms de sobreposição. Em saída exclusiva/bit-perfect, usa fade-in sem sobrepor para evitar conflito no DAC.",
             fontSize = 13.sp,
             color = Color.White.copy(0.55f),
             modifier = Modifier.padding(bottom = 8.dp)
@@ -354,39 +354,37 @@ internal fun ShuffleTypeOption(
 
 /** Abre o card "Saída em uso" num diálogo (usado pelo menu de três pontos do Now Playing). */
 @Composable
-internal fun AudioOutputInfoDialog(highQuality: Boolean, onDismiss: () -> Unit) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        androidx.compose.runtime.CompositionLocalProvider(
-            androidx.compose.material3.LocalContentColor provides Color.White
-        ) {
-            Column(
-                Modifier
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(Color(0xFF1E1E22).copy(alpha = 0.96f))
-                    .padding(16.dp)
-            ) {
-                AudioOutputInfoCard(highQuality = highQuality)
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 8.dp),
-                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End
-                ) {
-                    androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Fechar") }
-                }
-            }
+internal fun AudioOutputInfoDialog(mode: AudioOutputBackend, onDismiss: () -> Unit) {
+    AppAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Informações da saída de áudio", fontWeight = FontWeight.SemiBold) },
+        text = { AudioOutputInfoCard(mode = mode) },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Fechar") }
         }
-    }
+    )
 }
 
 /** Campo de informação: mostra a saída que está sendo usada e o formato, atualizado ao vivo. */
 @Composable
-internal fun AudioOutputInfoCard(highQuality: Boolean) {
+internal fun AudioOutputInfoCard(mode: AudioOutputBackend) {
     val ctx = LocalContext.current
     var info by remember { mutableStateOf<OutputSummary?>(null) }
-    LaunchedEffect(highQuality) {
+    LaunchedEffect(mode) {
         // Releitura periódica: pega o DAC sendo plugado/desplugado e o formato aplicado à faixa atual.
         while (true) {
             info = withContext(Dispatchers.Default) {
-                AudioOutputInfo.summary(ctx, highQuality, PlaybackService.appliedFloatOutput)
+                val modeLabel = when (mode) {
+                    AudioOutputBackend.DEFAULT -> "Padrão do sistema"
+                    AudioOutputBackend.FIDELITY -> "Fidelidade de Som"
+                }
+                AudioOutputInfo.summary(
+                    ctx,
+                    modeLabel,
+                    mode != AudioOutputBackend.DEFAULT,
+                    PlaybackService.appliedFloatOutput,
+                    PlaybackService.appliedConversionInfo
+                )
             }
             delay(1500)
         }

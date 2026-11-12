@@ -81,7 +81,7 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        if (handle == 0L || paused) {
+        if (handle == 0L) {
             GLES30.glClearColor(0f, 0f, 0f, 1f)
             GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
             return
@@ -117,6 +117,7 @@ internal class MilkRenderer(private val texturePath: String) : GLSurfaceView.Ren
             loadPreset(next, smooth = true)
         }
 
+        // Continua animando mesmo pausado (sem PCM novo o preset segue a animação interna)
         val n = AudioTap.drain(pcm, MAX_FRAMES)
         if (n > 0) ProjectMNative.nativeAddPcm(handle, pcm, n)
         ProjectMNative.nativeRender(handle)
@@ -196,28 +197,27 @@ fun MilkVisualizer(
         renderer.presets = presets
         renderer.intervalMs = intervalSeconds * 1000L
         renderer.locked = locked
-        renderer.paused = !isPlaying
+        // Mantém a animação dos presets mesmo com a música pausada
+        renderer.paused = false
         if (forcePresetPath != null) renderer.forcedPresetPath = forcePresetPath
         renderer.onFailure = onFailure
         renderer.onPresetChanged = onCurrentPreset
         onCurrentPreset(renderer.currentPresetPath)
     }
 
-    // Só captura PCM enquanto o visualizador existe e a música toca
+    // Só captura PCM enquanto a música está tocando (ao pausar o preset continua animando sem áudio novo)
     DisposableEffect(isPlaying) {
         AudioTap.resetReader()
         AudioTap.active = isPlaying
         onDispose { AudioTap.active = false }
     }
 
-    // ~60 quadros/s quando tocando; para de pedir frames ao pausar
-    LaunchedEffect(glView, isPlaying) {
-        while (isPlaying) {
+    // ~60 quadros/s sempre que o visualizador estiver visível (anima mesmo pausado)
+    LaunchedEffect(glView) {
+        while (true) {
             glView.requestRender()
             delay(16)
         }
-        // um último frame limpo ao pausar
-        glView.requestRender()
     }
 
     // pausa/retoma o GL junto com a Activity

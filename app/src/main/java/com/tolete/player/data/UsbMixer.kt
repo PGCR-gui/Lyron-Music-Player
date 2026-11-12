@@ -6,6 +6,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioMixerAttributes
+import android.media.AudioTrack
 import android.os.Build
 import android.util.Log
 
@@ -73,7 +74,8 @@ object UsbMixer {
         channelCount: Int,
         encoding: Int,
         preferredHz: Int,
-        bitPerfect: Boolean
+        bitPerfect: Boolean,
+        allow16BitFallback: Boolean = false
     ) {
         trackSampleRate = sampleRate
         trackEncoding = encoding
@@ -87,7 +89,23 @@ object UsbMixer {
             resetState()
             return
         }
-        applyApi34(context, usb, sampleRate, channelCount, encoding, preferredHz, bitPerfect)
+        applyApi34(context, usb, sampleRate, channelCount, encoding, preferredHz, bitPerfect, allow16BitFallback)
+    }
+
+    /** Taxas explicitamente publicadas pelo mixer USB; mais confiáveis que um probe genérico de AudioTrack. */
+    fun supportedMixerSampleRates(context: Context, usb: AudioDeviceInfo?): Set<Int> {
+        if (Build.VERSION.SDK_INT < 34 || usb == null) return emptySet()
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                ?: return emptySet()
+            am.getSupportedMixerAttributes(usb)
+                .filter { it.mixerBehavior != AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
+                .map { it.format.sampleRate }
+                .filter { it > 0 }
+                .toSet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
     }
 
     @androidx.annotation.RequiresApi(34)
@@ -98,7 +116,8 @@ object UsbMixer {
         channelCount: Int,
         encoding: Int,
         preferredHz: Int,
-        bitPerfect: Boolean
+        bitPerfect: Boolean,
+        allow16BitFallback: Boolean
     ) {
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         try {
@@ -201,7 +220,7 @@ object UsbMixer {
                     .thenByDescending { encodingRank(it.format.encoding) }
             )
             // 16-bit só entra se a própria faixa for 16-bit: reduzir hi-res para 16 bits anularia o objetivo.
-            val minRank = if (encoding == AudioFormat.ENCODING_PCM_16BIT) 1 else 2
+            val minRank = if (encoding == AudioFormat.ENCODING_PCM_16BIT || allow16BitFallback) 1 else 2
             val candidates = byPreference(
                 sameCh.filter { !isBp(it) && encodingRank(it.format.encoding) >= minRank }
             )

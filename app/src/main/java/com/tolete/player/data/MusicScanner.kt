@@ -223,7 +223,12 @@ class MusicScanner(private val context: Context) {
             }
         } catch (_: Exception) { }
 
-        val foundPaths = (alreadyFound + existingById.values)
+        // Só deduplica contra o que ESTE scan já achou (MediaStore). Antes também incluía a
+        // biblioteca anterior (existingById): o DSF já salvo era tratado como "já encontrado",
+        // pulado aqui e ficava fora do resultado, sumindo da biblioteca. No scan seguinte,
+        // sem ele no cache, era achado de novo — daí o ciclo some/aparece.
+        // O cache continua sendo usado abaixo (existingById[trackId]) para evitar reler tags.
+        val foundPaths = alreadyFound
             .mapNotNull { canonicalTrackPath(it.path) }
             .toMutableSet()
         val visitedDirectories = HashSet<String>()

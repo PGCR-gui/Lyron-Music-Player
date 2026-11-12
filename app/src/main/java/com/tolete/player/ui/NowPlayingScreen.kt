@@ -2,6 +2,7 @@ package com.tolete.player.ui
 
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
+import com.tolete.player.ui.MusicViewModel.AudioOutputBackend
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -100,6 +101,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.rememberCoroutineScope
 import com.tolete.player.data.LyricsSearchResult
+import com.tolete.player.data.LyricsSource
 import com.tolete.player.data.LyricsType
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -116,6 +118,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -131,15 +134,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -267,6 +275,14 @@ private fun technicalInfo(t: Track): List<String> = buildList {
     if (t.channels > 0) add(formatChannels(t.channels))
 }
 
+/** O parser já grava em endMs o prazo de 1,5 s do backing vocal; não somar outra janela. */
+private fun isBackingLineVisible(line: LyricLine, positionMs: Long): Boolean {
+    val parsedEnd = line.endMs.takeIf { it > line.timeMs }
+    val lastTimedWord = line.words.mapNotNull { it.timeMs.takeIf { time -> time >= 0L } }.maxOrNull()
+    val expiration = parsedEnd ?: ((lastTimedWord ?: line.timeMs).coerceAtLeast(0L) + 1_500L)
+    return positionMs <= expiration
+}
+
 private fun codecDrawableRes(codec: String?): Int? {
     if (codec.isNullOrBlank()) return null
     val c = codec.lowercase()
@@ -310,6 +326,7 @@ private fun NowPlayingBlurredBackground(artPath: String?) {
 fun NowPlayingScreen(
     track: Track,
     isPlaying: Boolean,
+    playButtonIsPlaying: Boolean = isPlaying,
     shuffle: Boolean,
     repeatMode: Int = Player.REPEAT_MODE_OFF,
     queue: List<Track>,
@@ -349,9 +366,9 @@ fun NowPlayingScreen(
     milkPresets: List<String> = emptyList(),
     onDeletePreset: (String) -> Unit = {},
     milkIntervalSec: Int = 30,
-    changeSongWithMilkInterval: Boolean = false,
-    changePresetOnSongChange: Boolean = true,
-    onSkipToRandom: () -> Unit = {},
+    milkSwitchMode: String = "TIME",
+    milkPresetOrder: String = "RANDOM",
+    milkFavoritesOnly: Boolean = false,
     lyricsFontSize: Float = 22f,
     lyricsPrimaryColor: Int = 0xFFFFFFFF.toInt(),
     lyricsSecondaryColor: Int = 0x66FFFFFF,
@@ -359,6 +376,7 @@ fun NowPlayingScreen(
     lyricsBorderWidth: Float = 0f,
     lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
     lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
+    lyricsBackingSecondaryColor: Int = 0x99CE93D8.toInt(),
     playCount: Int = 0,
     firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L,
@@ -367,7 +385,8 @@ fun NowPlayingScreen(
     getPlaybackSpeed: () -> Float = { 1f },
     onPlaybackSpeed: (Float) -> Unit = {},
     lyricsEmphasisFontPath: String? = null,
-    highQualityOutput: Boolean = false
+    lyricsBackingFontPath: String? = null,
+    audioOutputMode: AudioOutputBackend = AudioOutputBackend.DEFAULT
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
@@ -402,6 +421,8 @@ fun NowPlayingScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showTechDetails by remember { mutableStateOf(false) }
     var showOutputInfo by remember { mutableStateOf(false) }
+    var showPlaybackSpeedDialog by remember { mutableStateOf(false) }
+    var playbackSpeedDraft by remember { mutableFloatStateOf(getPlaybackSpeed().coerceIn(0.25f, 2f)) }
     var pendingDeleteTrack by remember { mutableStateOf<Track?>(null) }
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
     var showLyricsSearch by remember { mutableStateOf(false) }
@@ -409,23 +430,6 @@ fun NowPlayingScreen(
     var showVideoDialog by remember { mutableStateOf(false) }
     var videoProgressHidden by remember { mutableStateOf(false) }
 
-    // Troca de preset ao mudar de música
-    LaunchedEffect(track.id, changePresetOnSongChange, showVisualizer) {
-        if (changePresetOnSongChange && showVisualizer && milkPresets.size > 1 && !presetLocked) {
-            forcePresetPath = milkPresets.random()
-        }
-    }
-
-    // Timer: além do preset, opcionalmente troca a música aleatoriamente
-    LaunchedEffect(milkIntervalSec, changeSongWithMilkInterval, showVisualizer, isPlaying) {
-        if (!changeSongWithMilkInterval || milkIntervalSec <= 0 || !showVisualizer || !isPlaying) return@LaunchedEffect
-        while (true) {
-            kotlinx.coroutines.delay(milkIntervalSec * 1000L)
-            if (changeSongWithMilkInterval && showVisualizer && isPlaying) {
-                onSkipToRandom()
-            }
-        }
-    }
     var showEqualizer by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
     var sleepJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -454,6 +458,45 @@ fun NowPlayingScreen(
             .edit().putStringSet("milk_preset_favs", milkPresetFavorites).apply()
     }
 
+    fun chooseAutomaticPreset(): String? {
+        val pool = if (milkFavoritesOnly) {
+            milkPresets.filter { java.io.File(it).name in milkPresetFavorites }
+        } else milkPresets
+        if (pool.isEmpty()) return null
+        if (milkPresetOrder == "SEQUENTIAL") {
+            val currentIndex = pool.indexOf(currentPresetPath)
+            return if (currentIndex < 0) pool.first() else pool[(currentIndex + 1) % pool.size]
+        }
+        return pool.filterNot { it == currentPresetPath }.ifEmpty { pool }.randomOrNull()
+    }
+
+    // Modo por música: não consulta o intervalo. Se o visualizador for ligado depois da mudança,
+    // escolhe um preset do pool atual; se já estava ligado, troca na transição da faixa.
+    LaunchedEffect(
+        track.id, milkSwitchMode, showVisualizer, milkPresets,
+        milkPresetOrder, milkFavoritesOnly, milkPresetFavorites, presetLocked
+    ) {
+        if (milkSwitchMode == "TRACK" && showVisualizer && !presetLocked) {
+            chooseAutomaticPreset()?.let { if (it != currentPresetPath) forcePresetPath = it }
+        }
+    }
+
+    // Modo por tempo: o temporizador troca apenas o preset, nunca a música.
+    LaunchedEffect(
+        milkIntervalSec, milkSwitchMode, showVisualizer, isPlaying,
+        milkPresets, milkPresetOrder, milkFavoritesOnly, milkPresetFavorites, presetLocked
+    ) {
+        if (milkSwitchMode != "TIME" || milkIntervalSec <= 0 || !showVisualizer || !isPlaying) {
+            return@LaunchedEffect
+        }
+        while (true) {
+            kotlinx.coroutines.delay(milkIntervalSec * 1000L)
+            if (milkSwitchMode == "TIME" && showVisualizer && isPlaying && !presetLocked) {
+                chooseAutomaticPreset()?.let { if (it != currentPresetPath) forcePresetPath = it }
+            }
+        }
+    }
+
     LaunchedEffect(isFavorite, track.id) {
         if (isFavorite != prevFavorite) {
             heartBurst = isFavorite
@@ -474,7 +517,9 @@ fun NowPlayingScreen(
         lyricsPosition = position
         pendingSeekMs = null
         while (isPlaying) {
-            delay(if (showFullLyrics) 48 else 80)
+            // Atualização a cada frame: 48–80 ms fazia a palavra avançar em blocos visíveis
+            // e a transição podia ser substituída antes de terminar em versos curtos.
+            delay(if (showFullLyrics) 16 else 32)
             val p = getPosition()
             lyricsPosition = p
             if (isDraggingSeek || dragFraction != null) continue
@@ -531,12 +576,14 @@ fun NowPlayingScreen(
                 val main = synced[mainIdx]
                 val trIdx = pairedTranslationIndex(synced, mainIdx)
                 val tr = if (trIdx >= 0) synced[trIdx] else null
-                val bg = synced.lastOrNull {
-                    it.isBackground && !it.isTranslation && it.timeMs <= position && it.timeMs >= main.timeMs
+                val latestBg = synced.lastOrNull {
+                    it.isBackground && !it.isTranslation && it.timeMs <= position
                 }
+                val bg = latestBg?.takeIf { isBackingLineVisible(it, position) }
                 Triple<LyricLine?, LyricLine?, LyricLine?>(main, bg, tr)
             } else {
-                Triple<LyricLine?, LyricLine?, LyricLine?>(null, lastBg, lastTr)
+                val bg = lastBg?.takeIf { isBackingLineVisible(it, position) }
+                Triple<LyricLine?, LyricLine?, LyricLine?>(null, bg, lastTr)
             }
         }
     }
@@ -549,6 +596,9 @@ fun NowPlayingScreen(
     }
     val lyricsTranslationFont = remember(lyricsTranslationFontPath, lyricsFontPath) {
         BuiltInFonts.resolveFamily(lyricsTranslationFontPath) ?: BuiltInFonts.resolveFamily(lyricsFontPath)
+    }
+    val lyricsBackingFont = remember(lyricsBackingFontPath, lyricsFontPath) {
+        BuiltInFonts.resolveFamily(lyricsBackingFontPath) ?: BuiltInFonts.resolveFamily(lyricsFontPath)
     }
     val lyricsEmphasisFont = remember(lyricsEmphasisFontPath, lyricsFontPath) {
         BuiltInFonts.resolveFamily(lyricsEmphasisFontPath)
@@ -563,9 +613,29 @@ fun NowPlayingScreen(
     val iconSm = if (layout.compact) 36.dp else layout.dp(40)
     val topBarH = if (layout.compact) 48.dp else 56.dp
 
+    val playerMenuBackdrop = rememberGraphicsLayer()
+    var playerMenuBackdropOrigin by remember {
+        mutableStateOf<androidx.compose.ui.geometry.Offset>(androidx.compose.ui.geometry.Offset.Zero)
+    }
+    val capturePlayerBackdrop = LocalMenuVisualStyle.current == MenuVisualStyle.GLASS &&
+        GlassConfig.quality != GlassQuality.LIGHT && (showMenu || showArtistMenu || showQueue)
+
+    CompositionLocalProvider(
+        LocalGlassBackdrop provides playerMenuBackdrop,
+        LocalGlassBackdropOrigin provides playerMenuBackdropOrigin
+    ) {
     Box(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { playerMenuBackdropOrigin = it.positionOnScreen() }
+            .drawWithContent {
+                if (capturePlayerBackdrop) {
+                    playerMenuBackdrop.record { this@drawWithContent.drawContent() }
+                    drawLayer(playerMenuBackdrop)
+                } else {
+                    drawContent()
+                }
+            }
             .background(Color(0xFF0B0B14))
             .pointerInput(Unit) {}
     ) {
@@ -612,16 +682,10 @@ fun NowPlayingScreen(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false },
                         shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .border(
-                                1.dp,
-                                Brush.verticalGradient(
-                                    listOf(Color.White.copy(0.7f), Color.White.copy(0.25f))
-                                ),
-                                RoundedCornerShape(16.dp)
-                            )
+                        lensEnabled = true,
+                        modifier = Modifier.appMenuOutline(RoundedCornerShape(16.dp))
                     ) {
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Adicionar a uma playlist", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -630,7 +694,7 @@ fun NowPlayingScreen(
                                 onAddToPlaylist()
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Editar tags", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -639,7 +703,7 @@ fun NowPlayingScreen(
                                 onEditTags()
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Colocar na blacklist", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -648,7 +712,7 @@ fun NowPlayingScreen(
                                 onAddToBlacklist()
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Buscar letra", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -657,7 +721,7 @@ fun NowPlayingScreen(
                                 showLyricsSearch = true
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Editar letra", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -666,7 +730,7 @@ fun NowPlayingScreen(
                                 onEditLyrics()
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text(
                                     if (sleepMinutes > 0) "Timer de sono (${sleepMinutes} min)" else "Timer de sono",
@@ -678,38 +742,20 @@ fun NowPlayingScreen(
                                 showSleepTimer = true
                             }
                         )
-                        val speedSteps = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
-                        var menuSpeed by remember(showMenu) {
-                            mutableStateOf(
-                                getPlaybackSpeed().let { cur ->
-                                    speedSteps.minByOrNull { kotlin.math.abs(it - cur) } ?: 1f
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
-                                val label = when (menuSpeed) {
-                                    0.5f -> "0.5x"
-                                    0.75f -> "0.75x"
-                                    1f -> "1x"
-                                    1.25f -> "1.25x"
-                                    1.5f -> "1.5x"
-                                    1.75f -> "1.75x"
-                                    2f -> "2x"
-                                    else -> "${"%.2f".format(menuSpeed)}x"
-                                }
-                                Text("Velocidade: $label  (tocar p/ mudar)", color = MaterialTheme.colorScheme.onSurface)
+                                Text(
+                                    "Velocidade: ${(getPlaybackSpeed() * 100f).toInt()}%",
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
                             },
                             onClick = {
-                                val idx = speedSteps.indexOf(menuSpeed).let {
-                                    if (it < 0) speedSteps.indexOf(1f) else it
-                                }
-                                val next = speedSteps[(idx + 1) % speedSteps.size]
-                                menuSpeed = next
-                                onPlaybackSpeed(next)
+                                playbackSpeedDraft = getPlaybackSpeed().coerceIn(0.25f, 2f)
+                                showMenu = false
+                                showPlaybackSpeedDialog = true
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Gerar foto do trecho", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -738,7 +784,7 @@ fun NowPlayingScreen(
                                 }
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Gerar vídeo", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -758,7 +804,7 @@ fun NowPlayingScreen(
                                 }
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Saída de áudio", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -767,7 +813,7 @@ fun NowPlayingScreen(
                                 showOutputInfo = true
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text("Excluir arquivo", color = MaterialTheme.colorScheme.error)
                             },
@@ -1081,15 +1127,15 @@ fun NowPlayingScreen(
                                 targetState = activeLine?.text.orEmpty(),
                                 transitionSpec = {
                                     (slideInVertically(
-                                        initialOffsetY = { it / 3 },
-                                        animationSpec = tween(420, easing = FastOutSlowInEasing)
-                                    ) + fadeIn(tween(320, easing = FastOutSlowInEasing)) +
-                                        scaleIn(initialScale = 0.88f, animationSpec = tween(420, easing = FastOutSlowInEasing))) togetherWith
+                                        initialOffsetY = { it / 4 },
+                                        animationSpec = tween(260, easing = FastOutSlowInEasing)
+                                    ) + fadeIn(tween(220, easing = FastOutSlowInEasing)) +
+                                        scaleIn(initialScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing))) togetherWith
                                         (slideOutVertically(
-                                            targetOffsetY = { -it / 4 },
-                                            animationSpec = tween(280, easing = FastOutSlowInEasing)
-                                        ) + fadeOut(tween(240)) +
-                                            scaleOut(targetScale = 1.06f, animationSpec = tween(280)))
+                                            targetOffsetY = { -it / 5 },
+                                            animationSpec = tween(200, easing = FastOutSlowInEasing)
+                                        ) + fadeOut(tween(180)) +
+                                            scaleOut(targetScale = 1.02f, animationSpec = tween(200)))
                                 },
                                 label = "lyricLine"
                             ) { lineText ->
@@ -1133,17 +1179,33 @@ fun NowPlayingScreen(
                                     )
                                 }
                             }
-                            activeBgLine?.text?.takeIf { it.isNotBlank() }?.let { bg ->
-                                Text(
-                                    bg,
-                                    color = Color(lyricsBackingColor).copy(alpha = 0.85f),
-                                    fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
-                                    fontFamily = lyricsFont,
-                                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                    textAlign = TextAlign.Center,
-                                    maxLines = 2,
-                                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                                )
+                            activeBgLine?.takeIf { it.text.isNotBlank() }?.let { bgLine ->
+                                if (bgLine.hasSyllableSync) {
+                                    SyllableLine(
+                                        line = bgLine,
+                                        position = finePos,
+                                        fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
+                                        fontFamily = lyricsBackingFont ?: lyricsFont,
+                                        primary = Color(lyricsBackingColor).copy(alpha = 0.95f),
+                                        secondary = Color(lyricsBackingSecondaryColor),
+                                        borderColor = Color(lyricsBorderColor),
+                                        borderWidth = lyricsBorderWidth,
+                                        emphasisFont = lyricsEmphasisFont,
+                                        isBackground = true,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        bgLine.text,
+                                        color = Color(lyricsBackingColor).copy(alpha = 0.85f),
+                                        fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
+                                        fontFamily = lyricsBackingFont ?: lyricsFont,
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                    )
+                                }
                             }
                             } // Column
                         } else if (lyrics.isNotEmpty()) {
@@ -1215,17 +1277,10 @@ fun NowPlayingScreen(
                     expanded = showArtistMenu,
                     onDismissRequest = { showArtistMenu = false },
                     shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .border(
-                            1.dp,
-                            Brush.verticalGradient(
-                                listOf(Color.White.copy(0.7f), Color.White.copy(0.25f))
-                            ),
-                            RoundedCornerShape(16.dp)
-                        )
+                    modifier = Modifier.appMenuOutline(RoundedCornerShape(16.dp))
                 ) {
                     artistNames.forEach { name ->
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = { Text(name, color = MaterialTheme.colorScheme.onSurface) },
                             onClick = {
                                 showArtistMenu = false
@@ -1344,8 +1399,8 @@ fun NowPlayingScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        painter = painterResource(if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play),
-                        contentDescription = if (isPlaying) "Pausar" else "Tocar",
+                        painter = painterResource(if (playButtonIsPlaying) R.drawable.ic_pause else R.drawable.ic_play),
+                        contentDescription = if (playButtonIsPlaying) "Pausar" else "Tocar",
                         tint = Color.Unspecified,
                         modifier = Modifier.size(playBtn * 0.56f)
                     )
@@ -1556,8 +1611,20 @@ fun NowPlayingScreen(
 
         if (showOutputInfo) {
             AudioOutputInfoDialog(
-                highQuality = highQualityOutput,
+                mode = audioOutputMode,
                 onDismiss = { showOutputInfo = false }
+            )
+        }
+
+        if (showPlaybackSpeedDialog) {
+            PlaybackSpeedDialog(
+                value = playbackSpeedDraft,
+                onValueChange = { playbackSpeedDraft = it },
+                onDismiss = { showPlaybackSpeedDialog = false },
+                onApply = {
+                    onPlaybackSpeed(playbackSpeedDraft)
+                    showPlaybackSpeedDialog = false
+                }
             )
         }
 
@@ -1574,16 +1641,20 @@ fun NowPlayingScreen(
         if (showFullLyrics && lyrics.isNotEmpty()) {
             FullscreenLyrics(
                 track = track,
-                lyrics = if (synced.isNotEmpty()) synced else lyrics,
+                // Conserva linhas plain de arquivos mistos; o renderer usa timestamps apenas
+                // para destaque/seek e deixa as linhas sem tempo visíveis na lista.
+                lyrics = lyrics,
                 position = lyricsPosition,
                 lyricsFont = lyricsFont,
                 translationFont = lyricsTranslationFont,
+                backingFont = lyricsBackingFont,
                 emphasisFont = lyricsEmphasisFont,
                 fontSizeSp = lyricsFontSize,
                 primaryColor = Color(lyricsPrimaryColor),
                 secondaryColor = Color(lyricsSecondaryColor),
                 translationColor = Color(lyricsTranslationColor),
                 backingColor = Color(lyricsBackingColor),
+                backingSecondaryColor = Color(lyricsBackingSecondaryColor),
                 borderColor = Color(lyricsBorderColor),
                 borderWidth = lyricsBorderWidth,
                 onSeek = { ms ->
@@ -1683,9 +1754,11 @@ fun NowPlayingScreen(
                     showPresetPicker = false
                     showVisualizer = true
                 },
-                onDelete = onDeletePreset
+                onDelete = onDeletePreset,
+                onFavoritesChanged = { milkPresetFavorites = it }
             )
         }
+    }
     }
 }
 
@@ -2412,17 +2485,10 @@ internal fun QueueSheet(
                         expanded = menuForIndex == realIndex && !showSelectionMenu,
                         onDismissRequest = { menuForIndex = null },
                         shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .border(
-                                1.dp,
-                                Brush.verticalGradient(
-                                    listOf(Color.White.copy(0.7f), Color.White.copy(0.25f))
-                                ),
-                                RoundedCornerShape(16.dp)
-                            )
+                        modifier = Modifier.appMenuOutline(RoundedCornerShape(16.dp))
                     ) {
                         val fav = isFavorite(track.id)
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = { Text("Reproduzir a seguir", color = MaterialTheme.colorScheme.onSurface) },
                             onClick = {
                                 menuForIndex = null
@@ -2430,7 +2496,7 @@ internal fun QueueSheet(
                                 onPlayNext(track)
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = { Text("Remover da fila", color = MaterialTheme.colorScheme.onSurface) },
                             leadingIcon = {
                                 Icon(Icons.Rounded.Close, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
@@ -2441,7 +2507,7 @@ internal fun QueueSheet(
                                 onRemoveFromQueue(realIndex)
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = {
                                 Text(if (fav) "Desfavoritar" else "Favoritar", color = MaterialTheme.colorScheme.onSurface)
                             },
@@ -2457,7 +2523,7 @@ internal fun QueueSheet(
                                 onToggleFavorite(track)
                             }
                         )
-                        DropdownMenuItem(
+                        LensMenuItem(
                             text = { Text("Excluir permanentemente", color = MaterialTheme.colorScheme.error) },
                             leadingIcon = {
                                 Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
@@ -2606,11 +2672,23 @@ internal fun LyricsSearchDialog(
                     LazyColumn(Modifier.height(280.dp)) {
                         items(results, key = { it.id }) { r ->
                             val expanded = expandedId == r.id
+                            val isLyronRepository = r.source == LyricsSource.LYRON_REPOSITORY
                             Column(
                                 Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(if (expanded) Color(0xFF1B3A2A) else Color.Transparent)
+                                    .background(
+                                        when {
+                                            expanded -> Color(0xFF1B3A2A)
+                                            isLyronRepository -> Color(0xFF2A203A)
+                                            else -> Color.Transparent
+                                        }
+                                    )
+                                    .then(
+                                        if (isLyronRepository) {
+                                            Modifier.border(1.dp, Color(0xFFB985FF), RoundedCornerShape(10.dp))
+                                        } else Modifier
+                                    )
                                     .clickable {
                                         if (expanded) onPick(r)
                                         else expandedId = r.id
@@ -2641,13 +2719,20 @@ internal fun LyricsSearchDialog(
                                         Modifier.padding(top = 4.dp),
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        LyricsBadge(r.source.label, Color(0xFFECEFF1), Color(0xFF263238))
+                                        LyricsBadge(
+                                            r.source.label,
+                                            if (isLyronRepository) Color(0xFFE7D1FF) else Color(0xFFECEFF1),
+                                            if (isLyronRepository) Color(0xFF45216B) else Color(0xFF263238)
+                                        )
                                         val (badgeBg, badgeFg) = when (r.type) {
                                             LyricsType.PLAIN -> Color(0xFFE0E0E0) to Color(0xFF424242)
                                             LyricsType.SYNCED -> Color(0xFFD6E4FF) to Color(0xFF1E4DB7)
                                             LyricsType.WORD -> Color(0xFFE6D8FF) to Color(0xFF5B2CA0)
                                         }
                                         LyricsBadge(r.type.label, badgeBg, badgeFg)
+                                        if (r.hasElrcEffects) {
+                                            LyricsBadge("ELRC+", Color(0xFFFFE0B2), Color(0xFF8A3B00))
+                                        }
                                     }
                                 } else {
                                     // Preview estilo referência: faixa/artista + linhas sincronizadas
@@ -2683,6 +2768,11 @@ internal fun LyricsSearchDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (r.hasElrcEffects) {
+                                        Row(Modifier.padding(top = 4.dp)) {
+                                            LyricsBadge("ELRC+", Color(0xFFFFE0B2), Color(0xFF8A3B00))
+                                        }
+                                    }
                                     Spacer(Modifier.height(6.dp))
                                     val previewLines = remember(r.id) { r.lines.take(12) }
                                     if (previewLines.isEmpty()) {
@@ -2794,12 +2884,14 @@ internal fun FullscreenLyrics(
     position: Long,
     lyricsFont: FontFamily?,
     translationFont: FontFamily? = null,
+    backingFont: FontFamily? = null,
     emphasisFont: FontFamily? = null,
     fontSizeSp: Float = 22f,
     primaryColor: Color = Color.White,
     secondaryColor: Color = Color.White.copy(alpha = 0.40f),
     translationColor: Color = Color(0xFFB0BEC5),
     backingColor: Color = Color(0xFFCE93D8),
+    backingSecondaryColor: Color = Color(0x99CE93D8),
     borderColor: Color = Color.Black,
     borderWidth: Float = 0f,
     onSeek: (Long) -> Unit,
@@ -2816,7 +2908,7 @@ internal fun FullscreenLyrics(
         if (!hasTimestamps) Triple(-1, -1, -1)
         else {
             var bestMain = -1
-            var bestBg = -1
+            var latestStartedBg = -1
             var lastStartedMain = -1
             var lastStarted = -1
             for (i in lyrics.indices) {
@@ -2825,13 +2917,16 @@ internal fun FullscreenLyrics(
                 if (line.timeMs > position) break
                 lastStarted = i
                 if (!line.isTranslation && !line.isBackground) lastStartedMain = i
-                val stillActive = line.endMs < 0 || position <= line.endMs + 120
+                if (line.isBackground && !line.isTranslation) latestStartedBg = i
+                val stillActive = if (line.isBackground && !line.isTranslation) {
+                    isBackingLineVisible(line, position)
+                } else {
+                    line.endMs < 0 || position <= line.endMs + 120L
+                }
                 if (!stillActive) continue
                 when {
                     line.isTranslation -> Unit
-                    line.isBackground -> {
-                        if (bestBg < 0 || line.timeMs >= lyrics[bestBg].timeMs) bestBg = i
-                    }
+                    line.isBackground -> Unit
                     else -> {
                         if (bestMain < 0 || line.timeMs >= lyrics[bestMain].timeMs) bestMain = i
                     }
@@ -2850,7 +2945,10 @@ internal fun FullscreenLyrics(
                 val mainEnd = if (mainLine.endMs > 0) mainLine.endMs else Long.MAX_VALUE
                 return other.timeMs <= mainEnd && (other.endMs < 0 || other.endMs >= mainLine.timeMs)
             }
-            val bg = if (overlapsMain(bestBg)) bestBg else -1
+            // Uma BG nova substitui a anterior mesmo que esta ainda esteja na janela de 1,5 s.
+            val bg = latestStartedBg.takeIf {
+                it >= 0 && isBackingLineVisible(lyrics[it], position) && overlapsMain(it)
+            } ?: -1
             val tr = if (main >= 0) pairedTranslationIndex(lyrics, main) else -1
             Triple(main, bg, tr)
         }
@@ -2997,14 +3095,15 @@ internal fun FullscreenLyrics(
                             else -> 1f
                         },
                         animationSpec = androidx.compose.animation.core.spring(
-                            dampingRatio = 0.86f,
-                            stiffness = 280f
+                            dampingRatio = 0.92f,
+                            stiffness = 180f
                         ),
                         label = "lyricScale"
                     )
                     val alpha by androidx.compose.animation.core.animateFloatAsState(
                         targetValue = when {
                             !hasTimestamps -> 0.85f
+                            line.timeMs < 0 -> 0.78f
                             isMainActive -> 1f
                             isBgActive || isTrActive -> 0.92f
                             kotlin.math.abs(index - activeIndex) <= 1 -> 0.55f
@@ -3012,8 +3111,8 @@ internal fun FullscreenLyrics(
                             else -> 0.18f
                         },
                         animationSpec = androidx.compose.animation.core.spring(
-                            dampingRatio = 0.9f,
-                            stiffness = 220f
+                            dampingRatio = 0.94f,
+                            stiffness = 150f
                         ),
                         label = "lyricAlpha"
                     )
@@ -3057,7 +3156,11 @@ internal fun FullscreenLyrics(
                                 line = line,
                                 position = position,
                                 fontSize = baseSize,
-                                fontFamily = if (isTr) (translationFont ?: lyricsFont) else lyricsFont,
+                                fontFamily = when {
+                                    isTr -> translationFont ?: lyricsFont
+                                    isBg -> backingFont ?: lyricsFont
+                                    else -> lyricsFont
+                                },
                                 // Tradução usa a cor de tradução; letra usa primária/secundária
                                 primary = when {
                                     isTr -> translationColor
@@ -3066,7 +3169,7 @@ internal fun FullscreenLyrics(
                                 },
                                 secondary = when {
                                     isTr -> translationColor.copy(alpha = 0.55f)
-                                    isBg -> backingColor.copy(alpha = 0.55f)
+                                    isBg -> backingSecondaryColor
                                     else -> secondaryColor
                                 },
                                 borderColor = borderColor,
@@ -3092,11 +3195,15 @@ internal fun FullscreenLyrics(
                                     isMainActive -> primaryColor
                                     isBgActive -> backingColor.copy(alpha = 0.95f)
                                     isTrActive -> translationColor.copy(alpha = 0.95f)
-                                    isBg -> backingColor.copy(alpha = 0.65f)
+                                    isBg -> backingSecondaryColor
                                     isTr -> secondaryColor  // fora do timestamp: secundária
                                     else -> secondaryColor
                                 },
-                                fontFamily = if (isTr) (translationFont ?: lyricsFont) else lyricsFont,
+                                fontFamily = when {
+                                    isTr -> translationFont ?: lyricsFont
+                                    isBg -> backingFont ?: lyricsFont
+                                    else -> lyricsFont
+                                },
                                 fontStyle = if (isBg || isTr) androidx.compose.ui.text.font.FontStyle.Italic
                                 else androidx.compose.ui.text.font.FontStyle.Normal,
                                 style = if (borderWidth > 0f && isActive) {
@@ -3134,21 +3241,33 @@ private fun SyllableLine(
 ) {
     var activeWordIdx = -1
     for (i in line.words.indices) {
-        if (position >= line.words[i].timeMs) activeWordIdx = i else break
+        val timeMs = line.words[i].timeMs
+        if (timeMs >= 0L) {
+            if (position >= timeMs) activeWordIdx = i else break
+        }
     }
     val wordProgress = if (activeWordIdx < 0) {
         0f
     } else {
         val current = line.words[activeWordIdx]
-        val end = when {
-            current.endMs > current.timeMs -> current.endMs
-            activeWordIdx < line.words.lastIndex -> line.words[activeWordIdx + 1].timeMs
-            line.endMs > current.timeMs -> line.endMs
-            else -> current.timeMs + 350L
+        val nextTimedWord = line.words.drop(activeWordIdx + 1).firstOrNull {
+            it.timeMs > current.timeMs
         }
+        // Preferência: endMs já calculado no parse/save → próximo timestamp de palavra → fim da linha.
+        // Sem hard-cap agressivo de 800 ms: letras manuais (espaçamento maior) e baixadas
+        // passam a preencher no ritmo real da sincronização, o que deixa o karaokê bem mais suave.
+        val candidateEnd = when {
+            current.endMs > current.timeMs -> current.endMs
+            nextTimedWord != null && nextTimedWord.timeMs > current.timeMs -> nextTimedWord.timeMs
+            line.endMs > current.timeMs -> line.endMs
+            else -> current.timeMs + 1_200L
+        }
+        // Só limita spans absurdamente longos (silêncios / fim de verso) para não “arrastar” o fill.
+        val end = minOf(candidateEnd, current.timeMs + 2_200L)
         val span = (end - current.timeMs).coerceAtLeast(1L).toFloat()
         val linear = ((position - current.timeMs) / span).coerceIn(0f, 1f)
-        1f - (1f - linear) * (1f - linear)
+        // Smoothstep: desacelera ao entrar/sair da palavra.
+        linear * linear * (3f - 2f * linear)
     }
 
     val effects = rememberInfiniteTransition(label = "lyricWordEffects")
@@ -3411,7 +3530,8 @@ internal fun MilkPresetPickerDialog(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
     onDelete: ((String) -> Unit)? = null,
-    manageMode: Boolean = false
+    manageMode: Boolean = false,
+    onFavoritesChanged: (Set<String>) -> Unit = {}
 ) {
     val context = LocalContext.current
     val prefs = remember {
@@ -3423,6 +3543,7 @@ internal fun MilkPresetPickerDialog(
     var query by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var showClearFavoritesConfirmation by remember { mutableStateOf(false) }
 
     fun toggleFav(path: String) {
         val name = java.io.File(path).name
@@ -3430,6 +3551,7 @@ internal fun MilkPresetPickerDialog(
         if (name in next) next.remove(name) else next.add(name)
         favorites = next
         prefs.edit().putStringSet("milk_preset_favs", next).apply()
+        onFavoritesChanged(next)
     }
     val sorted = remember(presets, favorites, query) {
         val fav = presets.filter { java.io.File(it).name in favorites }
@@ -3472,10 +3594,32 @@ internal fun MilkPresetPickerDialog(
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
+                if (manageMode) {
+                    IconButton(
+                        onClick = { showClearFavoritesConfirmation = true },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.HeartBroken,
+                            contentDescription = "Limpar todos os favoritos",
+                            tint = Color(0xFFE57373)
+                        )
+                    }
+                }
             }
         },
         text = {
-            Column {
+            Column(
+                Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.13f), Color(0xFF171923).copy(alpha = 0.60f))
+                        )
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.20f), RoundedCornerShape(22.dp))
+                    .padding(10.dp)
+            ) {
                 if (showSearch) {
                     OutlinedTextField(
                         value = query,
@@ -3505,6 +3649,17 @@ internal fun MilkPresetPickerDialog(
                             Row(
                                 Modifier
                                     .fillMaxWidth()
+                                    .clip(RoundedCornerShape(50.dp))
+                                    .background(
+                                        if (isCurrent) MaterialTheme.colorScheme.primary.copy(0.19f)
+                                        else Color.White.copy(alpha = 0.055f)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (isCurrent) MaterialTheme.colorScheme.primary.copy(0.42f)
+                                        else Color.White.copy(alpha = 0.10f),
+                                        RoundedCornerShape(50.dp)
+                                    )
                                     .combinedClickable(
                                         onClick = {
                                             if (!manageMode) onSelect(path)
@@ -3513,8 +3668,7 @@ internal fun MilkPresetPickerDialog(
                                             if (onDelete != null) pendingDelete = path
                                         }
                                     )
-                                    .background(if (isCurrent) MaterialTheme.colorScheme.primary.copy(0.15f) else Color.Transparent)
-                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    .padding(vertical = 8.dp, horizontal = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
@@ -3633,9 +3787,84 @@ internal fun MilkPresetPickerDialog(
             }
         )
     }
+    if (showClearFavoritesConfirmation) {
+        AppAlertDialog(
+            onDismissRequest = { showClearFavoritesConfirmation = false },
+            title = { Text("Limpar favoritos?") },
+            text = {
+                Text("Remover todos os presets da lista de favoritos? Os arquivos não serão excluídos.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    favorites = emptySet()
+                    prefs.edit().putStringSet("milk_preset_favs", mutableSetOf()).apply()
+                    onFavoritesChanged(emptySet())
+                    showClearFavoritesConfirmation = false
+                }) {
+                    Text("Limpar favoritos", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearFavoritesConfirmation = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
 }
 
 
+
+@Composable
+private fun PlaybackSpeedDialog(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    onDismiss: () -> Unit,
+    onApply: () -> Unit
+) {
+    AppAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Velocidade de reprodução") },
+        text = {
+            Column(
+                Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.14f), Color(0xFF171923).copy(alpha = 0.62f))
+                        )
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.20f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "${(value * 100f).toInt()}%",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                androidx.compose.material3.Slider(
+                    value = value.coerceIn(0.25f, 2f),
+                    onValueChange = { onValueChange(it.coerceIn(0.25f, 2f)) },
+                    valueRange = 0.25f..2f,
+                    steps = 0,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("25%", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    Text("200%", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+                TextButton(onClick = onApply) { Text("Aplicar") }
+            }
+        }
+    )
+}
 
 @Composable
 private fun SleepTimerDialog(

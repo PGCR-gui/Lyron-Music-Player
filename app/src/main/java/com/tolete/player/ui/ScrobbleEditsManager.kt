@@ -19,7 +19,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -80,9 +79,8 @@ internal fun ScrobbleEditsManagerDialog(onDismiss: () -> Unit) {
         }
     }
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1A1528),
         title = {
             Text("Edições salvas (${all.size})", color = Color.White, fontWeight = FontWeight.SemiBold)
         },
@@ -172,9 +170,8 @@ internal fun ScrobbleEditsManagerDialog(onDismiss: () -> Unit) {
     }
 
     deleting?.let { target ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { deleting = null },
-            containerColor = Color(0xFF1A1528),
             title = { Text("Apagar edição?", color = Color.White) },
             text = {
                 Text(
@@ -207,9 +204,8 @@ private fun EditEditDialog(
     var album by remember(edit) { mutableStateOf(edit.album) }
     var albumArtist by remember(edit) { mutableStateOf(edit.albumArtist) }
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1A1528),
         title = { Text("Modificar edição", color = Color.White, fontWeight = FontWeight.SemiBold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

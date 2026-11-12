@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -33,6 +32,8 @@ import com.tolete.player.ui.AppColors
 import com.tolete.player.ui.DefaultAppColors
 import com.tolete.player.ui.LiveThemeHolder
 import com.tolete.player.ui.LocalAppColors
+import com.tolete.player.ui.MenuVisualConfig
+import com.tolete.player.ui.MenuVisualStyle
 import com.tolete.player.ui.MusicViewModel
 import com.tolete.player.ui.colorsFromSeed
 import com.tolete.player.ui.staticTheme
@@ -46,6 +47,9 @@ class ScrobbleEditActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        MenuVisualConfig.style = MenuVisualStyle.fromName(
+            getSharedPreferences("tolete", MODE_PRIVATE).getString("menu_visual_style", null)
+        )
         LastFmScrobbler.init(this)
         val track = LastFmScrobbler.current.value
         if (track == null) {

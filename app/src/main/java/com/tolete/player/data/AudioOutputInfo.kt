@@ -37,14 +37,19 @@ data class OutputFormat(
 object AudioOutputPrefs {
     const val KEY = "audio_output_backend"
     const val DEFAULT = "DEFAULT"
+    const val FIDELITY = "FIDELITY"
+    /** HIGH_QUALITY e USB_EXCLUSIVE eram nomes do modo antigo, agora Fidelidade de Som. */
     const val HIGH_QUALITY = "HIGH_QUALITY"
-
-    /** Valores antigos (USB_EXCLUSIVE etc.) de versões anteriores continuam funcionando. */
-    fun isHighQuality(prefs: android.content.SharedPreferences): Boolean =
-        isHighQuality(prefs.getString(KEY, DEFAULT))
-
-    fun isHighQuality(value: String?): Boolean =
-        value == HIGH_QUALITY || value == "USB_EXCLUSIVE"
+    fun normalize(value: String?): String = when (value) {
+        FIDELITY -> FIDELITY
+        // MAX_QUALITY era o modo de resampling pela taxa máxima anunciada pelo DAC.
+        // A preferência salva continua compatível, mas agora volta ao padrão do sistema.
+        "MAX_QUALITY" -> DEFAULT
+        HIGH_QUALITY, "USB_EXCLUSIVE" -> FIDELITY
+        else -> DEFAULT
+    }
+    fun isFidelity(prefs: android.content.SharedPreferences): Boolean =
+        normalize(prefs.getString(KEY, DEFAULT)) == FIDELITY
 }
 
 /** Resumo da saída em uso, pronto para a tela de configurações. */
@@ -59,10 +64,10 @@ data class OutputSummary(
 object AudioOutputInfo {
 
     /**
-     * Saída preferida no modo "Alta qualidade": DAC/headset USB primeiro, depois fone com fio.
+     * Saída preferida nos modos dedicados: DAC/headset USB primeiro, depois fone com fio.
      * Null = nenhum dos dois conectado (o sistema escolhe a rota).
      */
-    fun findHighQualityOutput(context: Context): AudioDeviceInfo? {
+    fun findPreferredOutput(context: Context): AudioDeviceInfo? {
         UsbAudioRouter.findUsbOutput(context)?.let { return it }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
         val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return null
@@ -133,7 +138,13 @@ object AudioOutputInfo {
     }
 
     /** Monta o resumo exibido no campo de informação da tela de configurações. */
-    fun summary(context: Context, highQualityMode: Boolean, playerFloat: Boolean): OutputSummary {
+    fun summary(
+        context: Context,
+        modeLabel: String,
+        dedicatedOutputMode: Boolean,
+        playerFloat: Boolean,
+        conversionInfo: String = ""
+    ): OutputSummary {
         val dev = activeDevice(context)
         val fmt = probe(context)
         val name = dev?.productName?.toString()?.trim().orEmpty()
@@ -147,20 +158,25 @@ object AudioOutputInfo {
                 dev.type == AudioDeviceInfo.TYPE_LINE_ANALOG
             )
         val notes = mutableListOf<String>()
-        notes += if (highQualityMode) {
-            "Modo: Alta qualidade" + if (playerFloat) " · PCM float 32-bit" else ""
+        notes += if (dedicatedOutputMode) {
+            "Modo: $modeLabel" + if (playerFloat) " · PCM float 32-bit" else ""
         } else "Modo: Padrão do sistema"
-        if (highQualityMode && !isUsb && !isWired) {
+        if (conversionInfo.isNotBlank() && dedicatedOutputMode) {
+            notes += "Conversão aplicada: $conversionInfo"
+        }
+        if (dedicatedOutputMode && !isUsb && !isWired) {
             notes += "Conecte um DAC USB ou fone com fio para aproveitar este modo."
         }
         if (isUsb) {
             if (Build.VERSION.SDK_INT < 34) {
                 notes += "Android abaixo do 14: o sistema define a taxa do USB e o app não consegue mudá-la."
-            } else if (highQualityMode) {
+            } else if (dedicatedOutputMode) {
                 if (UsbMixer.status.isNotBlank()) notes += UsbMixer.status
-                notes += "Bit-perfect: " + UsbMixer.bitPerfectSupport(context)
+                if (modeLabel == "Fidelidade de Som") {
+                    notes += "Bit-perfect: " + UsbMixer.bitPerfectSupport(context)
+                }
             }
-        } else if (isWired && highQualityMode) {
+        } else if (isWired && dedicatedOutputMode) {
             notes += "Saída analógica: o Android costuma reamostrar para a taxa do mixer do sistema."
         }
         return OutputSummary(

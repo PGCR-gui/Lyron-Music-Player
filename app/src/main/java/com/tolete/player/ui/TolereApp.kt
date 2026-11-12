@@ -30,6 +30,11 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -114,6 +119,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -149,6 +155,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
@@ -161,8 +168,14 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -176,10 +189,12 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.tolete.player.data.Album
 import com.tolete.player.data.Artist
 import com.tolete.player.data.ArtistMetaStore
 import com.tolete.player.data.LastFmClient
+import com.tolete.player.data.AlphaSort
 import com.tolete.player.data.Genre
 import com.tolete.player.data.Playlist
 import com.tolete.player.data.Track
@@ -190,13 +205,21 @@ import java.io.File
 /** Fonte padrão da interface (não afeta letras). Null = sistema. */
 val LocalUiFontFamily = staticCompositionLocalOf<FontFamily?> { null }
 
+/**
+ * Opção "Ordem alfabética pela primeira letra" (Configurações › Biblioteca).
+ * Lida por listas ordenadas e pelo índice lateral A–Z.
+ */
+internal val LocalFirstLetterOrder = androidx.compose.runtime.compositionLocalOf { false }
+
 private data class GroupItem(
     val title: String,
     val subtitle: String,
     val key: String,
     val artPath: String? = null,
     val round: Boolean = false,
-    val isFavorites: Boolean = false
+    val isFavorites: Boolean = false,
+    /** Se não nulo, a foto é buscada no índice em memória só para a linha visível. */
+    val photoName: String? = null
 )
 
 private fun faixas(n: Int) = if (n == 1) "1 faixa" else "$n faixas"
@@ -236,15 +259,20 @@ fun TolereApp(
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     openLastFmDashboard: Boolean = false,
-    onOpenLastFmDashboardConsumed: () -> Unit = {}
+    onOpenLastFmDashboardConsumed: () -> Unit = {},
+    openNowPlaying: Boolean = false,
+    openNowPlayingTrackId: String? = null,
+    onOpenNowPlayingConsumed: () -> Unit = {}
 ) {
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val isScanning by vm.isScanning.collectAsStateWithLifecycle()
     val tab by vm.currentTab.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
     val visible by vm.visibleTracks.collectAsStateWithLifecycle()
+    val sortedAllTracks by vm.sortedAllTracks.collectAsStateWithLifecycle()
     val nowPlaying by vm.nowPlaying.collectAsStateWithLifecycle()
     val isPlaying by vm.isPlaying.collectAsStateWithLifecycle()
+    val playbackButtonIsPlaying by vm.playbackButtonIsPlaying.collectAsStateWithLifecycle()
     val artists by vm.artists.collectAsStateWithLifecycle()
     val composers by vm.composers.collectAsStateWithLifecycle()
     val albums by vm.albums.collectAsStateWithLifecycle()
@@ -267,9 +295,11 @@ fun TolereApp(
     val searchAlbums by vm.searchAlbums.collectAsStateWithLifecycle()
     val searchGenres by vm.searchGenres.collectAsStateWithLifecycle()
     val themeId by vm.themeId.collectAsStateWithLifecycle()
+    val themeRetainTrackColors by vm.themeRetainTrackColors.collectAsStateWithLifecycle()
     val repeatMode by vm.repeatMode.collectAsStateWithLifecycle()
     val lyricsFontPath by vm.lyricsFontPath.collectAsStateWithLifecycle()
     val lyricsTranslationFontPath by vm.lyricsTranslationFontPath.collectAsStateWithLifecycle()
+    val lyricsBackingFontPath by vm.lyricsBackingFontPath.collectAsStateWithLifecycle()
     val lyricsEmphasisFontPath by vm.lyricsEmphasisFontPath.collectAsStateWithLifecycle()
     val uiFontPath by vm.uiFontPath.collectAsStateWithLifecycle()
     val librarySettings by vm.librarySettings.collectAsStateWithLifecycle()
@@ -289,6 +319,7 @@ fun TolereApp(
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
     val glassQuality by vm.glassQuality.collectAsStateWithLifecycle()
+    val menuVisualStyle by vm.menuVisualStyle.collectAsStateWithLifecycle()
     val bitPerfect by vm.bitPerfect.collectAsStateWithLifecycle()
     val playCountThreshold by vm.playCountThreshold.collectAsStateWithLifecycle()
     val playCountMinutes by vm.playCountMinutes.collectAsStateWithLifecycle()
@@ -299,8 +330,9 @@ fun TolereApp(
     val milkPresets by vm.milkPresets.collectAsStateWithLifecycle()
     val rootContext = LocalContext.current
     val milkIntervalSec by vm.milkIntervalSec.collectAsStateWithLifecycle()
-    val changeSongWithMilkInterval by vm.changeSongWithMilkInterval.collectAsStateWithLifecycle()
-    val changePresetOnSongChange by vm.changePresetOnSongChange.collectAsStateWithLifecycle()
+    val milkSwitchMode by vm.milkSwitchMode.collectAsStateWithLifecycle()
+    val milkPresetOrder by vm.milkPresetOrder.collectAsStateWithLifecycle()
+    val milkFavoritesOnly by vm.milkFavoritesOnly.collectAsStateWithLifecycle()
 
     val lyricsFontSize by vm.lyricsFontSize.collectAsStateWithLifecycle()
     val lyricsPrimaryColor by vm.lyricsPrimaryColor.collectAsStateWithLifecycle()
@@ -309,6 +341,7 @@ fun TolereApp(
     val lyricsBorderWidth by vm.lyricsBorderWidth.collectAsStateWithLifecycle()
     val lyricsTranslationColor by vm.lyricsTranslationColor.collectAsStateWithLifecycle()
     val lyricsBackingColor by vm.lyricsBackingColor.collectAsStateWithLifecycle()
+    val lyricsBackingSecondaryColor by vm.lyricsBackingSecondaryColor.collectAsStateWithLifecycle()
     val splashEnabled by vm.splashEnabled.collectAsStateWithLifecycle()
     val splashSoundEnabled by vm.splashSoundEnabled.collectAsStateWithLifecycle()
     val floatingIconsEnabled by vm.floatingIconsEnabled.collectAsStateWithLifecycle()
@@ -326,7 +359,8 @@ fun TolereApp(
     val dynamicDefaultArgb by vm.dynamicDefaultColor.collectAsStateWithLifecycle()
     val dynamicFloatArgb by vm.dynamicFloatColors.collectAsStateWithLifecycle()
     val appColors = rememberAppColors(
-        themeId, nowPlaying?.artPath, isPlaying, dynamicDefaultArgb, dynamicFloatArgb
+        themeId, nowPlaying?.artPath, isPlaying || themeRetainTrackColors,
+        dynamicDefaultArgb, dynamicFloatArgb
     )
     val layoutScale = rememberLayoutScale()
 
@@ -363,6 +397,7 @@ fun TolereApp(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var lyricsEditTrack by remember { mutableStateOf<Track?>(null) }
     var lyricsEditTarget by remember { mutableStateOf(LyricsEmbedder.Target.EMBEDDED) }
+    var lyricsEditFromTtml by remember { mutableStateOf(false) }
     /** Track pendente do diálogo "abrir .lrc ou tags embutidas". */
     var lyricsSourcePickTrack by remember { mutableStateOf<Track?>(null) }
     var showManageMilkPresets by remember { mutableStateOf(false) }
@@ -386,7 +421,18 @@ fun TolereApp(
             onOpenLastFmDashboardConsumed()
         }
     }
+    LaunchedEffect(openNowPlaying, nowPlaying?.id, openNowPlayingTrackId) {
+        val currentTrackId = nowPlaying?.id
+        if (openNowPlaying && currentTrackId != null &&
+            (openNowPlayingTrackId == null || currentTrackId == openNowPlayingTrackId)
+        ) {
+            showNowPlaying = true
+            onOpenNowPlayingConsumed()
+        }
+    }
     val backdrop = rememberGraphicsLayer()
+    val scrollerHost = remember { ScrollerOverlayHost() }
+    var backdropOrigin by remember { mutableStateOf(Offset.Zero) }
     val bottomPadding = if (nowPlaying != null) 190.dp else 110.dp
     var navBarVisible by remember { mutableStateOf(true) }
     val navBarOffsetY by animateDpAsState(
@@ -415,10 +461,20 @@ fun TolereApp(
             navBarVisible = true
         }
     }
+    // Deslizar o índice alfabético esconde a barra de navegação; ela volta ao soltar.
+    LaunchedEffect(IndexScrollerDrag.active) {
+        if (IndexScrollerDrag.active) {
+            navBarVisible = false
+        } else {
+            // Pequena pausa: evita a barra "piscar" entre dois arrastos seguidos
+            delay(650)
+            navBarVisible = true
+        }
+    }
 
-    BackHandler(enabled = selectionMode) { selectedTrackIds = emptySet() }
-    BackHandler(enabled = isSearching) { vm.closeSearch() }
-    BackHandler(enabled = filter != null && !isSearching) {
+    BackHandler(enabled = selectionMode && !showNowPlaying) { selectedTrackIds = emptySet() }
+    BackHandler(enabled = isSearching && !showNowPlaying) { vm.closeSearch() }
+    BackHandler(enabled = filter != null && !isSearching && !showNowPlaying) {
         val prev = previousFilter
         if (prev != null) {
             previousFilter = null
@@ -439,7 +495,7 @@ fun TolereApp(
             vm.clearFilter()
         }
     }
-    BackHandler(enabled = settingsPage != SettingsPage.NONE) {
+    BackHandler(enabled = settingsPage != SettingsPage.NONE && !showNowPlaying) {
         settingsPage = when (settingsPage) {
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
                             SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
@@ -450,11 +506,13 @@ fun TolereApp(
             else -> SettingsPage.NONE
         }
     }
-    BackHandler(enabled = tagEditTrack != null) { tagEditTrack = null }
-    BackHandler(enabled = lyricsEditTrack != null) { lyricsEditTrack = null }
-    BackHandler(enabled = showHelp) { showHelp = false }
-    BackHandler(enabled = showFileManager) { showFileManager = false }
+    BackHandler(enabled = tagEditTrack != null && !showNowPlaying) { tagEditTrack = null }
+    BackHandler(enabled = lyricsEditTrack != null && !showNowPlaying) { lyricsEditTrack = null }
+    BackHandler(enabled = showHelp && !showNowPlaying) { showHelp = false }
+    BackHandler(enabled = showFileManager && !showNowPlaying) { showFileManager = false }
+    // Prioridade máxima: minimizar Now Playing antes de qualquer tela por baixo
     BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
+    BackHandler(enabled = showLastFm && !showNowPlaying) { showLastFm = false }
 
     fun openAddToPlaylist(tracks: List<Track>) {
         addToPlaylistTracks = tracks
@@ -465,7 +523,12 @@ fun TolereApp(
     SideEffect { LiveThemeHolder.colors = appColors }
     CompositionLocalProvider(
         LocalUiFontFamily provides uiFontFamily,
-        LocalAppColors provides appColors
+        LocalAppColors provides appColors,
+        LocalMenuVisualStyle provides menuVisualStyle,
+        LocalGlassBackdrop provides backdrop,
+        LocalGlassBackdropOrigin provides backdropOrigin,
+        LocalScrollerHost provides scrollerHost,
+        LocalFirstLetterOrder provides librarySettings.firstLetterOrder
     ) {
     val uiTypography = remember(uiFontFamily) {
         if (uiFontFamily != null) {
@@ -504,6 +567,7 @@ fun TolereApp(
             Box(
                 Modifier
                     .fillMaxSize()
+                    .onGloballyPositioned { backdropOrigin = it.positionOnScreen() }
                     .drawWithContent {
                         if (GlassConfig.quality == GlassQuality.LIGHT) {
                             // Modo leve: o vidro não lê o fundo, então nem gravamos a camada
@@ -900,7 +964,7 @@ fun TolereApp(
 
                                 filter != null || tab == MusicViewModel.Tab.ALL -> {
                                     val listTracks = if (filter == null && tab == MusicViewModel.Tab.ALL) {
-                                        vm.sortedTracks(visible)
+                                        sortedAllTracks
                                     } else visible
                                     Column(Modifier.fillMaxSize()) {
                                         if (filter == null && tab == MusicViewModel.Tab.ALL) {
@@ -1006,22 +1070,27 @@ fun TolereApp(
                                                 items = items
                                             )
                                         },
-                                        onOpenLastFm = { showLastFm = true }
+                                        periodPlayCount = vm::playCountTotal,
+                                        onOpenLastFm = { showLastFm = true },
+                                        nowPlayingOpen = showNowPlaying
                                     )
                                 }
 
                                 else -> {
                                     val groups = when (tab) {
                                         MusicViewModel.Tab.ARTISTS -> {
+                                            // Memoizado: antes era refeito (ordenar + regex + busca de foto por
+                                            // artista) a cada recomposição da tela inteira.
                                             val src = if (artistsShowComposers) composers else artists
-                                            // Observa o índice de fotos (em memória) para recompor quando mudar
-                                            @Suppress("UNUSED_VARIABLE")
-                                            val photoVersion = ArtistMetaStore.photoVersion.collectAsStateWithLifecycle().value
-                                            vm.sortedArtists(src).map { artist ->
-                                                val metaImg = ArtistMetaStore.cachedPhotoPath(artist.name)
-                                                val art = metaImg ?: artist.artPath
-                                                val key = if (artistsShowComposers) "composer::${artist.name}" else artist.name
-                                                GroupItem(artist.name, faixas(artist.trackCount), key, art, round = true)
+                                            remember(src, artistsShowComposers, groupSort, groupOrder) {
+                                                vm.sortedArtists(src).map { artist ->
+                                                    val key = if (artistsShowComposers) "composer::${artist.name}" else artist.name
+                                                    GroupItem(
+                                                        artist.name, faixas(artist.trackCount), key, artist.artPath,
+                                                        round = true,
+                                                        photoName = artist.name
+                                                    )
+                                                }
                                             }
                                         }
                                         MusicViewModel.Tab.ALBUMS -> vm.sortedAlbums(albums).map {
@@ -1075,7 +1144,8 @@ fun TolereApp(
                                                 }
                                             }
                                         }
-                                        GroupList(groups, bottomPadding, onClick = vm::openGroup)
+                                        val onGroupClick = remember(vm) { { k: String -> vm.openGroup(k) } }
+                                        GroupList(groups, bottomPadding, onClick = onGroupClick)
                                     }
                                 }
                             }
@@ -1087,6 +1157,9 @@ fun TolereApp(
                     }
                 }
             }
+
+            // ---------- Índice alfabético (fora do conteúdo, para o vidro real) ----------
+            ScrollerOverlay(scrollerHost, backdrop)
 
             // ---------- Barras de vidro flutuantes ----------
             Column(
@@ -1149,6 +1222,7 @@ fun TolereApp(
                     themeId = themeId,
                     lyricsFontPath = lyricsFontPath,
                     lyricsTranslationFontPath = lyricsTranslationFontPath,
+                    lyricsBackingFontPath = lyricsBackingFontPath,
                     lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                     uiFontPath = uiFontPath,
                     librarySettings = librarySettings,
@@ -1177,16 +1251,18 @@ fun TolereApp(
                     onRemoveFolder = vm::removeFolder,
                     onRefresh = vm::refreshLibrary,
                     onThemeSelected = vm::setThemeId,
+                    menuVisualStyle = menuVisualStyle,
+                    onMenuVisualStyleChange = vm::setMenuVisualStyle,
                     dynamicDefaultColor = dynamicDefaultArgb,
                     onDynamicDefaultColorChange = vm::setDynamicDefaultColor,
                     dynamicFloatColors = dynamicFloatArgb,
                     onDynamicFloatColorsChange = vm::setDynamicFloatColors,
                     onPickFont = { vm.beginFontPickForLyrics(); onPickFont() },
-                    onClearFont = { vm.setLyricsFontPath(null) },
+                    onClearFont = { vm.setMainLyricsFontPath(null) },
                     onPickUiFont = onPickUiFont,
                     onClearUiFont = { vm.setUiFontPath(null) },
                     onSelectUiFont = { key -> vm.setUiFontPath(key) },
-                    onSelectLyricsFont = { key -> vm.setLyricsFontPath(key) },
+                    onSelectLyricsFont = { key -> vm.setMainLyricsFontPath(key) },
                     onPickTranslationFont = {
                         // Reusa o picker de fonte: marca destino e abre o mesmo fluxo
                         vm.beginFontPickForTranslation()
@@ -1194,6 +1270,12 @@ fun TolereApp(
                     },
                     onClearTranslationFont = { vm.setLyricsTranslationFontPath(null) },
                     onSelectTranslationFont = { key -> vm.setLyricsTranslationFontPath(key) },
+                    onPickBackingFont = {
+                        vm.beginFontPickForBacking()
+                        onPickFont()
+                    },
+                    onClearBackingFont = { vm.setLyricsBackingFontPath(null) },
+                    onSelectBackingFont = { key -> vm.setLyricsBackingFontPath(key) },
                     onSelectLyricsEmphasisFont = vm::setLyricsEmphasisFontPath,
                     onSplitArtistsChange = vm::setSplitArtists,
                     onArtistSeparatorsChange = vm::setArtistSeparators,
@@ -1216,6 +1298,7 @@ fun TolereApp(
                         showFileManager = true
                     },
                     onMinDurationSecChange = vm::setMinDurationSec,
+                    onFirstLetterOrderChange = vm::setFirstLetterOrder,
                     allFilesMode = allFilesMode,
                     onAllFilesModeChange = vm::setAllFilesMode,
                     onRequestAllFilesPermission = onRequestAllFilesPermission,
@@ -1277,10 +1360,12 @@ fun TolereApp(
                     onPickMilkFiles = onPickMilkFiles,
                     onClearMilkPresets = vm::clearMilkPresets,
                     onMilkIntervalChange = vm::setMilkIntervalSec,
-                    changeSongWithInterval = changeSongWithMilkInterval,
-                    onChangeSongWithIntervalChange = vm::setChangeSongWithMilkInterval,
-                    changePresetOnSongChange = changePresetOnSongChange,
-                    onChangePresetOnSongChange = vm::setChangePresetOnSongChange,
+                    milkSwitchMode = milkSwitchMode,
+                    onMilkSwitchModeChange = vm::setMilkSwitchMode,
+                    milkPresetOrder = milkPresetOrder,
+                    onMilkPresetOrderChange = vm::setMilkPresetOrder,
+                    milkFavoritesOnly = milkFavoritesOnly,
+                    onMilkFavoritesOnlyChange = vm::setMilkFavoritesOnly,
                     onManageMilkPresets = { showManageMilkPresets = true },
                     onOpenRecommendedPresets = {
                         val intent = android.content.Intent(
@@ -1302,6 +1387,8 @@ fun TolereApp(
                     lyricsTranslationColor = lyricsTranslationColor,
                     onLyricsTranslationColorChange = vm::setLyricsTranslationColor,
                     lyricsBackingColor = lyricsBackingColor,
+                    lyricsBackingSecondaryColor = lyricsBackingSecondaryColor,
+                    onLyricsBackingSecondaryColorChange = vm::setLyricsBackingSecondaryColor,
                     onLyricsBackingColorChange = vm::setLyricsBackingColor,
                     onExportBackup = onExportBackup,
                     onImportBackup = onImportBackup,
@@ -1382,15 +1469,16 @@ fun TolereApp(
             // Diálogo: escolher fonte da letra antes de abrir o editor
             lyricsSourcePickTrack?.let { pickTrack ->
                 val hasLrc = remember(pickTrack.id) { LyricsEmbedder.hasExternalLrc(pickTrack) }
+                val hasTtml = remember(pickTrack.id) { LyricsEmbedder.hasExternalTtml(pickTrack) }
                 AppAlertDialog(
                     onDismissRequest = { lyricsSourcePickTrack = null },
                     title = { Text("Editar letra") },
                     text = {
                         Text(
-                            if (hasLrc)
-                                "Qual fonte de letra deseja abrir?\n\n• Arquivo .lrc — ao lado da música (salva de volta no .lrc)\n• Tags embutidas — dentro do arquivo de áudio (salva nas tags)"
+                            if (hasLrc || hasTtml)
+                                "Qual fonte de letra deseja abrir?\n\n${if (hasLrc) "• Arquivo .lrc — ao lado da música (salva de volta no .lrc)\n" else ""}${if (hasTtml) "• Sidecar .ttml — abre para conversão; o original não é alterado e Salvar cria .lrc\n" else ""}• Tags embutidas — dentro do arquivo de áudio (salva nas tags)"
                             else
-                                "Não há arquivo .lrc ao lado desta música.\nAbrir as tags embutidas do arquivo?"
+                                "Não há sidecar .lrc ou .ttml ao lado desta música.\nAbrir as tags embutidas do arquivo?"
                         )
                     },
                     confirmButton = {
@@ -1398,21 +1486,37 @@ fun TolereApp(
                             if (hasLrc) {
                                 TextButton(
                                     onClick = {
+                                        vm.pausePlayback()
                                         lyricsEditTarget = LyricsEmbedder.Target.LRC_FILE
+                                        lyricsEditFromTtml = false
                                         lyricsEditTrack = pickTrack
                                         lyricsSourcePickTrack = null
                                         showNowPlaying = false
                                     }
                                 ) { Text("Arquivo .lrc") }
                             }
+                            if (hasTtml) {
+                                TextButton(
+                                    onClick = {
+                                        vm.pausePlayback()
+                                        lyricsEditTarget = LyricsEmbedder.Target.LRC_FILE
+                                        lyricsEditFromTtml = true
+                                        lyricsEditTrack = pickTrack
+                                        lyricsSourcePickTrack = null
+                                        showNowPlaying = false
+                                    }
+                                ) { Text("Converter sidecar .ttml → .lrc") }
+                            }
                             TextButton(
                                 onClick = {
+                                    vm.pausePlayback()
                                     lyricsEditTarget = LyricsEmbedder.Target.EMBEDDED
+                                    lyricsEditFromTtml = false
                                     lyricsEditTrack = pickTrack
                                     lyricsSourcePickTrack = null
                                     showNowPlaying = false
                                 }
-                            ) { Text(if (hasLrc) "Tags embutidas" else "Abrir tags embutidas") }
+                            ) { Text(if (hasLrc || hasTtml) "Tags embutidas" else "Abrir tags embutidas") }
                         }
                     },
                     dismissButton = {
@@ -1433,17 +1537,19 @@ fun TolereApp(
                     val target = lyricsEditTarget
                     // Carrega a fonte escolhida ANTES de montar o editor.
                     // LyricsEditorScreen usa remember { initialLines } e não reage a updates assíncronos.
-                    var loadedLines by remember(track.id, target) { mutableStateOf<List<LyricLine>?>(null) }
-                    LaunchedEffect(track.id, target) {
+                    var loadedLines by remember(track.id, target, lyricsEditFromTtml) { mutableStateOf<List<LyricLine>?>(null) }
+                    LaunchedEffect(track.id, target, lyricsEditFromTtml) {
                         loadedLines = null
-                        val fromSource = when (target) {
-                            LyricsEmbedder.Target.LRC_FILE -> vm.loadExternalLyrics(track)
-                            LyricsEmbedder.Target.EMBEDDED -> vm.loadEmbeddedLyrics(track)
+                        val fromSource = when {
+                            lyricsEditFromTtml -> withContext(Dispatchers.IO) { LyricsEmbedder.loadExternalTtml(track) }
+                            target == LyricsEmbedder.Target.LRC_FILE -> vm.loadExternalLyrics(track)
+                            else -> vm.loadEmbeddedLyrics(track)
                         }
                         // Se a fonte escolhida está vazia mas o player mostra uma letra (vinda de
                         // .elrc/.ttml, de outra tag ou da busca online), abre o editor com ela em vez
                         // de um editor em branco — salvar em branco parecia "apagar" a letra.
                         loadedLines = if (fromSource.isNotEmpty()) fromSource
+                        else if (lyricsEditFromTtml) emptyList()
                         else try { vm.loadLyrics(track) } catch (_: Exception) { emptyList() }
                     }
                     if (loadedLines == null) {
@@ -1457,14 +1563,10 @@ fun TolereApp(
                         }
                     } else {
                         // key força recomposição limpa quando a fonte/letra muda
-                        key(track.id, target, loadedLines!!.size) {
+                        key(track.id, target, lyricsEditFromTtml, loadedLines!!.size) {
                             LyricsEditorScreen(
                                 track = track,
                                 initialLines = loadedLines!!,
-                                isPlaying = isPlaying,
-                                getPosition = vm::currentPosition,
-                                onSeek = vm::seekTo,
-                                onToggle = vm::togglePlayPause,
                                 onSave = { lines, saveTarget ->
                                     val ok = vm.saveSyncedLyrics(track, lines, saveTarget)
                                     val msg = when {
@@ -1475,18 +1577,15 @@ fun TolereApp(
                                     }
                                     android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
                                     if (ok) {
-                                        vm.setPlaybackSpeed(1f)
                                         lyricsEditTrack = null
                                     }
                                 },
                                 onClose = {
-                                    vm.setPlaybackSpeed(1f)
                                     lyricsEditTrack = null
                                 },
                                 appColors = appColors,
                                 initialTarget = target,
-                                getPlaybackSpeed = vm::currentPlaybackSpeed,
-                                onPlaybackSpeed = vm::setPlaybackSpeed
+                                sourceWasTtml = lyricsEditFromTtml
                             )
                         }
                     }
@@ -1510,6 +1609,8 @@ fun TolereApp(
                 enter = slideInVertically(tween(320)) { it } + fadeIn(tween(240)),
                 exit = slideOutVertically(tween(280)) { it } + fadeOut(tween(200))
             ) {
+                // Registrado dentro do overlay para ter prioridade máxima sobre seções/Home/Last.fm
+                BackHandler(enabled = true) { showNowPlaying = false }
                 nowPlaying?.let { current ->
                     // Deriva de playlists (StateFlow) para recompor imediatamente ao favoritar
                     val isFavorite = playlists
@@ -1520,14 +1621,16 @@ fun TolereApp(
                     NowPlayingScreen(
                         track = current,
                         isPlaying = isPlaying,
+                        playButtonIsPlaying = playbackButtonIsPlaying,
                         shuffle = shuffle,
                         repeatMode = repeatMode,
                         queue = queue,
                         isFavorite = isFavorite,
                         lyricsFontPath = lyricsFontPath,
                         lyricsTranslationFontPath = lyricsTranslationFontPath,
+                        lyricsBackingFontPath = lyricsBackingFontPath,
                         lyricsEmphasisFontPath = lyricsEmphasisFontPath,
-                        highQualityOutput = audioOutput == MusicViewModel.AudioOutputBackend.HIGH_QUALITY,
+                        audioOutputMode = audioOutput,
                         getPosition = vm::currentPosition,
                         playerDurationMs = playerDur,
                         onClose = { showNowPlaying = false },
@@ -1556,6 +1659,7 @@ fun TolereApp(
                             showNowPlaying = false
                         },
                         onEditLyrics = {
+                            vm.pausePlayback()
                             lyricsSourcePickTrack = current
                         },
                         artistNames = remember(current.artist, librarySettings) { vm.artistNamesOf(current) },
@@ -1578,19 +1682,9 @@ fun TolereApp(
                         milkPresets = milkPresets,
                         onDeletePreset = { path -> vm.deleteMilkPreset(path) },
                         milkIntervalSec = milkIntervalSec,
-                        changeSongWithMilkInterval = changeSongWithMilkInterval,
-                        changePresetOnSongChange = changePresetOnSongChange,
-                        onSkipToRandom = {
-                            val q = vm.queue.value
-                            val curId = vm.nowPlaying.value?.id
-                            if (q.size > 1) {
-                                val others = q.indices.filter { q[it].id != curId }
-                                val idx = others.randomOrNull() ?: q.indices.random()
-                                vm.skipToQueueItem(idx)
-                            } else {
-                                vm.next()
-                            }
-                        },
+                        milkSwitchMode = milkSwitchMode,
+                        milkPresetOrder = milkPresetOrder,
+                        milkFavoritesOnly = milkFavoritesOnly,
                         lyricsFontSize = lyricsFontSize,
                         lyricsPrimaryColor = lyricsPrimaryColor,
                         lyricsSecondaryColor = lyricsSecondaryColor,
@@ -1598,6 +1692,7 @@ fun TolereApp(
                         lyricsBorderWidth = lyricsBorderWidth,
                         lyricsTranslationColor = lyricsTranslationColor,
                         lyricsBackingColor = lyricsBackingColor,
+                        lyricsBackingSecondaryColor = lyricsBackingSecondaryColor,
                         playCount = vm.playCountOf(current.id),
                         firstPlayedAt = vm.firstPlayedAtOf(current.id).takeIf { it > 0L },
                         lastPlayedAt = vm.lastPlayedAt(current.id),
@@ -1930,12 +2025,20 @@ fun TolereApp(
                     initialPath = fileManagerInitialPath,
                     floatingIconsEnabled = floatingIconsEnabled,
                     appColors = appColors,
+                    backdrop = backdrop,
                     onClose = {
                         showFileManager = false
                         fileManagerFolderCallback = null
                     },
                     onFolderPicked = fileManagerFolderCallback,
-                    onTracksMayHaveChanged = { vm.refreshLibrary() }
+                    onTracksMayHaveChanged = { vm.refreshLibrary() },
+                    onPlayFolderTracks = { folderTracks, startIndex ->
+                        val libraryTracksByPath = tracks.associateBy { it.path }
+                        val tracksWithLibraryArtwork = folderTracks.map { folderTrack ->
+                            libraryTracksByPath[folderTrack.path] ?: folderTrack
+                        }
+                        vm.playTracks(tracksWithLibraryArtwork, startIndex)
+                    }
                 )
             }
 
@@ -1949,10 +2052,21 @@ internal fun ArtImage(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(10.dp)
 ) {
-    val model: Any? = when {
-        path.isNullOrBlank() -> null
-        path.startsWith("http://") || path.startsWith("https://") -> path
-        else -> File(path).takeIf { it.exists() }
+    val ctx = LocalContext.current
+    val px = with(LocalDensity.current) { size.roundToPx() }
+    // Sem File(path).exists() aqui: era I/O de disco (na pasta /storage/emulated/0, via FUSE)
+    // na thread principal, uma vez por linha a cada recomposição/scroll.
+    // Se o arquivo não existir, o Coil dispara onError e mostramos o ícone.
+    var failed by remember(path) { mutableStateOf(false) }
+    val request = remember(path, px) {
+        if (path.isNullOrBlank()) null
+        else ImageRequest.Builder(ctx)
+            .data(path)
+            .size(px, px)
+            // Chave explícita: evita o Coil chamar File.lastModified() na thread principal
+            .memoryCacheKey("$path@$px")
+            .crossfade(false)
+            .build()
     }
     Box(
         modifier = modifier
@@ -1961,11 +2075,12 @@ internal fun ArtImage(
             .background(Color.White.copy(alpha = 0.08f)),
         contentAlignment = Alignment.Center
     ) {
-        if (model != null) {
+        if (request != null && !failed) {
             AsyncImage(
-                model = model,
+                model = request,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                onError = { failed = true },
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -2306,149 +2421,605 @@ internal fun SearchHeader(
 private fun GroupList(items: List<GroupItem>, bottomPadding: Dp, onClick: (String) -> Unit) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val letterIndex = remember(items) {
-        buildLetterIndex(items) { it.title }
-    }
+    val scrollerLabels = remember(items) { items.map { it.title } }
+    // Só esta lista recompõe quando uma foto de artista muda (não a tela inteira)
+    val photoVersion = ArtistMetaStore.photoVersion.collectAsStateWithLifecycle().value
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding, end = 20.dp)
         ) {
-            items(items) { item ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onClick(item.key) }
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ArtImage(
-                        path = item.artPath,
-                        size = 56.dp,
-                        shape = if (item.round) CircleShape else RoundedCornerShape(10.dp)
-                    )
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(item.title, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            item.subtitle,
-                            fontSize = 13.sp,
-                            color = Color.White.copy(alpha = 0.6f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
+            items(items, key = { it.key }, contentType = { "group" }) { item ->
+                GroupRow(item, photoVersion, onClick)
             }
         }
-        AlphabetFastScroller(
-            letterIndex = letterIndex,
+        AlphabetScrollerSlot(
+            labels = scrollerLabels,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .fillMaxHeight()
-                .padding(vertical = 12.dp, horizontal = 2.dp),
-            onLetterSelected = { letter ->
-                letterIndex[letter]?.let { idx ->
-                    scope.launch { listState.scrollToItem(idx.coerceIn(0, items.lastIndex.coerceAtLeast(0))) }
-                }
+                .padding(top = 12.dp, bottom = AlphabetScrollerBottomGap, end = 2.dp),
+            onScrollTo = { idx ->
+                scope.launch { listState.scrollToItem(idx.coerceIn(0, items.lastIndex.coerceAtLeast(0))) }
             }
         )
     }
 }
 
-/** Índice da primeira ocorrência de cada letra (A–Z / #). */
-private fun <T> buildLetterIndex(items: List<T>, label: (T) -> String): Map<Char, Int> {
-    val map = linkedMapOf<Char, Int>()
-    items.forEachIndexed { index, item ->
-        val c = label(item).firstOrNull()?.uppercaseChar()
-        val key = if (c != null && c in 'A'..'Z') c else '#'
-        if (key !in map) map[key] = index
+@Composable
+private fun GroupRow(item: GroupItem, photoVersion: Int, onClick: (String) -> Unit) {
+    val art = remember(item.photoName, item.artPath, photoVersion) {
+        item.photoName?.let { ArtistMetaStore.cachedPhotoPath(it) } ?: item.artPath
     }
-    return map
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onClick(item.key) }
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ArtImage(
+            path = art,
+            size = 56.dp,
+            shape = if (item.round) CircleShape else RoundedCornerShape(10.dp)
+        )
+        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+            Text(item.title, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                item.subtitle,
+                fontSize = 13.sp,
+                color = Color.White.copy(alpha = 0.6f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
 }
+
+/** Índices da primeira ocorrência de cada letra e de cada prefixo de 2 letras (DA, DB…). */
+private class AlphaIndex(
+    val letters: Map<Char, Int>,
+    val prefixes: Map<Char, Map<Char, Int>>
+) {
+    val isEmpty get() = letters.isEmpty()
+}
+
+/**
+ * Índices de posição do índice lateral: a primeira faixa de cada letra (A–Z ou '#') e a
+ * primeira faixa de cada prefixo de duas letras (DA, DB…).
+ * Com [firstLetterOrder] ativo, símbolos no começo do texto (&, (, ', ♪…) não contam e
+ * acentos valem pela letra base — igual à ordenação das listas (Configurações › Biblioteca).
+ */
+private fun buildAlphaIndex(labels: List<String>, firstLetterOrder: Boolean): AlphaIndex {
+    val letters = linkedMapOf<Char, Int>()
+    val prefixes = linkedMapOf<Char, LinkedHashMap<Char, Int>>()
+    labels.forEachIndexed { index, raw ->
+        val first = AlphaSort.indexLetter(raw, 0, firstLetterOrder)
+        if (first !in letters) letters[first] = index
+        if (first != '#') {
+            val second = AlphaSort.indexLetter(raw, 1, firstLetterOrder)
+            val map = prefixes.getOrPut(first) { linkedMapOf() }
+            if (second !in map) map[second] = index
+        }
+    }
+    return AlphaIndex(letters, prefixes)
+}
+
+/**
+ * Arrasto em andamento no índice alfabético. Enquanto ativo, a barra de navegação de vidro
+ * se esconde para não cobrir a lista; volta ao soltar (ver [IndexScrollerDrag] na tela).
+ */
+internal object IndexScrollerDrag {
+    var active by androidx.compose.runtime.mutableStateOf(false)
+}
+
+/** Espaço livre abaixo do índice, para o Z não ficar colado no fim da tela. */
+private val AlphabetScrollerBottomGap = 56.dp
+
+/** Largura reservada: trilho (24) + espaço (6) + mini trilho (30) + língua (62) + folga. */
+private val AlphabetScrollerTotalWidth = 130.dp
 
 private val AlphabetLetters = listOf('#') + ('A'..'Z').toList()
 
+/** Altura de cada inicial do mini trilho: poucas iniciais = trilho curto, muitas = trilho alto. */
+private val DetailPrefixItemHeight = 22.dp
+
+/**
+ * Segundas letras que realmente existem em [letter] (DA, DB…), na ordem do índice.
+ * Iniciais sem músicas simplesmente não aparecem no mini trilho.
+ */
+private fun secondKeysOf(index: AlphaIndex, letter: Char): List<Char> {
+    val map = index.prefixes[letter] ?: return emptyList()
+    return AlphabetLetters.filter { it in map }
+}
+
+/** Geometria do mini trilho de prefixos: qual inicial está sob o dedo, e onde o trilho fica. */
+private class DetailRail(val prefixIndex: Int, val topPx: Float, val heightPx: Float)
+
+/**
+ * Mini trilho com altura adaptada ao número de iniciais, centralizado no dedo (e preso
+ * dentro do trilho principal). A posição do dedo escolhe a inicial na mesma proporção,
+ * então o desenho e o toque batem.
+ */
+private fun detailRailAt(y: Float, trackH: Float, itemPx: Float, count: Int): DetailRail {
+    val h = trackH.coerceAtLeast(1f)
+    if (count <= 0) return DetailRail(-1, 0f, 0f)
+    val slots = count.coerceAtLeast(2) // folga mínima para o vidro não ficar apertado
+    val railH = (slots * itemPx).coerceAtMost(h)
+    val top = (y - railH / 2f).coerceIn(0f, (h - railH).coerceAtLeast(0f))
+    val rel = ((y - top) / railH.coerceAtLeast(1f)).coerceIn(0f, 0.9999f)
+    return DetailRail((rel * count).toInt().coerceIn(0, count - 1), top, railH)
+}
+
+/** Aparência de vidro do índice (o conteúdo da lista não pode ser amostrado aqui, então é um vidro "fosco" desenhado). */
+private val ScrollerGlassFill = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.06f), Color.White.copy(alpha = 0.11f))
+)
+private val ScrollerGlassRim = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.35f))
+)
+private val TongueGlassFill = Brush.horizontalGradient(
+    listOf(Color.White.copy(alpha = 0.34f), Color.White.copy(alpha = 0.20f))
+)
+
+/**
+ * Índice alfabético lateral em vidro.
+ * - Arraste para cima/baixo: uma "língua" de vidro sai de dentro do trilho, colada nele, com a letra.
+ * - Ainda arrastando, deslize para a ESQUERDA: abre um mini trilho com os prefixos da letra (DA, DB…).
+ *   Volte para a direita para retornar às letras.
+ * - Só entram no mini trilho as iniciais com músicas: o vidro fica curto com poucas e alto com muitas.
+ * - Enquanto se desliza, [IndexScrollerDrag] fica ativo e a barra de navegação se esconde.
+ */
 @Composable
 private fun AlphabetFastScroller(
-    letterIndex: Map<Char, Int>,
+    labels: List<String>,
     modifier: Modifier = Modifier,
-    onLetterSelected: (Char) -> Unit
+    backdrop: GraphicsLayer? = null,
+    firstLetterOrder: Boolean = false,
+    onScrollTo: (Int) -> Unit
 ) {
-    if (letterIndex.isEmpty()) return
+    val index = remember(labels, firstLetterOrder) { buildAlphaIndex(labels, firstLetterOrder) }
+    if (index.isEmpty) return
+    val density = LocalDensity.current
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    val trackW = 24.dp
+    val miniW = 30.dp
+    val gap = 6.dp
+    val tongueW = 62.dp
+    val tongueBodyH = 46.dp
+    val flare = 10.dp
+    val swipePx = with(density) { 34.dp.toPx() }
+    val detailItemPx = with(density) { DetailPrefixItemHeight.toPx() }
+
+    var dragging by remember { mutableStateOf(false) }
+    var fingerY by remember { mutableFloatStateOf(0f) }
+    var trackHeightPx by remember { mutableFloatStateOf(1f) }
     var activeLetter by remember { mutableStateOf<Char?>(null) }
-    var fingerFraction by remember { mutableStateOf(0f) }
-    BoxWithConstraints(modifier = modifier) {
-        val trackHeight = maxHeight
+    var detailLetter by remember { mutableStateOf<Char?>(null) }
+    var detailAnchorY by remember { mutableFloatStateOf(0f) }
+    var activePrefix by remember { mutableStateOf<Char?>(null) }
+
+    // Se o índice sumir no meio de um arrasto (troca de aba, por exemplo), a barra volta.
+    DisposableEffect(Unit) {
+        onDispose { IndexScrollerDrag.active = false }
+    }
+
+    val springy = androidx.compose.animation.core.spring<Float>(dampingRatio = 0.55f, stiffness = 520f)
+    val emerge by animateFloatAsState(if (dragging) 1f else 0f, springy, label = "emerge")
+    val detailProgress by animateFloatAsState(
+        if (detailLetter != null) 1f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.62f, stiffness = 420f),
+        label = "detail"
+    )
+    val animY by animateFloatAsState(
+        fingerY,
+        androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 900f),
+        label = "tongueY"
+    )
+    // Esticamento: quanto mais a língua fica "atrasada" em relação ao dedo, mais ela se alonga
+    val lagPx = with(density) { 70.dp.toPx() }
+    val stretch = (kotlin.math.abs(fingerY - animY) / lagPx).coerceIn(0f, 0.4f)
+
+    fun select(y: Float, dx: Float) {
+        val h = trackHeightPx.coerceAtLeast(1f)
+        fingerY = y.coerceIn(0f, h)
+        val letter = letterAtY(y, h)
+        // Entrar/sair do modo detalhado
+        val canDetail = activeLetter?.let { it != '#' && index.prefixes[it].orEmpty().isNotEmpty() } == true
+        if (detailLetter == null && dx < -swipePx && canDetail) {
+            detailLetter = activeLetter
+            detailAnchorY = fingerY
+            activePrefix = null
+            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+        } else if (detailLetter != null && dx > -swipePx * 0.4f) {
+            detailLetter = null
+            activePrefix = null
+            activeLetter = null
+        }
+        val d = detailLetter
+        if (d != null) {
+            // O trilho não segue o dedo: permanece ancorado à letra de origem. O toque é
+            // mapeado dentro dessa geometria fixa, com clamp nas extremidades.
+            val keys = secondKeysOf(index, d)
+            val rail = detailRailAt(detailAnchorY, h, detailItemPx, keys.size)
+            val rel = ((y - rail.topPx) / rail.heightPx.coerceAtLeast(1f)).coerceIn(0f, 0.9999f)
+            val prefixIndex = (rel * keys.size).toInt().coerceIn(0, keys.lastIndex)
+            val p = keys.getOrNull(prefixIndex)
+            if (p != null && p != activePrefix) {
+                activePrefix = p
+                haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                index.prefixes[d]?.get(p)?.let(onScrollTo)
+            }
+        } else if (letter != activeLetter) {
+            activeLetter = letter
+            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+            index.letters[letter]?.let(onScrollTo)
+        }
+    }
+
+    Box(modifier.width(AlphabetScrollerTotalWidth)) {
+        // ---------- Mini trilho de prefixos: só as iniciais com músicas ----------
+        val shownDetail = detailLetter ?: activeLetter
+        val detailKeys = if (detailProgress > 0.01f && shownDetail != null) {
+            secondKeysOf(index, shownDetail)
+        } else {
+            emptyList()
+        }
+        if (detailKeys.isNotEmpty()) {
+            // Altura conforme o número de iniciais; âncora permanece na letra de origem.
+            val rail = detailRailAt(detailAnchorY, trackHeightPx, detailItemPx, detailKeys.size)
+            val railHDp = with(density) { rail.heightPx.toDp() }
+            ScrollerGlass(
+                backdrop = backdrop,
+                shape = RoundedCornerShape(50),
+                style = ScrollerTrackStyle,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            x = -(trackW + gap).roundToPx(),
+                            y = rail.topPx.toInt()
+                        )
+                    }
+                    .width(miniW)
+                    .height(railHDp)
+                    .graphicsLayer {
+                        alpha = detailProgress.coerceIn(0f, 1f)
+                        translationX = (1f - detailProgress) * (trackW + gap).toPx()
+                        scaleX = 0.6f + 0.4f * detailProgress
+                        scaleY = 0.85f + 0.15f * detailProgress
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)
+                    }
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    detailKeys.forEach { second ->
+                        val active = activePrefix == second && detailLetter != null
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "$shownDetail${if (second == '#') "·" else second.lowercaseChar()}",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (active) Color.Transparent else Color.White.copy(0.85f),
+                                textAlign = TextAlign.Center,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            } // ScrollerGlass
+        }
+
+        // ---------- Trilho principal ----------
+        val activeIdx = activeLetter?.let { AlphabetLetters.indexOf(it) } ?: -1
+        ScrollerGlass(
+            backdrop = backdrop,
+            shape = RoundedCornerShape(50),
+            style = ScrollerTrackStyle,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .width(trackW)
+                .fillMaxHeight()
+                .graphicsLayer {
+                    scaleX = 1f + 0.12f * emerge
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)
+                }
+        ) {
         Column(
             modifier = Modifier
-                .width(22.dp)
-                .fillMaxHeight()
-                .align(Alignment.CenterEnd)
-                .pointerInput(letterIndex) {
-                    detectVerticalDragGestures(
-                        onDragStart = { offset ->
-                            val h = size.height.toFloat().coerceAtLeast(1f)
-                            fingerFraction = (offset.y / h).coerceIn(0f, 1f)
-                            val letter = letterAtY(offset.y, h)
-                            activeLetter = letter
-                            onLetterSelected(letter)
-                        },
-                        onDragEnd = { activeLetter = null },
-                        onDragCancel = { activeLetter = null },
-                        onVerticalDrag = { change, _ ->
-                            change.consume()
-                            val h = size.height.toFloat().coerceAtLeast(1f)
-                            fingerFraction = (change.position.y / h).coerceIn(0f, 1f)
-                            val letter = letterAtY(change.position.y, h)
-                            if (letter != activeLetter) {
-                                activeLetter = letter
-                                onLetterSelected(letter)
+                .fillMaxSize()
+                .onSizeChanged { trackHeightPx = it.height.toFloat() }
+                .pointerInput(index) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        val startX = down.position.x
+                        dragging = true
+                        // Barra de navegação se esconde enquanto o índice está sendo deslizado
+                        IndexScrollerDrag.active = true
+                        detailLetter = null
+                        activePrefix = null
+                        activeLetter = null
+                        select(down.position.y, 0f)
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                change.consume()
+                                select(change.position.y, change.position.x - startX)
                             }
+                        } finally {
+                            dragging = false
+                            IndexScrollerDrag.active = false
+                            detailLetter = null
+                            activePrefix = null
+                            activeLetter = null
                         }
-                    )
-                },
+                    }
+                }
+                .padding(vertical = 6.dp),
             verticalArrangement = Arrangement.SpaceEvenly,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AlphabetLetters.forEach { letter ->
-                val present = letter in letterIndex
-                val active = activeLetter == letter
+            AlphabetLetters.forEachIndexed { i, letter ->
+                val present = letter in index.letters
+                val dist = if (activeIdx < 0 || detailLetter != null) 99 else kotlin.math.abs(i - activeIdx)
+                val falloff = (1f - dist / 3f).coerceIn(0f, 1f)
+                val scale by animateFloatAsState(1f + 0.45f * falloff * falloff, springy, label = "lt")
                 Text(
                     text = letter.toString(),
-                    fontSize = if (active) 12.sp else 10.sp,
-                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                    fontSize = 10.sp,
+                    fontWeight = if (present) FontWeight.SemiBold else FontWeight.Medium,
                     color = when {
-                        active -> Color.White
-                        present -> Color.White.copy(0.75f)
-                        else -> Color.White.copy(0.28f)
+                        dist == 0 -> Color.Transparent // a letra "sai" na língua
+                        detailLetter == letter -> Color.White
+                        present -> Color.White.copy(0.8f)
+                        else -> Color.White.copy(0.25f)
                     },
                     textAlign = TextAlign.Center,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = present) {
-                            activeLetter = letter
-                            onLetterSelected(letter)
+                        .graphicsLayer {
+                            scaleX = scale; scaleY = scale
+                            translationX = -falloff * falloff * 3.dp.toPx()
                         }
                 )
             }
         }
-        activeLetter?.let { letter ->
-            val bubbleY = (trackHeight * fingerFraction) - 26.dp
-            Box(
-                Modifier
+        } // ScrollerGlass
+
+        // ---------- Língua de vidro, colada no trilho ----------
+        if (emerge > 0.01f) {
+            val label = detailLetter?.let { d ->
+                activePrefix?.let { p -> "$d${if (p == '#') "·" else p.lowercaseChar()}" } ?: d.toString()
+            } ?: activeLetter?.toString() ?: ""
+            val anchorX = trackW - 1.dp + (miniW + gap) * detailProgress
+            val totalH = tongueBodyH + flare * 2
+            val yOffsetPx = animY - with(density) { totalH.toPx() } / 2f
+            ScrollerGlass(
+                backdrop = backdrop,
+                shape = remember(flare) { TongueShape(flare) },
+                style = ScrollerTongueStyle,
+                fallbackFill = TongueGlassFill,
+                modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .offset(x = (-40).dp, y = bubbleY)
-                    .size(52.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.95f)),
-                contentAlignment = Alignment.Center
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            x = -anchorX.roundToPx(),
+                            y = (yOffsetPx + 6.dp.toPx()).toInt()
+                        )
+                    }
+                    .size(tongueW, totalH)
+                    .graphicsLayer {
+                        val e = emerge.coerceAtLeast(0f)
+                        scaleX = e * (1f - stretch * 0.25f)
+                        scaleY = (0.55f + 0.45f * e.coerceAtMost(1.1f)) * (1f + stretch)
+                        alpha = e.coerceIn(0f, 1f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)
+                    }
             ) {
-                Text(
-                    letter.toString(),
-                    color = Color.Black,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                AnimatedContent(
+                    targetState = label,
+                    transitionSpec = {
+                        val down = (AlphabetLetters.indexOf(targetState.lastOrNull()?.uppercaseChar() ?: '#')) >=
+                            (AlphabetLetters.indexOf(initialState.lastOrNull()?.uppercaseChar() ?: '#'))
+                        val dir = if (down) 1 else -1
+                        (slideInVertically(androidx.compose.animation.core.spring(0.55f, 700f)) { it * dir } +
+                            fadeIn(tween(90)) +
+                            androidx.compose.animation.scaleIn(initialScale = 0.5f)) togetherWith
+                            (slideOutVertically(tween(110)) { -it * dir } +
+                                fadeOut(tween(90)) +
+                                androidx.compose.animation.scaleOut(targetScale = 0.6f)) using
+                            SizeTransform(clip = false)
+                    },
+                    label = "tongueLetter",
+                    modifier = Modifier.padding(start = 12.dp).width(tongueW - 12.dp - flare - 4.dp)
+                ) { text ->
+                    Text(
+                        text,
+                        color = Color.White,
+                        fontSize = if (text.length > 1) 19.sp else 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                }
+            }
+        }
+    }
+}
+
+/** Vidro do índice: vidro real (amostra o fundo) quando há backdrop; senão, vidro fosco desenhado. */
+@Composable
+private fun ScrollerGlass(
+    backdrop: GraphicsLayer?,
+    shape: androidx.compose.ui.graphics.Shape,
+    style: GlassStyle,
+    modifier: Modifier,
+    fallbackFill: Brush = ScrollerGlassFill,
+    content: @Composable BoxScope.() -> Unit
+) {
+    if (backdrop != null) {
+        GlassSurface(backdrop = backdrop, shape = shape, style = style, modifier = modifier, content = content)
+    } else {
+        Box(
+            modifier.clip(shape).background(fallbackFill).border(1.dp, ScrollerGlassRim, shape),
+            content = content
+        )
+    }
+}
+
+private val ScrollerTrackStyle = GlassStyle(
+    blur = 8.dp,
+    refraction = 6.dp,
+    edgeWidth = 10.dp,
+    magnification = 0f,
+    dispersion = 0.14f,
+    saturation = 1.25f,
+    veilTop = 0.12f,
+    veilBottom = 0.04f,
+    backdropTint = 0.06f,
+    rim = 0.6f,
+    shadow = 4.dp
+)
+
+private val ScrollerTongueStyle = GlassStyle(
+    blur = 3.dp,
+    refraction = 12.dp,
+    edgeWidth = 16.dp,
+    magnification = 0.08f,
+    dispersion = 0.25f,
+    saturation = 1.35f,
+    veilTop = 0.20f,
+    veilBottom = 0.08f,
+    backdropTint = 0.10f,
+    rim = 0.75f,
+    shadow = 6.dp
+)
+
+/** Língua que sai do trilho: corpo arredondado à esquerda e "abas" côncavas que se fundem ao trilho. */
+private class TongueShape(private val flare: Dp) : androidx.compose.ui.graphics.Shape {
+    override fun createOutline(
+        size: androidx.compose.ui.geometry.Size,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        density: androidx.compose.ui.unit.Density
+    ): androidx.compose.ui.graphics.Outline {
+        val w = size.width
+        val h = size.height
+        val r = with(density) { flare.toPx() }
+        val bodyR = (h - 2 * r) / 2f
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(w, 0f)
+            quadraticTo(w, r, w - r, r)
+            lineTo(bodyR, r)
+            arcTo(androidx.compose.ui.geometry.Rect(0f, r, bodyR * 2, h - r), 270f, -180f, false)
+            lineTo(w - r, h - r)
+            quadraticTo(w, h - r, w, h)
+            close()
+        }
+        return androidx.compose.ui.graphics.Outline.Generic(path)
+    }
+}
+
+// ---------- Índice desenhado FORA do conteúdo (para usar o vidro real) ----------
+/** Uma lista que quer um índice; a posição vem do espaço reservado dentro da lista. */
+internal class ScrollerEntry {
+    var labels by mutableStateOf<List<String>>(emptyList())
+    var onScrollTo by mutableStateOf<(Int) -> Unit>({})
+    var bounds by mutableStateOf(androidx.compose.ui.geometry.Rect.Zero)
+    /** Opção "ordem alfabética pela primeira letra" (Configurações › Biblioteca). */
+    var firstLetterOrder by mutableStateOf(false)
+}
+
+internal class ScrollerOverlayHost {
+    val entries = androidx.compose.runtime.mutableStateListOf<ScrollerEntry>()
+}
+
+internal val LocalScrollerHost = androidx.compose.runtime.compositionLocalOf<ScrollerOverlayHost?> { null }
+
+/**
+ * Reserva o lugar do índice dentro da lista. Se houver um host (tela principal), o índice em si é
+ * desenhado por [ScrollerOverlay] fora do conteúdo gravado como fundo do vidro — assim ele pode
+ * amostrar a lista atrás dele sem desenhar a si mesmo. Sem host, desenha direto (vidro fosco).
+ */
+@Composable
+private fun AlphabetScrollerSlot(
+    labels: List<String>,
+    modifier: Modifier,
+    onScrollTo: (Int) -> Unit
+) {
+    val firstLetterOrder = LocalFirstLetterOrder.current
+    val host = LocalScrollerHost.current
+    if (host == null) {
+        AlphabetFastScroller(
+            labels = labels,
+            modifier = modifier,
+            firstLetterOrder = firstLetterOrder,
+            onScrollTo = onScrollTo
+        )
+        return
+    }
+    val entry = remember { ScrollerEntry() }
+    SideEffect {
+        entry.labels = labels
+        entry.onScrollTo = onScrollTo
+        entry.firstLetterOrder = firstLetterOrder
+    }
+    DisposableEffect(host, entry) {
+        host.entries.add(entry)
+        onDispose { host.entries.remove(entry) }
+    }
+    Box(
+        modifier
+            .width(AlphabetScrollerTotalWidth)
+            .onGloballyPositioned { entry.bounds = it.boundsInRoot() }
+    )
+}
+
+/** Desenha os índices registrados, por cima do conteúdo, com o vidro real. */
+@Composable
+internal fun BoxScope.ScrollerOverlay(host: ScrollerOverlayHost, backdrop: GraphicsLayer) {
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    var rootW by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    Box(
+        Modifier
+            .matchParentSize()
+            .onGloballyPositioned {
+                origin = it.positionInRoot()
+                rootW = it.size.width.toFloat()
+            }
+    ) {
+        host.entries.forEach { entry ->
+            val b = entry.bounds
+            if (b.width <= 0f || b.height <= 0f || entry.labels.isEmpty()) return@forEach
+            if (b.right <= origin.x || b.left >= origin.x + rootW) return@forEach // fora da tela (ex.: outra aba)
+            androidx.compose.runtime.key(entry) {
+                Box(
+                    Modifier
+                        .offset {
+                            androidx.compose.ui.unit.IntOffset(
+                                (b.left - origin.x).toInt(),
+                                (b.top - origin.y).toInt()
+                            )
+                        }
+                        .size(with(density) { b.width.toDp() }, with(density) { b.height.toDp() })
+                ) {
+                    AlphabetFastScroller(
+                        labels = entry.labels,
+                        modifier = Modifier.fillMaxSize(),
+                        backdrop = backdrop,
+                        firstLetterOrder = entry.firstLetterOrder,
+                        onScrollTo = { entry.onScrollTo(it) }
+                    )
+                }
             }
         }
     }
@@ -2703,8 +3274,8 @@ private fun TrackList(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val letterIndex = remember(tracks) {
-        if (showAlphabetScroller) buildLetterIndex(tracks) { it.title } else emptyMap()
+    val scrollerLabels = remember(tracks, showAlphabetScroller) {
+        if (showAlphabetScroller) tracks.map { it.title } else emptyList()
     }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
@@ -2773,17 +3344,15 @@ private fun TrackList(
             }
         }
     }
-    if (showAlphabetScroller && letterIndex.isNotEmpty()) {
-        AlphabetFastScroller(
-            letterIndex = letterIndex,
+    if (showAlphabetScroller && scrollerLabels.isNotEmpty()) {
+        AlphabetScrollerSlot(
+            labels = scrollerLabels,
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .fillMaxHeight()
-                .padding(vertical = 12.dp, horizontal = 2.dp),
-            onLetterSelected = { letter ->
-                letterIndex[letter]?.let { idx ->
-                    scope.launch { listState.scrollToItem(idx.coerceIn(0, tracks.lastIndex.coerceAtLeast(0))) }
-                }
+                .padding(top = 12.dp, bottom = AlphabetScrollerBottomGap, end = 2.dp),
+            onScrollTo = { idx ->
+                scope.launch { listState.scrollToItem(idx.coerceIn(0, tracks.lastIndex.coerceAtLeast(0))) }
             }
         )
     }
@@ -2849,7 +3418,10 @@ private fun SelectionActionsMenu(
     onRenameBatch: (() -> Unit)? = null,
     onDelete: () -> Unit
 ) {
-    val pal = menuPalette(LocalAppColors.current)
+    val menuStyle = LocalMenuVisualStyle.current
+    val pal = menuPalette(LocalAppColors.current, menuStyle)
+    val glassMenu = menuStyle == MenuVisualStyle.GLASS
+    val menuScrollState = rememberScrollState()
     // onEditTags: 1 faixa = editor completo; várias = edição em lote (Artista/Álbum/Artista do Álbum)
     Dialog(
         onDismissRequest = onDismiss,
@@ -2870,18 +3442,19 @@ private fun SelectionActionsMenu(
                     .navigationBarsPadding()
                     .clickable(enabled = false) {}
             ) {
-                GlassSurface(
-                    backdrop = backdrop,
-                    shape = RoundedCornerShape(28.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 460.dp)
-                ) {
+                val menuContent: @Composable () -> Unit = {
                     Column(
                         Modifier
-                            .background(pal.container.copy(alpha = 0.72f))
+                            .fillMaxWidth()
+                            .background(
+                                when {
+                                    glassMenu -> Color.Transparent
+                                    menuStyle == MenuVisualStyle.COLORFUL -> pal.container.copy(alpha = 0.72f)
+                                    else -> pal.container
+                                }
+                            )
                             .padding(vertical = 8.dp)
-                            .verticalScroll(rememberScrollState())
+                            .verticalScroll(menuScrollState)
                     ) {
                         Text(
                             if (count == 1) "1 faixa selecionada" else "$count faixas selecionadas",
@@ -2914,6 +3487,29 @@ private fun SelectionActionsMenu(
                         MenuRow("Desmarcar Todas", onClearSelection)
                     }
                 }
+                if (glassMenu) {
+                    GlassSurface(
+                        backdrop = backdrop,
+                        sourceOrigin = LocalGlassBackdropOrigin.current,
+                        shape = RoundedCornerShape(28.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 460.dp),
+                        style = GlassStyle.Panel.copy(
+                            refraction = 6.dp,
+                            edgeWidth = 14.dp,
+                            magnification = 0.015f,
+                            dispersion = 0.18f
+                        )
+                    ) {
+                        if (GlassConfig.quality == GlassQuality.LIGHT) menuContent()
+                        else GlassLensContent(scrollState = menuScrollState) { menuContent() }
+                    }
+                } else {
+                    Surface(
+                        color = pal.container,
+                        shape = RoundedCornerShape(28.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 460.dp)
+                    ) { menuContent() }
+                }
             }
         }
     }
@@ -2921,11 +3517,14 @@ private fun SelectionActionsMenu(
 
 @Composable
 private fun MenuRow(label: String, onClick: () -> Unit, textColor: Color = Color.Unspecified) {
-    val resolved = if (textColor == Color.Unspecified) menuPalette(LocalAppColors.current).content else textColor
+    val resolved = if (textColor == Color.Unspecified) {
+        menuPalette(LocalAppColors.current, LocalMenuVisualStyle.current).content
+    } else textColor
     Text(
         text = label,
         modifier = Modifier
             .fillMaxWidth()
+            .lensRow(onClick)
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
         fontSize = 16.sp,
@@ -3024,14 +3623,14 @@ private fun SortBar(
                     MusicViewModel.GroupSort.TRACK_COUNT to "Quantidade de músicas",
                     MusicViewModel.GroupSort.TOTAL_DURATION to "Duração total"
                 ).forEach { (sort, name) ->
-                    DropdownMenuItem(
+                    LensMenuItem(
                         text = { Text("$name ↑") },
                         onClick = {
                             onGroupSort(sort, MusicViewModel.SortOrder.ASC)
                             expanded = false
                         }
                     )
-                    DropdownMenuItem(
+                    LensMenuItem(
                         text = { Text("$name ↓") },
                         onClick = {
                             onGroupSort(sort, MusicViewModel.SortOrder.DESC)
@@ -3046,14 +3645,14 @@ private fun SortBar(
                     MusicViewModel.TrackSort.DURATION to "Duração da faixa",
                     MusicViewModel.TrackSort.LAST_MODIFIED to "Última atualização"
                 ).forEach { (sort, name) ->
-                    DropdownMenuItem(
+                    LensMenuItem(
                         text = { Text("$name ↑") },
                         onClick = {
                             onTrackSort(sort, MusicViewModel.SortOrder.ASC)
                             expanded = false
                         }
                     )
-                    DropdownMenuItem(
+                    LensMenuItem(
                         text = { Text("$name ↓") },
                         onClick = {
                             onTrackSort(sort, MusicViewModel.SortOrder.DESC)
@@ -3261,12 +3860,14 @@ private fun ArtistDetailScreen(
     // Ordenação das músicas do artista: album | year | title | duration
     var trackSortMode by remember { mutableStateOf("album") }
     var trackSortAsc by remember { mutableStateOf(true) }
-    val sortedArtistTracks = remember(tracks, trackSortMode, trackSortAsc) {
+    val firstLetterOrder = LocalFirstLetterOrder.current
+    val sortedArtistTracks = remember(tracks, trackSortMode, trackSortAsc, firstLetterOrder) {
+        val alpha = AlphaSort
         val base = when (trackSortMode) {
-            "year" -> tracks.sortedWith(compareBy<Track> { it.year ?: Int.MAX_VALUE }.thenBy { it.album.lowercase() }.thenBy { it.trackNumber ?: Int.MAX_VALUE })
-            "title" -> tracks.sortedBy { it.title.lowercase() }
+            "year" -> tracks.sortedWith(compareBy<Track> { it.year ?: Int.MAX_VALUE }.thenBy { alpha.key(it.album, firstLetterOrder) }.thenBy { it.trackNumber ?: Int.MAX_VALUE })
+            "title" -> tracks.sortedBy { alpha.key(it.title, firstLetterOrder) }
             "duration" -> tracks.sortedBy { it.duration }
-            else -> tracks.sortedWith(compareBy<Track> { it.album.lowercase() }.thenBy { it.trackNumber ?: Int.MAX_VALUE }.thenBy { it.title.lowercase() })
+            else -> tracks.sortedWith(compareBy<Track> { alpha.key(it.album, firstLetterOrder) }.thenBy { it.trackNumber ?: Int.MAX_VALUE }.thenBy { alpha.key(it.title, firstLetterOrder) })
         }
         if (trackSortAsc) base else base.reversed()
     }
@@ -3297,11 +3898,12 @@ private fun ArtistDetailScreen(
     }
     val sortedAlbums = remember(albumsWithYear, albumSortBy, albumSortAsc) {
         val albums = albumsWithYear
+        val alpha = AlphaSort
         val base = when (albumSortBy) {
             "year" -> albums.sortedWith(
-                compareBy<ArtistAlbumItem> { it.year ?: Int.MAX_VALUE }.thenBy { it.name.lowercase() }
+                compareBy<ArtistAlbumItem> { it.year ?: Int.MAX_VALUE }.thenBy { alpha.key(it.name, firstLetterOrder) }
             )
-            else -> albums.sortedBy { it.name.lowercase() }
+            else -> albums.sortedBy { alpha.key(it.name, firstLetterOrder) }
         }
         if (albumSortAsc) base else base.reversed()
     }
@@ -4244,7 +4846,8 @@ private fun AlbumDetailScreen(
             refreshing = false
         }
     }
-    val discGroups = remember(tracks) {
+    val firstLetterOrder = LocalFirstLetterOrder.current
+    val discGroups = remember(tracks, firstLetterOrder) {
         val hasDiscs = tracks.any { (it.discNumber ?: 0) > 1 } ||
             tracks.map { it.discNumber ?: 1 }.distinct().size > 1
         if (!hasDiscs) {
@@ -4256,7 +4859,7 @@ private fun AlbumDetailScreen(
                 .sortedBy { it.first }
                 .map { (disc, list) ->
                     disc to list.sortedWith(
-                        compareBy({ it.trackNumber ?: Int.MAX_VALUE }, { it.title.lowercase() })
+                        compareBy({ it.trackNumber ?: Int.MAX_VALUE }, { AlphaSort.key(it.title, firstLetterOrder) })
                     )
                 }
         }
@@ -4679,7 +5282,9 @@ private fun LysPlaceHome(
     mostPlayedRanked: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod) -> List<MusicViewModel.RankedItem> = { _, _ -> emptyList() },
     historyInPeriod: (MusicViewModel.StatsPeriod) -> List<Track> = { emptyList() },
     onExportTopStats: (MusicViewModel.MostPlayedKind, MusicViewModel.StatsPeriod, List<MusicViewModel.RankedItem>) -> Unit = { _, _, _ -> },
-    onOpenLastFm: () -> Unit = {}
+    periodPlayCount: (MusicViewModel.StatsPeriod) -> Int = { 0 },
+    onOpenLastFm: () -> Unit = {},
+    nowPlayingOpen: Boolean = false
 ) {
     val homeFontFamily = rememberFontFamily(homeButtonFontPath)
     val homeTextColor = Color(homeButtonColor)
@@ -4687,8 +5292,10 @@ private fun LysPlaceHome(
     var mostKind by remember { mutableStateOf(MusicViewModel.MostPlayedKind.TRACKS) }
     var mostPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
     var historyPeriod by remember { mutableStateOf(MusicViewModel.StatsPeriod.ALL_TIME) }
+    var showLocalRetrospective by remember { mutableStateOf(false) }
     val context = LocalContext.current
-    BackHandler(enabled = section != null) { section = null }
+    // Não intercepta o voltar enquanto o Now Playing está aberto por cima
+    BackHandler(enabled = section != null && !nowPlayingOpen) { section = null }
     Box(
         Modifier
             .fillMaxSize()
@@ -4874,8 +5481,28 @@ private fun LysPlaceHome(
                                 Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.End
+                                horizontalArrangement = Arrangement.End,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Text(
+                                    "Retrospectiva",
+                                    color = appColors.accent,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(appColors.accent.copy(0.15f))
+                                        .clickable {
+                                            if (periodPlayCount(mostPeriod) > 0) showLocalRetrospective = true
+                                            else android.widget.Toast.makeText(
+                                                context,
+                                                "Nada para exportar neste período",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
                                 Text(
                                     "Exportar top 10",
                                     color = appColors.accent,
@@ -5041,6 +5668,43 @@ private fun LysPlaceHome(
                 }
             }
         }
+    }
+    if (showLocalRetrospective) {
+        val periodTitle = when (mostPeriod) {
+            MusicViewModel.StatsPeriod.ALL_TIME -> "Todo o período"
+            MusicViewModel.StatsPeriod.THIS_WEEK -> "Esta semana"
+            MusicViewModel.StatsPeriod.LAST_WEEK -> "Semana passada"
+            MusicViewModel.StatsPeriod.THIS_MONTH -> "Este mês"
+            MusicViewModel.StatsPeriod.LAST_MONTH -> "Mês passado"
+            MusicViewModel.StatsPeriod.THIS_YEAR -> "Este ano"
+            MusicViewModel.StatsPeriod.LAST_YEAR -> "Ano passado"
+        }
+        val totalPlays = periodPlayCount(mostPeriod)
+        val trackRows = mostPlayedRanked(MusicViewModel.MostPlayedKind.TRACKS, mostPeriod)
+            .map { com.tolete.player.data.RetrospectiveExporter.ChartRow(it.title, it.subtitle, it.count) }
+        val artistRows = mostPlayedRanked(MusicViewModel.MostPlayedKind.ARTISTS, mostPeriod)
+            .map { com.tolete.player.data.RetrospectiveExporter.ChartRow(it.title, "", it.count) }
+        val albumRows = mostPlayedRanked(MusicViewModel.MostPlayedKind.ALBUMS, mostPeriod)
+            .map { com.tolete.player.data.RetrospectiveExporter.ChartRow(it.title, it.subtitle, it.count) }
+        RetrospectiveExportSheet(
+            description = "Período: $periodTitle\nCards montados com o histórico de reprodução local do Lyron, sem depender do Last.fm.",
+            createManifest = { ctx ->
+                com.tolete.player.data.RetrospectiveExporter.exportFromRaw(
+                    context = ctx,
+                    user = "Histórico local",
+                    rangeLabel = "Local",
+                    periodTitle = periodTitle,
+                    totalPlays = totalPlays,
+                    bucketLabels = listOf(periodTitle),
+                    bucketCounts = listOf(totalPlays),
+                    topTracks = trackRows,
+                    topArtists = artistRows,
+                    topAlbums = albumRows
+                )
+            },
+            appColors = appColors,
+            onDismiss = { showLocalRetrospective = false }
+        )
     }
 }
 

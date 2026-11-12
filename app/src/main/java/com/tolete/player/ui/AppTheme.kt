@@ -2,6 +2,7 @@ package com.tolete.player.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -295,17 +296,23 @@ fun rememberAppColors(
         }
     }
     val target = if (useArt) fromArt else fixed
-    val top by animateColorAsState(target.gradientTop, tween(550), label = "gradTop")
-    val bottom by animateColorAsState(target.gradientBottom, tween(550), label = "gradBottom")
-    val accent by animateColorAsState(target.accent, tween(550), label = "accent")
-    val surface by animateColorAsState(target.surface, tween(550), label = "surface")
+    val colorTransition = tween<Color>(durationMillis = 760, easing = FastOutSlowInEasing)
+    val top by animateColorAsState(target.gradientTop, colorTransition, label = "gradTop")
+    val bottom by animateColorAsState(target.gradientBottom, colorTransition, label = "gradBottom")
+    val accent by animateColorAsState(target.accent, colorTransition, label = "accent")
+    val surface by animateColorAsState(target.surface, colorTransition, label = "surface")
+    val floatColors = if (themeId == AppThemeId.DYNAMIC) {
+        target.floatColors.mapIndexed { index, color ->
+            animateColorAsState(color, colorTransition, label = "floatColor$index").value
+        }
+    } else target.floatColors
     return AppColors(
         gradientTop = top,
         gradientBottom = bottom,
         accent = accent,
         surface = surface,
         isLight = target.isLight,
-        floatColors = target.floatColors
+        floatColors = floatColors
     )
 }
 

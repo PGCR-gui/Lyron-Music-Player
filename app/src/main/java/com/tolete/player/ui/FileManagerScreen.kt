@@ -1,15 +1,20 @@
 package com.tolete.player.ui
 
+import android.content.ComponentName
+import android.content.Intent
 import android.os.Environment
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -22,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -29,6 +35,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tolete.player.R
+import com.tolete.player.data.TagReader
+import com.tolete.player.data.TagWriter
+import com.tolete.player.data.Track
+import androidx.core.content.FileProvider
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
 import kotlinx.coroutines.Dispatchers
@@ -53,11 +63,14 @@ fun FileManagerScreen(
     initialPath: String? = null,
     floatingIconsEnabled: Boolean = true,
     appColors: AppColors = DefaultAppColors,
+    backdrop: GraphicsLayer? = null,
     onClose: () -> Unit,
     onFolderPicked: ((String) -> Unit)? = null,
-    onTracksMayHaveChanged: (() -> Unit)? = null
+    onTracksMayHaveChanged: (() -> Unit)? = null,
+    onPlayFolderTracks: (List<Track>, Int) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val menuVisualStyle = LocalMenuVisualStyle.current
     val scope = rememberCoroutineScope()
     val root = remember {
         Environment.getExternalStorageDirectory()?.absolutePath ?: "/storage/emulated/0"
@@ -95,6 +108,100 @@ fun FileManagerScreen(
             }
             loading = false
             selected = selected.filter { path -> entries.any { it.path == path } }.toSet()
+        }
+    }
+
+    fun openAudioFromFolder(path: String) {
+        scope.launch {
+            val result: Pair<List<Track>, Int> = withContext(Dispatchers.IO) {
+                val selectedFile = File(path)
+                val folder = selectedFile.parentFile ?: return@withContext Pair(emptyList(), -1)
+                val audioFiles = folder.listFiles()
+                    ?.filter { it.isFile && !it.name.startsWith('.') && it.extension.lowercase() in AUDIO_EXT }
+                    .orEmpty()
+                val artByAlbum = mutableMapOf<String, String>()
+                val folderTracks = audioFiles.map { file ->
+                    val tags = TagReader.read(file)
+                    val artKey = "${file.parent.orEmpty()}:${tags?.album.orEmpty()}".lowercase()
+                    val artPath = artByAlbum[artKey] ?: if (tags?.hasArtwork == true) {
+                        try {
+                            TagReader.readArtworkBytes(file)?.let { bytes ->
+                                val mime = when {
+                                    bytes.size >= 8 && bytes[0] == 0x89.toByte() &&
+                                        bytes.copyOfRange(1, 4).decodeToString() == "PNG" -> "image/png"
+                                    bytes.size >= 12 && bytes.copyOfRange(0, 4).decodeToString() == "RIFF" &&
+                                        bytes.copyOfRange(8, 12).decodeToString() == "WEBP" -> "image/webp"
+                                    bytes.size >= 6 && bytes.copyOfRange(0, 3).decodeToString() == "GIF" -> "image/gif"
+                                    else -> "image/jpeg"
+                                }
+                                TagWriter.saveCoverPreview(context, bytes, mime)
+                            }
+                        } catch (_: Exception) { null }
+                    } else null
+                    if (artPath != null) artByAlbum[artKey] = artPath
+                    Track(
+                        id = file.absolutePath,
+                        title = tags?.title?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension,
+                        artist = tags?.artist.orEmpty(),
+                        album = tags?.album.orEmpty(),
+                        albumArtist = tags?.albumArtist.orEmpty(),
+                        genre = tags?.genre.orEmpty(),
+                        duration = tags?.durationMs ?: 0L,
+                        uri = android.net.Uri.fromFile(file),
+                        path = file.absolutePath,
+                        folder = file.parent.orEmpty(),
+                        year = tags?.year?.take(4)?.toIntOrNull(),
+                        trackNumber = tags?.track?.substringBefore('/')?.filter { it.isDigit() }?.toIntOrNull(),
+                        discNumber = tags?.disc?.substringBefore('/')?.filter { it.isDigit() }?.toIntOrNull(),
+                        composer = tags?.composer.orEmpty(),
+                        artPath = artPath,
+                        codec = tags?.format,
+                        bitrate = tags?.bitRate ?: 0,
+                        sampleRate = tags?.sampleRate ?: 0,
+                        channels = tags?.channels ?: 0,
+                        fileSize = file.length(),
+                        lastModified = file.lastModified(),
+                        bitDepth = tags?.bitDepth ?: 0
+                    )
+                }.sortedWith(
+                    compareBy<Track> { it.discNumber ?: Int.MAX_VALUE }
+                        .thenBy { it.trackNumber ?: Int.MAX_VALUE }
+                        .thenBy { File(it.path).name.lowercase() }
+                )
+                folderTracks to folderTracks.indexOfFirst { it.path == selectedFile.absolutePath }
+            }
+            val (folderTracks, startIndex) = result
+            if (folderTracks.isEmpty() || startIndex < 0) {
+                Toast.makeText(context, "Não encontrei músicas reproduzíveis nesta pasta", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            onPlayFolderTracks(folderTracks, startIndex)
+            onClose()
+        }
+    }
+
+    fun openExternal(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", file)
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+            val viewIntent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val chooser = Intent.createChooser(viewIntent, "Abrir ${file.name} com…")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val ownComponents = context.packageManager.queryIntentActivities(viewIntent, 0)
+                .filter { it.activityInfo.packageName == context.packageName }
+                .map { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
+                .toTypedArray()
+            if (ownComponents.isNotEmpty()) {
+                chooser.putExtra(Intent.EXTRA_EXCLUDE_COMPONENTS, ownComponents)
+            }
+            context.startActivity(chooser)
+        } catch (e: Exception) {
+            Toast.makeText(
+                context,
+                "Não foi possível abrir esse arquivo em outro app: ${e.message ?: "sem aplicativo compatível"}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -230,8 +337,10 @@ fun FileManagerScreen(
                                     selected = if (isSelected) selected - entry.path else selected + entry.path
                                 } else if (entry.isDirectory) {
                                     currentPath = entry.path
+                                } else if (mode == FileManagerMode.BROWSE && entry.isAudio) {
+                                    openAudioFromFolder(entry.path)
                                 } else {
-                                    // arquivo: inicia seleção
+                                    // Arquivos não reproduzíveis entram no modo de seleção.
                                     selected = setOf(entry.path)
                                 }
                             },
@@ -254,15 +363,13 @@ fun FileManagerScreen(
 
             // Action bar (seleção / clipboard)
             if (selectionMode || clipboard != null) {
-                Surface(
-                    color = appColors.surface,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                val actionBarContent: @Composable () -> Unit = {
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
                             .padding(horizontal = 8.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (selectionMode) {
@@ -285,6 +392,12 @@ fun FileManagerScreen(
                                         renameTarget = e
                                         renameText = e.name
                                         renameUpdateTags = e.isAudio
+                                    }
+                                }
+                                val selectedFile = File(selected.first())
+                                if (selectedFile.isFile && selectedFile.extension.lowercase() !in AUDIO_EXT) {
+                                    ActionChip(Icons.Rounded.OpenInNew, "Abrir externo") {
+                                        openExternal(selectedFile)
                                     }
                                 }
                             }
@@ -342,6 +455,28 @@ fun FileManagerScreen(
                                 }
                             }
                         }
+                    }
+                }
+                if (menuVisualStyle == MenuVisualStyle.GLASS && backdrop != null) {
+                    GlassSurface(
+                        backdrop = backdrop,
+                        shape = RoundedCornerShape(24.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        style = GlassStyle.Bar.copy(
+                            refraction = 6.dp,
+                            edgeWidth = 14.dp,
+                            magnification = 0.015f,
+                            dispersion = 0.18f
+                        )
+                    ) { actionBarContent() }
+                } else {
+                    val barColor = when (menuVisualStyle) {
+                        MenuVisualStyle.COLORFUL -> appColors.surface
+                        MenuVisualStyle.SIMPLE -> Color.Black
+                        MenuVisualStyle.GLASS -> Color(0xCC17171D)
+                    }
+                    Surface(color = barColor, modifier = Modifier.fillMaxWidth()) {
+                        actionBarContent()
                     }
                 }
             }

@@ -13,6 +13,7 @@ import java.util.Locale
 
 /** Fontes disponíveis na busca manual de letras. */
 enum class LyricsSource(val label: String) {
+    LYRON_REPOSITORY("Lyron · GitHub"),
     LRCLIB("LRCLIB"),
     QQ_MUSIC("QQ Music"),
     NETEASE("NetEase"),
@@ -41,10 +42,14 @@ data class LyricsSearchResult(
     val type: LyricsType,
     val lines: List<LyricLine>,
     val lrcText: String
-)
+) {
+    /** Efeitos/segmentos ELRC+ são adicionais ao tipo simples, sincronizado ou por palavra. */
+    val hasElrcEffects: Boolean
+        get() = LyricsFormat.hasElrcEffects(lines, lrcText)
+}
 
 /**
- * Busca letras em todas as fontes ao mesmo tempo (LRCLIB, QQ Music, NetEase, KuGou).
+ * Busca letras em todas as fontes ao mesmo tempo, incluindo o repositório do Lyron.
  * Uma fonte que falhe ou fique offline simplesmente não contribui com resultados.
  */
 object LyricsSearch {
@@ -59,6 +64,7 @@ object LyricsSearch {
             if (t.isBlank()) return@coroutineScope emptyList()
 
             val tasks: List<Deferred<List<LyricsSearchResult>>> = listOf(
+                async(Dispatchers.IO) { safe { LyronLyricsRepository.search(t, a) } },
                 async(Dispatchers.IO) { safe { LrcLibClient.search(t, a).take(LRCLIB_MAX).mapNotNull { it.toUnified() } } },
                 async(Dispatchers.IO) { safe { QqMusicLyricsClient.search(t, a, OTHER_MAX) } },
                 async(Dispatchers.IO) { safe { NeteaseLyricsClient.search(t, a, OTHER_MAX) } },
@@ -96,7 +102,12 @@ object LyricsSearch {
             return titleRank * 2 + artistRank
         }
         return all.withIndex()
-            .sortedWith(compareBy({ score(it.value) }, { it.index }))
+            .sortedWith(
+                compareBy<IndexedValue<LyricsSearchResult>> {
+                    if (it.value.source == LyricsSource.LYRON_REPOSITORY) 0 else 1
+                }.thenBy { score(it.value) }
+                    .thenBy { it.index }
+            )
             .map { it.value }
     }
 
@@ -124,6 +135,16 @@ internal fun LrcLibClient.SearchResult.toUnified(): LyricsSearchResult? {
 /** Utilidades de formato compartilhadas pelos clientes de letras. */
 internal object LyricsFormat {
 
+    private val elrcEffectRegex = Regex(
+        "\\{(sil|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun hasElrcEffects(lines: List<LyricLine>, rawText: String): Boolean =
+        elrcEffectRegex.containsMatchIn(rawText) || lines.any { line ->
+            line.words.any { it.isSyllable || it.animation != LyricAnimation.NONE }
+        }
+
     private val creditRegex = Regex(
         """^\s*(作词|作詞|作曲|编曲|編曲|制作人|制作|監製|监制|混音|母带|录音|词|曲|歌手|歌名|专辑|OP|SP|""" +
             """Lyrics?\s*by|Music\s*by|Composed\s*by|Written\s*by|Arranged\s*by|Produced\s*by|""" +
@@ -147,15 +168,17 @@ internal object LyricsFormat {
     /** Gera LRC (linha) ou eLRC (palavra) conforme o conteúdo. Letra simples segue o padrão já usado pelo app. */
     fun toLrcText(lines: List<LyricLine>, type: LyricsType): String = buildString {
         for (line in lines) {
+            val markers = (if (line.isBackground) "{bg}" else "") +
+                (if (line.isTranslation) "{tr}" else "")
             when {
                 type == LyricsType.PLAIN || line.timeMs < 0 ->
-                    appendLine("[00:00.00]${line.text}")
+                    appendLine("[00:00.00]$markers${line.text}")
                 line.words.isNotEmpty() -> {
-                    append('[').append(fmtTs(line.timeMs)).append(']')
+                    append('[').append(fmtTs(line.timeMs)).append(']').append(markers)
                     line.words.forEach { w -> append('<').append(fmtTs(w.timeMs)).append('>').append(w.text) }
                     append('\n')
                 }
-                else -> appendLine("[${fmtTs(line.timeMs)}]${line.text}")
+                else -> appendLine("[${fmtTs(line.timeMs)}]$markers${line.text}")
             }
         }
     }.trimEnd()

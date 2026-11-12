@@ -30,11 +30,7 @@ import com.tolete.player.ui.SplashScreen
 import com.tolete.player.ui.TolereApp
 import com.tolete.player.ui.UpdateHost
 import com.tolete.player.ui.ChangelogOnUpdateDialog
-import com.tolete.player.ui.ExternalMiniPlayer
 import androidx.compose.foundation.layout.Box
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
@@ -45,11 +41,15 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MusicViewModel by viewModels()
 
     private var showSplash by mutableStateOf(true)
-    private var externalAudioUri by mutableStateOf<Uri?>(null)
-    private var externalTitle by mutableStateOf<String?>("Lyron")
-    private var externalArtist by mutableStateOf<String?>("")
+    private var openNowPlayingRequested by mutableStateOf(false)
+    private var openNowPlayingTrackId by mutableStateOf<String?>(null)
     /** Toque na notificação do scrobbler: abre o dashboard do Last.fm. */
     private var openLastFmDashboard by mutableStateOf(false)
+
+    companion object {
+        const val EXTRA_OPEN_NOW_PLAYING = "com.tolete.player.extra.OPEN_NOW_PLAYING"
+        const val EXTRA_OPEN_NOW_PLAYING_TRACK_ID = "com.tolete.player.extra.OPEN_NOW_PLAYING_TRACK_ID"
+    }
 
     private val pickFolder = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -378,7 +378,20 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        consumeOpenNowPlayingRequest(intent)
         handleIncomingIntent(intent)
+    }
+
+    private fun consumeOpenNowPlayingRequest(intent: Intent?) {
+        val requested = intent?.getBooleanExtra(EXTRA_OPEN_NOW_PLAYING, false) == true
+        val trackId = intent?.getStringExtra(EXTRA_OPEN_NOW_PLAYING_TRACK_ID)
+        if (requested || !trackId.isNullOrBlank()) {
+            openNowPlayingRequested = true
+            openNowPlayingTrackId = trackId?.takeIf { it.isNotBlank() }
+            showSplash = false
+        }
+        intent?.removeExtra(EXTRA_OPEN_NOW_PLAYING)
+        intent?.removeExtra(EXTRA_OPEN_NOW_PLAYING_TRACK_ID)
     }
 
     private fun handleIncomingIntent(intent: Intent?, recreated: Boolean = false) {
@@ -405,14 +418,25 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
         if (uri != null) {
-            externalAudioUri = uri
-            externalTitle = intent.getStringExtra(Intent.EXTRA_TITLE) ?: uri.lastPathSegment ?: "Música"
-            externalArtist = ""
-            showSplash = false
-            // Toca via ViewModel
-            try {
-                viewModel.playExternalUri(uri, externalTitle ?: "Música")
-            } catch (_: Exception) {}
+            val externalIntent = Intent(this, ExternalPlayerActivity::class.java).apply {
+                this.action = action
+                addFlags(intent.flags and (
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                    ))
+                if (action == Intent.ACTION_VIEW) {
+                    setDataAndType(uri, intent.type)
+                } else {
+                    type = intent.type
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = intent.clipData
+                }
+                intent.getStringExtra(Intent.EXTRA_TITLE)?.let { putExtra(Intent.EXTRA_TITLE, it) }
+            }
+            startActivity(externalIntent)
+            finish()
         }
     }
 
@@ -423,6 +447,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         com.tolete.player.data.LyronStorage.init(this)
+        consumeOpenNowPlayingRequest(intent)
         handleIncomingIntent(intent, recreated = savedInstanceState != null)
 
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -439,9 +464,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
-                val position by viewModel.positionMs.collectAsStateWithLifecycle()
-                val duration by viewModel.durationMs.collectAsStateWithLifecycle()
                 Box {
                 // ViewModel já inicia o carregamento da biblioteca no init (em paralelo à splash)
                 if (showSplash) {
@@ -485,7 +507,13 @@ class MainActivity : ComponentActivity() {
                             importBackup.launch(arrayOf("application/zip", "application/json", "*/*"))
                         },
                         openLastFmDashboard = openLastFmDashboard,
-                        onOpenLastFmDashboardConsumed = { openLastFmDashboard = false }
+                        onOpenLastFmDashboardConsumed = { openLastFmDashboard = false },
+                        openNowPlaying = openNowPlayingRequested,
+                        openNowPlayingTrackId = openNowPlayingTrackId,
+                        onOpenNowPlayingConsumed = {
+                            openNowPlayingRequested = false
+                            openNowPlayingTrackId = null
+                        }
                     )
                 }
 
@@ -494,22 +522,6 @@ class MainActivity : ComponentActivity() {
                     UpdateHost()
                 }
 
-                if (externalAudioUri != null && !showSplash) {
-                    ExternalMiniPlayer(
-                        title = externalTitle ?: "Música",
-                        artist = externalArtist ?: "",
-                        isPlaying = isPlaying,
-                        positionMs = position,
-                        durationMs = duration,
-                        onPlayPause = { viewModel.togglePlayPause() },
-                        onSeek = { frac ->
-                            val d = duration
-                            if (d > 0) viewModel.seekTo((frac * d).toLong())
-                        },
-                        onDismiss = { externalAudioUri = null },
-                        onOpenFull = { externalAudioUri = null }
-                    )
-                }
                 } // Box
             }
         }

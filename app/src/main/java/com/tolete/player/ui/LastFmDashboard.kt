@@ -252,6 +252,36 @@ private data class RangeSpec(val title: String, val buckets: List<BucketSpec>) {
     val toSec: Long get() = buckets.last().toSec
 }
 
+private data class PeriodIndexOption(val range: LfRange, val offset: Int, val title: String)
+
+private fun buildPeriodIndexOptions(range: LfRange, nowMs: Long): List<PeriodIndexOption> {
+    // "Tempo todo" já agrega por ano; o índice permite abrir um desses anos em detalhe mensal.
+    val indexedRange = if (range == LfRange.ALL) LfRange.YEAR else range
+    val oldest = Calendar.getInstance().apply {
+        clear()
+        set(Calendar.YEAR, 2002)
+        set(Calendar.MONTH, Calendar.JANUARY)
+        set(Calendar.DAY_OF_MONTH, 1)
+        startOfDay(this)
+    }.timeInMillis
+    val options = ArrayList<PeriodIndexOption>()
+    var offset = 0
+    while (options.size < 2_000) {
+        val period = buildRange(indexedRange, offset, nowMs)
+        val firstBucketStart = period.buckets.firstOrNull()?.fromSec?.times(1000L) ?: break
+        if (firstBucketStart < oldest) break
+        val title = if (indexedRange == LfRange.WEEK && offset < -1) {
+            val start = java.util.Date(period.buckets.first().fromSec * 1000L)
+            val end = java.util.Date((period.buckets.last().toSec - 1L) * 1000L)
+            val dateFormat = SimpleDateFormat("dd/MM/yy", ptBr)
+            "${dateFormat.format(start)} – ${dateFormat.format(end)}"
+        } else period.title
+        options += PeriodIndexOption(indexedRange, offset, title)
+        offset--
+    }
+    return options
+}
+
 private data class RawData(
     val counts: List<Int>,
     val tracks: List<ChartItem>,
@@ -418,7 +448,8 @@ fun LastFmDashboardScreen(
     appColors: AppColors,
     onBack: () -> Unit
 ) {
-    BackHandler(onBack = onBack)
+    // Back tratado em TolereApp (com prioridade sobre Now Playing quando ambos abertos).
+    // Mantém handler local desabilitado via callback do pai quando NP está aberto.
 
     val user by LastFmScrobbler.username.collectAsStateWithLifecycle()
     val editsVersion by ScrobbleEdits.version.collectAsStateWithLifecycle()
@@ -827,22 +858,47 @@ private fun DataTab(
         }
     }
 
-    if (showPeriodSummary && data != null) {
+    if (showPeriodSummary) {
         PeriodSummarySheet(
             range = range,
+            offset = offset,
             spec = spec,
             data = data,
+            loading = data == null && !failed,
             appColors = appColors,
+            onPeriodChange = { selectedRange, selectedOffset ->
+                range = selectedRange
+                offset = selectedOffset
+            },
             onDismiss = { showPeriodSummary = false }
         )
     }
     if (showExportRetrospective && data != null) {
         RetrospectiveExportSheet(
-            user = user,
-            range = range,
-            spec = spec,
-            data = data,
-            resolver = resolver,
+            description = "Período: ${spec.title}\nGera 10 cards a partir dos dados do Last.fm, com nomes ajustados às tags originais. Depois você pode compartilhar/salvar as fotos e exportar vídeos (3–15 s, com música).",
+            createManifest = { ctx ->
+                val mergedTracks = mergeTracks(data.tracks, resolver)
+                val mergedArtists = mergeArtists(data.artists, resolver)
+                val mergedAlbums = mergeAlbums(data.albums, resolver)
+                com.tolete.player.data.RetrospectiveExporter.exportFromRaw(
+                    context = ctx,
+                    user = user,
+                    rangeLabel = range.label,
+                    periodTitle = spec.title,
+                    totalPlays = data.counts.sum(),
+                    bucketLabels = spec.buckets.map { it.label },
+                    bucketCounts = data.counts,
+                    topTracks = mergedTracks.map {
+                        com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                    },
+                    topArtists = mergedArtists.map {
+                        com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                    },
+                    topAlbums = mergedAlbums.map {
+                        com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
+                    }
+                )
+            },
             appColors = appColors,
             libraryTracks = emptyList(), // resolver já carrega a lib; fotos usam LibraryCache
             onDismiss = { showExportRetrospective = false }
@@ -853,28 +909,31 @@ private fun DataTab(
 @Composable
 private fun PeriodSummarySheet(
     range: LfRange,
+    offset: Int,
     spec: RangeSpec,
-    data: RawData,
+    data: RawData?,
+    loading: Boolean,
     appColors: AppColors,
+    onPeriodChange: (LfRange, Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val total = data.counts.sum()
-    val peakIdx = data.counts.indices.maxByOrNull { data.counts[it] } ?: 0
-    val peakLabel = spec.buckets.getOrNull(peakIdx)?.label ?: "—"
-    val peakCount = data.counts.getOrElse(peakIdx) { 0 }
-    val activeBuckets = data.counts.count { it > 0 }
-    val topTrack = data.tracks.firstOrNull()
-    val topArtist = data.artists.firstOrNull()
-    val topAlbum = data.albums.firstOrNull()
+    var showPeriodIndex by remember { mutableStateOf(false) }
+    val indexOptions = remember(range) {
+        buildPeriodIndexOptions(range, System.currentTimeMillis())
+    }
 
-    androidx.compose.material3.AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xE61A1528),
         title = {
             Text(spec.title, color = Color.White, fontWeight = FontWeight.SemiBold)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text(
                     when (range) {
                         LfRange.WEEK -> "Sumário da semana"
@@ -885,17 +944,69 @@ private fun PeriodSummarySheet(
                     color = Color.White.copy(0.6f),
                     fontSize = 13.sp
                 )
-                SummaryLine("Total de plays", "$total")
-                SummaryLine("Pico ($peakLabel)", "$peakCount plays")
-                SummaryLine("Períodos ativos", "$activeBuckets / ${spec.buckets.size}")
-                topTrack?.let {
-                    SummaryLine("Música #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
-                }
-                topArtist?.let {
-                    SummaryLine("Artista #1", "${it.name} (${it.plays})")
-                }
-                topAlbum?.let {
-                    SummaryLine("Álbum #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
+
+                Text("Ver gráfico por intervalo", color = Color.White.copy(0.7f), fontSize = 12.sp)
+                Text(
+                    "Índice de períodos · ${spec.title}",
+                    color = Color.Black,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(appColors.accent)
+                        .clickable { showPeriodIndex = true }
+                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                )
+
+                if (data == null) {
+                    Box(
+                        Modifier.fillMaxWidth().height(145.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (loading) {
+                            CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(28.dp))
+                        } else {
+                            Text(
+                                "Não foi possível carregar os dados deste intervalo.",
+                                color = Color.White.copy(0.65f),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        when (range) {
+                            LfRange.WEEK -> "Plays por dia da semana"
+                            LfRange.MONTH -> "Plays por semana do mês"
+                            LfRange.YEAR -> "Plays por mês do ano"
+                            LfRange.ALL -> "Plays por ano"
+                        },
+                        color = Color.White.copy(0.6f),
+                        fontSize = 12.sp
+                    )
+                    PlaysBarChart(spec.buckets, data.counts, appColors)
+
+                    val total = data.counts.sum()
+                    val peakIdx = data.counts.indices.maxByOrNull { data.counts[it] } ?: 0
+                    val peakLabel = spec.buckets.getOrNull(peakIdx)?.label ?: "—"
+                    val peakCount = data.counts.getOrElse(peakIdx) { 0 }
+                    val activeBuckets = data.counts.count { it > 0 }
+                    val topTrack = data.tracks.firstOrNull()
+                    val topArtist = data.artists.firstOrNull()
+                    val topAlbum = data.albums.firstOrNull()
+
+                    SummaryLine("Total de plays", "$total")
+                    SummaryLine("Pico ($peakLabel)", "$peakCount plays")
+                    SummaryLine("Períodos ativos", "$activeBuckets / ${spec.buckets.size}")
+                    topTrack?.let {
+                        SummaryLine("Música #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
+                    }
+                    topArtist?.let {
+                        SummaryLine("Artista #1", "${it.name} (${it.plays})")
+                    }
+                    topAlbum?.let {
+                        SummaryLine("Álbum #1", "${it.name}${if (it.artist.isNotBlank()) " — ${it.artist}" else ""} (${it.plays})")
+                    }
                 }
             }
         },
@@ -910,6 +1021,65 @@ private fun PeriodSummarySheet(
             )
         }
     )
+
+    if (showPeriodIndex) {
+        Dialog(
+            onDismissRequest = { showPeriodIndex = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(appColors.surface)
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Índice de períodos", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    when (range) {
+                        LfRange.WEEK -> "Semanas disponíveis"
+                        LfRange.MONTH -> "Meses disponíveis"
+                        LfRange.YEAR, LfRange.ALL -> "Anos disponíveis"
+                    },
+                    color = Color.White.copy(0.6f),
+                    fontSize = 13.sp
+                )
+                LazyColumn(
+                    Modifier.fillMaxWidth().height(380.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(indexOptions) { option ->
+                        val selected = option.range == range && option.offset == offset
+                        Text(
+                            option.title,
+                            color = if (selected) Color.Black else Color.White,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (selected) appColors.accent else Color.White.copy(0.06f))
+                                .clickable {
+                                    showPeriodIndex = false
+                                    onPeriodChange(option.range, option.offset)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 11.dp)
+                        )
+                    }
+                }
+                Text(
+                    "Fechar",
+                    color = appColors.accent,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .clickable { showPeriodIndex = false }
+                        .padding(8.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -921,16 +1091,12 @@ private fun SummaryLine(label: String, value: String) {
 }
 
 /**
- * Exportação de retrospectiva: fotos estilo stories (+ opção de gerar vídeos 8s).
- * Nomes passam por [OriginalResolver]/edições de scrobble como no dashboard.
+ * Exportação compartilhada: recebe um gerador de manifesto e cuida das fotos e vídeos.
  */
 @Composable
-private fun RetrospectiveExportSheet(
-    user: String,
-    range: LfRange,
-    spec: RangeSpec,
-    data: RawData,
-    resolver: OriginalResolver?,
+internal fun RetrospectiveExportSheet(
+    description: String,
+    createManifest: suspend (android.content.Context) -> String,
     appColors: AppColors,
     libraryTracks: List<Track> = emptyList(),
     onDismiss: () -> Unit
@@ -942,11 +1108,6 @@ private fun RetrospectiveExportSheet(
     var exportDir by remember { mutableStateOf<java.io.File?>(null) }
     var showStories by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-
-    // Ranking com nomes revertidos (edições + biblioteca)
-    val mergedTracks = remember(data, resolver) { mergeTracks(data.tracks, resolver) }
-    val mergedArtists = remember(data, resolver) { mergeArtists(data.artists, resolver) }
-    val mergedAlbums = remember(data, resolver) { mergeAlbums(data.albums, resolver) }
 
     val retroTheme = remember(appColors) {
         com.tolete.player.data.RetrospectiveCardRenderer.ThemeColors(
@@ -970,24 +1131,7 @@ private fun RetrospectiveExportSheet(
             try {
                 resultMsg = "Salvando manifesto…"
                 val path = withContext(Dispatchers.IO) {
-                    com.tolete.player.data.RetrospectiveExporter.exportFromRaw(
-                        context = context,
-                        user = user,
-                        rangeLabel = range.label,
-                        periodTitle = spec.title,
-                        totalPlays = data.counts.sum(),
-                        bucketLabels = spec.buckets.map { it.label },
-                        bucketCounts = data.counts,
-                        topTracks = mergedTracks.map {
-                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
-                        },
-                        topArtists = mergedArtists.map {
-                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
-                        },
-                        topAlbums = mergedAlbums.map {
-                            com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
-                        }
-                    )
+                    createManifest(context)
                 }
                 val dir = java.io.File(path)
                 exportDir = dir
@@ -1108,16 +1252,14 @@ private fun RetrospectiveExportSheet(
         return
     }
 
-    androidx.compose.material3.AlertDialog(
+    AppAlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        containerColor = Color(0xE61A1528),
         title = { Text("Exportar retrospectiva", color = Color.White, fontWeight = FontWeight.SemiBold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Período: ${spec.title}\n" +
-                        "Gera 10 cards em foto (stories). Nomes voltam ao original das tags (só o primeiro artista).\n" +
-                        "Depois você pode passar pelos cards, compartilhar/salvar e exportar os vídeos (3–15 s, com música).",
+                    "$description\n" +
+                        "Os cards são gerados em fotos (stories); depois você pode compartilhar/salvar e exportar vídeos (3–15 s, com música).",
                     color = Color.White.copy(0.75f),
                     fontSize = 13.sp
                 )
@@ -1831,6 +1973,7 @@ private fun LfEntityDetailSheet(
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetPalette = menuPalette(appColors, LocalMenuVisualStyle.current)
     var mode by remember { mutableStateOf("track") } // track | artist | album
     val trackStats by produceState<LastFmClient.TrackStats?>(null, artist, title, user) {
         value = withContext(Dispatchers.IO) { LastFmClient.getTrackStats(artist, title, user) }
@@ -1846,15 +1989,15 @@ private fun LfEntityDetailSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xE61A1528),
-        contentColor = Color.White,
+        containerColor = sheetPalette.container,
+        contentColor = sheetPalette.content,
         dragHandle = {
             Box(
                 Modifier
                     .padding(top = 10.dp, bottom = 4.dp)
                     .size(width = 40.dp, height = 4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Color.White.copy(0.35f))
+                    .background(sheetPalette.content.copy(0.35f))
             )
         }
     ) {

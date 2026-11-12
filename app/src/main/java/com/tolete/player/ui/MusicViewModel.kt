@@ -19,6 +19,7 @@ import com.tolete.player.PlaybackService
 import com.tolete.player.data.Album
 import com.tolete.player.data.Artist
 import com.tolete.player.data.ArtistMetaStore
+import com.tolete.player.data.AlphaSort
 import com.tolete.player.data.FavoritesBridge
 import com.tolete.player.data.FavoritesFile
 import com.tolete.player.data.Genre
@@ -621,7 +622,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             splitGenres = prefs.getBoolean(KEY_SPLIT_GENRES, false),
             genreSeparators = prefs.getString(KEY_GENRE_SEPARATORS, null) ?: "; /",
             ignoredFolders = prefs.getString(KEY_IGNORED_FOLDERS, null) ?: "",
-            minDurationSec = prefs.getInt(KEY_MIN_DURATION_SEC, 0).coerceIn(0, 50)
+            minDurationSec = prefs.getInt(KEY_MIN_DURATION_SEC, 0).coerceIn(0, 50),
+            firstLetterOrder = prefs.getBoolean(KEY_FIRST_LETTER_ORDER, false)
         )
     )
     val librarySettings: StateFlow<LibrarySettings> = _librarySettings.asStateFlow()
@@ -660,6 +662,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val v = sec.coerceIn(0, 50)
         _librarySettings.update { it.copy(minDurationSec = v) }
         prefs.edit().putInt(KEY_MIN_DURATION_SEC, v).apply()
+    }
+    /**
+     * Ordem alfabética pela primeira letra (Configurações › Biblioteca). Afeta as listas de
+     * músicas, artistas, álbuns e gêneros e o índice lateral A–Z.
+     */
+    fun setFirstLetterOrder(enabled: Boolean) {
+        _librarySettings.update { it.copy(firstLetterOrder = enabled) }
+        prefs.edit().putBoolean(KEY_FIRST_LETTER_ORDER, enabled).apply()
     }
 
     /** Aplica blacklist de pastas e duração mínima sobre a lista escaneada. */
@@ -743,8 +753,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val changed = _bitPerfect.value != enabled
         _bitPerfect.value = enabled
         prefs.edit().putBoolean(KEY_BIT_PERFECT, enabled).apply()
-        // só faz diferença no modo "Alta qualidade"; recria o player para valer já
-        if (applyNow && changed && _audioOutput.value == AudioOutputBackend.HIGH_QUALITY) {
+        // Só faz diferença em Fidelidade de Som, que oferece Bit-perfect.
+        if (applyNow && changed && _audioOutput.value == AudioOutputBackend.FIDELITY) {
             applyAudioSettingsNow()
         }
     }
@@ -772,20 +782,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_MILK_INTERVAL, sec).apply()
     }
 
-    /** Quando o timer de preset dispara, também troca a música aleatoriamente. */
-    private val _changeSongWithMilkInterval = MutableStateFlow(prefs.getBoolean(KEY_MILK_CHANGE_SONG, false))
-    val changeSongWithMilkInterval: StateFlow<Boolean> = _changeSongWithMilkInterval.asStateFlow()
-    fun setChangeSongWithMilkInterval(enabled: Boolean) {
-        _changeSongWithMilkInterval.value = enabled
-        prefs.edit().putBoolean(KEY_MILK_CHANGE_SONG, enabled).apply()
+    /** TIME respeita o intervalo; TRACK troca somente quando muda a música. */
+    private val _milkSwitchMode = MutableStateFlow(
+        prefs.getString(KEY_MILK_SWITCH_MODE, null)?.uppercase()?.takeIf { it == "TIME" || it == "TRACK" }
+            ?: if (prefs.getBoolean(KEY_MILK_PRESET_ON_SONG, true)) "TRACK" else "TIME"
+    )
+    val milkSwitchMode: StateFlow<String> = _milkSwitchMode.asStateFlow()
+    fun setMilkSwitchMode(mode: String) {
+        val safe = if (mode.equals("TRACK", ignoreCase = true)) "TRACK" else "TIME"
+        _milkSwitchMode.value = safe
+        prefs.edit().putString(KEY_MILK_SWITCH_MODE, safe).apply()
     }
 
-    /** Ao mudar de faixa, escolhe um preset aleatório. */
-    private val _changePresetOnSongChange = MutableStateFlow(prefs.getBoolean(KEY_MILK_PRESET_ON_SONG, true))
-    val changePresetOnSongChange: StateFlow<Boolean> = _changePresetOnSongChange.asStateFlow()
-    fun setChangePresetOnSongChange(enabled: Boolean) {
-        _changePresetOnSongChange.value = enabled
-        prefs.edit().putBoolean(KEY_MILK_PRESET_ON_SONG, enabled).apply()
+    /** Ordem aplicada quando a política selecionada pede uma troca automática. */
+    private val _milkPresetOrder = MutableStateFlow(
+        prefs.getString(KEY_MILK_PRESET_ORDER, "RANDOM")?.uppercase()?.takeIf { it == "RANDOM" || it == "SEQUENTIAL" }
+            ?: "RANDOM"
+    )
+    val milkPresetOrder: StateFlow<String> = _milkPresetOrder.asStateFlow()
+    fun setMilkPresetOrder(order: String) {
+        val safe = if (order.equals("SEQUENTIAL", ignoreCase = true)) "SEQUENTIAL" else "RANDOM"
+        _milkPresetOrder.value = safe
+        prefs.edit().putString(KEY_MILK_PRESET_ORDER, safe).apply()
+    }
+
+    private val _milkFavoritesOnly = MutableStateFlow(prefs.getBoolean(KEY_MILK_FAVORITES_ONLY, false))
+    val milkFavoritesOnly: StateFlow<Boolean> = _milkFavoritesOnly.asStateFlow()
+    fun setMilkFavoritesOnly(enabled: Boolean) {
+        _milkFavoritesOnly.value = enabled
+        prefs.edit().putBoolean(KEY_MILK_FAVORITES_ONLY, enabled).apply()
     }
 
     /** Copia .milk / texturas / .zip escolhidos pelo usuário para a pasta do app. */
@@ -825,15 +850,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-    /**
-     * Saída de áudio: DEFAULT = o Android decide; HIGH_QUALITY = prioriza DAC USB / fone com fio,
-     * mantém PCM float (sem cair para 16-bit) e, no USB (Android 14+), segue a taxa da faixa.
-     */
-    enum class AudioOutputBackend { DEFAULT, HIGH_QUALITY }
+    /** DEFAULT = Android decide; FIDELITY preserva a fonte com conversão de compatibilidade. */
+    enum class AudioOutputBackend { DEFAULT, FIDELITY }
 
-    private fun audioOutputFromPrefs(): AudioOutputBackend =
-        if (com.tolete.player.data.AudioOutputPrefs.isHighQuality(prefs)) AudioOutputBackend.HIGH_QUALITY
-        else AudioOutputBackend.DEFAULT
+    private fun audioOutputFromPrefs(): AudioOutputBackend {
+        val saved = prefs.getString(KEY_AUDIO_OUTPUT, com.tolete.player.data.AudioOutputPrefs.DEFAULT)
+        val normalized = com.tolete.player.data.AudioOutputPrefs.normalize(saved)
+        if (saved != normalized) prefs.edit().putString(KEY_AUDIO_OUTPUT, normalized).apply()
+        return if (normalized == com.tolete.player.data.AudioOutputPrefs.FIDELITY) {
+            AudioOutputBackend.FIDELITY
+        } else AudioOutputBackend.DEFAULT
+    }
 
     private val _audioOutput = MutableStateFlow(audioOutputFromPrefs())
     val audioOutput: StateFlow<AudioOutputBackend> = _audioOutput.asStateFlow()
@@ -908,14 +935,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     android.util.Log.e("MusicVM", "applyAudioSettingsNow restore failed", e)
                 }
             }
-            val out = com.tolete.player.data.AudioOutputInfo.findHighQualityOutput(app)
+            val out = com.tolete.player.data.AudioOutputInfo.findPreferredOutput(app)
+            val modeLabel = when (_audioOutput.value) {
+                AudioOutputBackend.FIDELITY -> "Fidelidade de Som"
+                AudioOutputBackend.DEFAULT -> "padrão do sistema"
+            }
             val msg = when {
-                _audioOutput.value != AudioOutputBackend.HIGH_QUALITY ->
-                    "Saída de áudio: padrão do sistema"
-                out == null ->
-                    "Saída de áudio: alta qualidade · nenhum DAC USB ou fone com fio detectado"
-                else ->
-                    "Saída de áudio: alta qualidade · ${com.tolete.player.data.AudioOutputInfo.describeDevice(out)}"
+                _audioOutput.value == AudioOutputBackend.DEFAULT -> "Saída de áudio: $modeLabel"
+                out == null -> "Saída de áudio: $modeLabel · nenhum DAC USB ou fone com fio detectado"
+                else -> "Saída de áudio: $modeLabel · ${com.tolete.player.data.AudioOutputInfo.describeDevice(out)}"
             }
             android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -938,7 +966,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         list.flatMap { t -> splitter.split(t.artist).map { name -> name to t } }
             .groupBy({ it.first }, { it.second })
             .map { (name, l) -> Artist(name, l.size, l.firstNotNullOfOrNull { it.artPath }, l.sumOf { it.duration }) }
-            .sortedBy { it.name.lowercase() }
+            .sortedBy { AlphaSort.key(it.name, st.firstLetterOrder) }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Compositores: mesma lógica de divisão de tags dos artistas (separadores/exceções). */
@@ -952,7 +980,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
             .groupBy({ it.first }, { it.second })
             .map { (name, l) -> Artist(name, l.size, l.firstNotNullOfOrNull { it.artPath }, l.sumOf { it.duration }) }
-            .sortedBy { it.name.lowercase() }
+            .sortedBy { AlphaSort.key(it.name, st.firstLetterOrder) }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun openComposer(name: String) {
@@ -970,7 +998,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return "folder:$parent|$name"
     }
 
-    val albums: StateFlow<List<Album>> = tracks.map { list ->
+    val albums: StateFlow<List<Album>> = combine(tracks, _librarySettings) { list, st ->
         // Não usar o artista da faixa como artista do álbum: em coletâneas cada música
         // pode ter um artista diferente, embora pertença ao mesmo álbum/pasta.
         list.groupBy(::albumIdentity)
@@ -998,7 +1026,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     key = key
                 )
             }
-            .sortedBy { it.name.lowercase() }
+            .sortedBy { AlphaSort.key(it.name, st.firstLetterOrder) }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val genres: StateFlow<List<Genre>> = combine(tracks, _librarySettings) { list, st ->
@@ -1014,7 +1042,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val art = sorted.firstNotNullOfOrNull { it.artPath }
                 Genre(name, l.size, art, l.sumOf { it.duration })
             }
-            .sortedBy { it.name.lowercase() }
+            .sortedBy { AlphaSort.key(it.name, st.firstLetterOrder) }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val searchArtists: StateFlow<List<Artist>> = combine(artists, _searchQuery) { list, q ->
@@ -1047,8 +1075,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     /** Faixas do grupo aberto, ordenadas por álbum > nº da faixa > título. */
     val visibleTracks: StateFlow<List<Track>> = combine(tracks, filter, _playlists, _librarySettings) { list, f, pls, st ->
         if (f == null) {
-            // Aba "Todas": ordem alfabética por título
-            return@combine list.sortedBy { it.title.lowercase() }
+            // A aba "Todas" aplica a ordenação escolhida por sortedAllTracks, fora da UI.
+            return@combine list
         }
         when (f.tab) {
             Tab.PLAYLISTS -> {
@@ -1082,7 +1110,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 base.sortedWith(
-                    compareBy<Track>({ it.album.lowercase() }, { it.trackNumber ?: Int.MAX_VALUE }, { it.title.lowercase() })
+                    compareBy<Track>(
+                        { AlphaSort.key(it.album, st.firstLetterOrder) },
+                        { it.trackNumber ?: Int.MAX_VALUE },
+                        { AlphaSort.key(it.title, st.firstLetterOrder) }
+                    )
                 )
             }
         }
@@ -1112,6 +1144,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     // falha de scan não derruba o app; a biblioteca anterior continua valendo
                 } finally {
                     _isScanning.value = false
+                    if (!playbackRestoreCompleted) restorePlaybackState()
                 }
             }
         }
@@ -1280,6 +1313,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+    private val _themeRetainTrackColors = MutableStateFlow(false)
+    /** Mantém a paleta da faixa durante o fade de pausa; não altera estado/controles do player. */
+    val themeRetainTrackColors: StateFlow<Boolean> = _themeRetainTrackColors.asStateFlow()
+    private val _playbackButtonIsPlaying = MutableStateFlow(false)
+    val playbackButtonIsPlaying: StateFlow<Boolean> = _playbackButtonIsPlaying.asStateFlow()
+    private var pendingPlaybackButtonState: Boolean? = null
+    private var playbackButtonSettleJob: Job? = null
 
     private val _positionMs = MutableStateFlow(0L)
     val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
@@ -1313,7 +1353,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
-            persistPlaybackState(paused = !isPlaying)
+            if (isPlaying) _themeRetainTrackColors.value = false
+            val pendingButtonState = pendingPlaybackButtonState
+            if (pendingButtonState == null) {
+                _playbackButtonIsPlaying.value = isPlaying
+            } else if (pendingButtonState && isPlaying) {
+                pendingPlaybackButtonState = null
+                playbackButtonSettleJob?.cancel()
+                playbackButtonSettleJob = null
+                _playbackButtonIsPlaying.value = true
+            }
+            persistPlaybackState(paused = !isPlaying, immediate = !isPlaying)
             if (isPlaying) {
                 startPositionTicker()
                 _nowPlaying.value?.let { LastFmScrobbler.nowPlaying(it) }
@@ -1325,7 +1375,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             // no cálculo de play count (race com o combine de _positionMs).
             _positionMs.value = 0L
             _durationMs.value = 0L
-            _nowPlaying.value = _queue.value.firstOrNull { it.id == mediaItem?.mediaId }
+            val queuedTrack = _queue.value.firstOrNull { it.id == mediaItem?.mediaId }
+            val activeTrack = queuedTrack ?: mediaItem?.let(::externalTrackFromMediaItem)
+            if (queuedTrack == null && activeTrack != null) _queue.value = listOf(activeTrack)
+            _nowPlaying.value = activeTrack
             if (_isPlaying.value) _nowPlaying.value?.let { LastFmScrobbler.nowPlaying(it) }
             persistPlaybackState(paused = !(_isPlaying.value))
             // Re-anexa EQ caso a sessão de áudio mude
@@ -1357,6 +1410,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 controller = future.get().also { it.addListener(playerListener) }
                 syncFromController()
+                if (_library.value.isNotEmpty()) restorePlaybackState()
                 // Anexa o equalizador nativo à sessão de áudio atual
                 val sessionId = com.tolete.player.PlaybackService.currentAudioSessionId
                 if (sessionId != 0) {
@@ -1374,6 +1428,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _queue.value = list
         c.setMediaItems(list.map { it.toMediaItem() }, startIndex, 0L)
         c.prepare()
+        requestPlaybackButtonState(playing = true)
         c.play()
         _nowPlaying.value = list[startIndex]
         persistPlaybackState(paused = false)
@@ -1414,6 +1469,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 c.setMediaItems(q.map { it.toMediaItem() }, q.indexOfFirst { it.id == currentId }.coerceAtLeast(0), pos)
                 if (wasPlaying) c.play()
             }
+            persistPlaybackState(paused = !_isPlaying.value)
             return
         }
 
@@ -1429,6 +1485,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 c.addMediaItem(track.toMediaItem())
             }
         }
+        persistPlaybackState(paused = !_isPlaying.value)
     }
 
     /** Várias faixas logo após a atual, mantendo a ordem recebida (1ª da lista toca primeiro). */
@@ -1459,15 +1516,50 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             c.addMediaItem(track.toMediaItem())
         }
+        persistPlaybackState(paused = !_isPlaying.value)
     }
 
     private var fadeJob: Job? = null
 
+    private fun requestPlaybackButtonState(playing: Boolean) {
+        playbackButtonSettleJob?.cancel()
+        pendingPlaybackButtonState = playing
+        _playbackButtonIsPlaying.value = playing
+        _themeRetainTrackColors.value = !playing && _fadeMs.value > 0
+        val settleAfterMs = if (playing) 1_200L else _fadeMs.value.toLong() + 200L
+        playbackButtonSettleJob = viewModelScope.launch {
+            delay(settleAfterMs)
+            if (pendingPlaybackButtonState == playing) {
+                pendingPlaybackButtonState = null
+                playbackButtonSettleJob = null
+                _playbackButtonIsPlaying.value = _isPlaying.value
+                _themeRetainTrackColors.value = false
+            }
+        }
+    }
+
     fun togglePlayPause() {
-        val c = controller ?: return
+        if (controller == null) return
         // Fade é aplicado no PlaybackService (vale para notificação, Bluetooth e UI)
         fadeJob?.cancel()
-        if (c.isPlaying) c.pause() else c.play()
+        if (_playbackButtonIsPlaying.value) pausePlayback() else startPlayback()
+    }
+
+    fun startPlayback() {
+        val c = controller ?: return
+        fadeJob?.cancel()
+        requestPlaybackButtonState(playing = true)
+        c.volume = 1f
+        c.play()
+        persistPlaybackState(paused = false)
+    }
+
+    fun pausePlayback() {
+        val c = controller ?: return
+        fadeJob?.cancel()
+        requestPlaybackButtonState(playing = false)
+        c.pause()
+        persistPlaybackState(paused = true, immediate = true)
     }
 
     fun next() {
@@ -1488,8 +1580,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun currentDuration(): Long = controller?.duration?.takeIf { it > 0 } ?: 0L
 
     private var positionTicker: Job? = null
+    private var lastPositionCheckpointMs = 0L
     private fun startPositionTicker() {
         positionTicker?.cancel()
+        lastPositionCheckpointMs = android.os.SystemClock.elapsedRealtime()
         positionTicker = viewModelScope.launch {
             while (isActive) {
                 val c = controller
@@ -1499,6 +1593,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     if (d > 0) _durationMs.value = d
                 }
                 if (!_isPlaying.value) break
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastPositionCheckpointMs >= 5_000L) {
+                    lastPositionCheckpointMs = now
+                    persistPlaybackState(paused = false)
+                }
                 delay(250)
             }
         }
@@ -1507,11 +1606,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun seekTo(positionMs: Long) {
         controller?.seekTo(positionMs)
         _positionMs.value = positionMs
+        persistPlaybackState(paused = !_isPlaying.value)
     }
 
     /** Velocidade de reprodução (1f = normal). Usado no sincronizador de letras. */
     fun setPlaybackSpeed(speed: Float) {
-        val s = speed.coerceIn(0.5f, 2f)
+        val s = speed.coerceIn(0.25f, 2f)
         android.util.Log.i("MusicVM", "setPlaybackSpeed($s) player=${com.tolete.player.PlaybackService.exoPlayerRef != null} ctrl=${controller != null}")
 
         // 1) Referência direta ao ExoPlayer
@@ -1577,6 +1677,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     c.prepare()
                     if (_isPlaying.value) c.play()
                     _shuffle.value = true
+                    persistPlaybackState(paused = !_isPlaying.value)
                 } else {
                     _shuffle.value = false
                 }
@@ -1591,6 +1692,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         c.seekToDefaultPosition(index)
         c.play()
         _nowPlaying.value = _queue.value[index]
+        persistPlaybackState(paused = false)
     }
 
     /** Reordena a fila atual (arrastar na lista de reprodução). */
@@ -1599,6 +1701,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (from !in list.indices || to !in list.indices || from == to) return
         controller?.moveMediaItem(from, to)
         _queue.value = list.toMutableList().apply { add(to, removeAt(from)) }
+        persistPlaybackState(paused = !_isPlaying.value)
     }
 
     /** Remove um item da fila de reprodução (não apaga o arquivo). */
@@ -1631,16 +1734,52 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncFromController() {
         val c = controller ?: return
         _isPlaying.value = c.isPlaying
+        if (pendingPlaybackButtonState == null) _playbackButtonIsPlaying.value = c.isPlaying
         if (_shuffleType.value != ShuffleType.QUEUE) {
             _shuffle.value = c.shuffleModeEnabled
         }
-        if (c.mediaItemCount == 0 || _queue.value.isNotEmpty()) return
+        if (c.mediaItemCount == 0) return
+        val currentItem = c.currentMediaItem
+        val queuedCurrent = _queue.value.firstOrNull { it.id == currentItem?.mediaId }
+        if (queuedCurrent != null) {
+            _nowPlaying.value = queuedCurrent
+            return
+        }
         val byId = _library.value.associateBy { it.id }
-        if (byId.isEmpty()) return
         val q = (0 until c.mediaItemCount).mapNotNull { byId[c.getMediaItemAt(it).mediaId] }
-        if (q.size != c.mediaItemCount) return
-        _queue.value = q
-        _nowPlaying.value = byId[c.currentMediaItem?.mediaId]
+        if (q.size == c.mediaItemCount) {
+            _queue.value = q
+            _nowPlaying.value = byId[currentItem?.mediaId]
+            return
+        }
+        val externalTrack = currentItem?.let(::externalTrackFromMediaItem) ?: return
+        _queue.value = listOf(externalTrack)
+        _nowPlaying.value = externalTrack
+    }
+
+    private fun externalTrackFromMediaItem(item: MediaItem): Track? {
+        if (!item.mediaId.startsWith("external_")) return null
+        val uri = item.localConfiguration?.uri ?: return null
+        val metadata = item.mediaMetadata
+        val title = metadata.title?.toString()?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast(':')?.substringAfterLast('/')?.substringBeforeLast('.')
+            ?: "Música"
+        val artPath = metadata.artworkUri
+            ?.takeIf { it.scheme == "file" }
+            ?.path
+        return Track(
+            id = item.mediaId,
+            title = title,
+            artist = metadata.artist?.toString().orEmpty(),
+            album = metadata.albumTitle?.toString().orEmpty(),
+            albumArtist = "",
+            genre = "",
+            duration = controller?.duration?.takeIf { it > 0L } ?: 0L,
+            uri = uri,
+            path = uri.toString(),
+            folder = "Arquivo externo",
+            artPath = artPath
+        )
     }
 
     private fun Track.toMediaItem(): MediaItem {
@@ -1862,6 +2001,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString(KEY_THEME, id.name).apply()
     }
 
+    private val _menuVisualStyle = MutableStateFlow(
+        MenuVisualStyle.fromName(prefs.getString(KEY_MENU_VISUAL_STYLE, null)).also {
+            MenuVisualConfig.style = it
+        }
+    )
+    val menuVisualStyle: StateFlow<MenuVisualStyle> = _menuVisualStyle.asStateFlow()
+
+    fun setMenuVisualStyle(style: MenuVisualStyle) {
+        _menuVisualStyle.value = style
+        MenuVisualConfig.style = style
+        prefs.edit().putString(KEY_MENU_VISUAL_STYLE, style.name).apply()
+    }
+
     /** Cor padrão do tema dinâmico quando nenhuma música está tocando (ARGB). */
     private val _dynamicDefaultColor = MutableStateFlow(
         prefs.getInt(KEY_DYNAMIC_DEFAULT_COLOR, 0xFFBB86FC.toInt())
@@ -2042,6 +2194,9 @@ private val _firstPlayedAt = MutableStateFlow(
         }
         return map
     }
+
+    /** Total de plays do período, sem o limite aplicado às listas exibidas. */
+    fun playCountTotal(period: StatsPeriod): Int = countsInPeriod(period).values.sum()
 
     fun mostPlayedRanked(kind: MostPlayedKind, period: StatsPeriod, limit: Int = HISTORY_MAX): List<RankedItem> {
         val counts = countsInPeriod(period)
@@ -2871,17 +3026,24 @@ private val _firstPlayedAt = MutableStateFlow(
     private val _lyricsFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_FONT, null))
     val lyricsFontPath: StateFlow<String?> = _lyricsFontPath.asStateFlow()
 
-    /** "lyrics" ou "translation" — o picker externo chama setLyricsFontPath ao terminar. */
+    /** Destino do seletor externo de fontes. */
     private var fontPickTarget: String = "lyrics"
     fun beginFontPickForTranslation() { fontPickTarget = "translation" }
+    fun beginFontPickForBacking() { fontPickTarget = "backing" }
     fun beginFontPickForLyrics() { fontPickTarget = "lyrics" }
 
     fun setLyricsFontPath(path: String?) {
-        if (fontPickTarget == "translation") {
-            fontPickTarget = "lyrics"
-            setLyricsTranslationFontPath(path)
-            return
+        val target = fontPickTarget
+        fontPickTarget = "lyrics"
+        when (target) {
+            "translation" -> setLyricsTranslationFontPath(path)
+            "backing" -> setLyricsBackingFontPath(path)
+            else -> setMainLyricsFontPath(path)
         }
+    }
+
+    fun setMainLyricsFontPath(path: String?) {
+        fontPickTarget = "lyrics"
         _lyricsFontPath.value = path
         prefs.edit().putString(KEY_LYRICS_FONT, path).apply()
     }
@@ -2889,8 +3051,18 @@ private val _firstPlayedAt = MutableStateFlow(
     private val _lyricsTranslationFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_TRANSLATION_FONT, null))
     val lyricsTranslationFontPath: StateFlow<String?> = _lyricsTranslationFontPath.asStateFlow()
     fun setLyricsTranslationFontPath(path: String?) {
+        fontPickTarget = "lyrics"
         _lyricsTranslationFontPath.value = path
         prefs.edit().putString(KEY_LYRICS_TRANSLATION_FONT, path).apply()
+    }
+
+    /** Fonte opcional e independente das linhas de backing vocal. */
+    private val _lyricsBackingFontPath = MutableStateFlow(prefs.getString(KEY_LYRICS_BACKING_FONT, null))
+    val lyricsBackingFontPath: StateFlow<String?> = _lyricsBackingFontPath.asStateFlow()
+    fun setLyricsBackingFontPath(path: String?) {
+        fontPickTarget = "lyrics"
+        _lyricsBackingFontPath.value = path
+        prefs.edit().putString(KEY_LYRICS_BACKING_FONT, path).apply()
     }
 
     /** Fonte opcional para palavras/sílabas marcadas {des}; null usa a fonte padrão da letra/sistema. */
@@ -2964,6 +3136,15 @@ private val _firstPlayedAt = MutableStateFlow(
     fun setLyricsBackingColor(argb: Int) {
         _lyricsBackingColor.value = argb
         prefs.edit().putInt(KEY_LYRICS_BACKING, argb).apply()
+    }
+
+    private val _lyricsBackingSecondaryColor = MutableStateFlow(
+        prefs.getInt(KEY_LYRICS_BACKING_SECONDARY, 0x99CE93D8.toInt())
+    )
+    val lyricsBackingSecondaryColor: StateFlow<Int> = _lyricsBackingSecondaryColor.asStateFlow()
+    fun setLyricsBackingSecondaryColor(argb: Int) {
+        _lyricsBackingSecondaryColor.value = argb
+        prefs.edit().putInt(KEY_LYRICS_BACKING_SECONDARY, argb).apply()
     }
 
     // ---------- Splash ----------
@@ -3114,6 +3295,14 @@ private val _firstPlayedAt = MutableStateFlow(
         catch (_: Exception) { SortOrder.ASC }
     )
     val trackOrder: StateFlow<SortOrder> = _trackOrder.asStateFlow()
+    /** Lista da aba "Todas" ordenada fora da thread principal, sem ordenar duas vezes. */
+    val sortedAllTracks: StateFlow<List<Track>> = combine(
+        tracks, _trackSort, _trackOrder, _librarySettings
+    ) { list, sort, order, settings ->
+        sortTracks(list, sort, order, settings.firstLetterOrder)
+    }.flowOn(kotlinx.coroutines.Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     fun setTrackSort(sort: TrackSort, order: SortOrder) {
         _trackSort.value = sort
         _trackOrder.value = order
@@ -3121,20 +3310,29 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     fun sortedTracks(list: List<Track>): List<Track> {
-        val asc = _trackOrder.value == SortOrder.ASC
-        val sorted = when (_trackSort.value) {
-            TrackSort.NAME -> list.sortedBy { it.title.lowercase() }
+        return sortTracks(list, _trackSort.value, _trackOrder.value, _librarySettings.value.firstLetterOrder)
+    }
+
+    private fun sortTracks(
+        list: List<Track>,
+        sort: TrackSort,
+        order: SortOrder,
+        firstLetterOrder: Boolean
+    ): List<Track> {
+        val sorted = when (sort) {
+            TrackSort.NAME -> list.map { AlphaSort.key(it.title, firstLetterOrder) to it }
+                .sortedBy { it.first }.map { it.second }
             TrackSort.FILE_SIZE -> list.sortedBy { it.fileSize }
             TrackSort.DURATION -> list.sortedBy { it.duration }
             TrackSort.LAST_MODIFIED -> list.sortedBy { it.lastModified }
         }
-        return if (asc) sorted else sorted.asReversed()
+        return if (order == SortOrder.ASC) sorted else sorted.asReversed()
     }
 
     fun sortedArtists(list: List<Artist>): List<Artist> {
         val asc = _groupOrder.value == SortOrder.ASC
         val sorted = when (_groupSort.value) {
-            GroupSort.NAME -> list.sortedBy { it.name.lowercase() }
+            GroupSort.NAME -> list.sortedBy { AlphaSort.key(it.name, _librarySettings.value.firstLetterOrder) }
             GroupSort.TRACK_COUNT -> list.sortedBy { it.trackCount }
             GroupSort.TOTAL_DURATION -> list.sortedBy { it.totalDuration }
         }
@@ -3144,7 +3342,7 @@ private val _firstPlayedAt = MutableStateFlow(
     fun sortedAlbums(list: List<Album>): List<Album> {
         val asc = _groupOrder.value == SortOrder.ASC
         val sorted = when (_groupSort.value) {
-            GroupSort.NAME -> list.sortedBy { it.name.lowercase() }
+            GroupSort.NAME -> list.sortedBy { AlphaSort.key(it.name, _librarySettings.value.firstLetterOrder) }
             GroupSort.TRACK_COUNT -> list.sortedBy { it.trackCount }
             GroupSort.TOTAL_DURATION -> list.sortedBy { it.totalDuration }
         }
@@ -3154,7 +3352,7 @@ private val _firstPlayedAt = MutableStateFlow(
     fun sortedGenres(list: List<Genre>): List<Genre> {
         val asc = _groupOrder.value == SortOrder.ASC
         val sorted = when (_groupSort.value) {
-            GroupSort.NAME -> list.sortedBy { it.name.lowercase() }
+            GroupSort.NAME -> list.sortedBy { AlphaSort.key(it.name, _librarySettings.value.firstLetterOrder) }
             GroupSort.TRACK_COUNT -> list.sortedBy { it.trackCount }
             GroupSort.TOTAL_DURATION -> list.sortedBy { it.totalDuration }
         }
@@ -3165,6 +3363,8 @@ private val _firstPlayedAt = MutableStateFlow(
     /** Cache do JSON da fila: só é reconstruído quando a lista da fila muda (não a cada troca de faixa). */
     @Volatile private var queueJsonCache: Pair<List<Track>, String>? = null
     private var persistJob: Job? = null
+    private var playbackRestoreInProgress = false
+    private var playbackRestoreCompleted = false
 
     /**
      * Salva fila/posição para restaurar ao reabrir o app.
@@ -3177,7 +3377,14 @@ private val _firstPlayedAt = MutableStateFlow(
     private fun persistPlaybackState(paused: Boolean, immediate: Boolean = false) {
         val queue = _queue.value
         val nowId = _nowPlaying.value?.id
-        val pos = try { controller?.currentPosition ?: 0L } catch (_: Exception) { 0L }
+        // Ao fechar o app/serviço o player é limpo (faixa atual = null) mas a fila continua na
+        // memória: não sobrescreve o que foi salvo, senão a música atual se perde ao reabrir.
+        if (queue.isNotEmpty() && nowId == null) return
+        // Antes de a fila salva ser restaurada, não grava uma fila vazia por cima dela.
+        if (queue.isEmpty() && !playbackRestoreCompleted) return
+        val pos = try {
+            controller?.takeIf { it.mediaItemCount > 0 }?.currentPosition ?: _positionMs.value
+        } catch (_: Exception) { _positionMs.value }
         if (immediate) {
             persistPlaybackStateNow(queue, nowId, pos, paused)
             return
@@ -3200,8 +3407,25 @@ private val _firstPlayedAt = MutableStateFlow(
                 ids.toString().also { queueJsonCache = queue to it }
             }
             val idx = if (nowId == null) -1 else queue.indexOfFirst { it.id == nowId }
+            val externalTracks = org.json.JSONArray()
+            queue.filter { it.id.startsWith("external_") }.forEach { track ->
+                externalTracks.put(org.json.JSONObject().apply {
+                    put("id", track.id)
+                    put("title", track.title)
+                    put("artist", track.artist)
+                    put("album", track.album)
+                    put("genre", track.genre)
+                    put("duration", track.duration)
+                    put("uri", track.uri.toString())
+                    put("path", track.path)
+                    put("folder", track.folder)
+                    put("artPath", track.artPath ?: "")
+                })
+            }
             prefs.edit()
                 .putString(KEY_QUEUE_IDS, idsJson)
+                .putString(KEY_QUEUE_EXTERNAL_TRACKS, externalTracks.toString())
+                .putString(KEY_QUEUE_CURRENT_ID, nowId)
                 .putInt(KEY_QUEUE_INDEX, idx)
                 .putLong(KEY_QUEUE_POS, pos)
                 .putBoolean(KEY_QUEUE_PAUSED, paused)
@@ -3210,39 +3434,109 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
     private fun restorePlaybackState() {
+        if (playbackRestoreCompleted || playbackRestoreInProgress) return
+        playbackRestoreInProgress = true
         viewModelScope.launch {
             try {
-                val idsRaw = prefs.getString(KEY_QUEUE_IDS, null) ?: return@launch
+                val idsRaw = prefs.getString(KEY_QUEUE_IDS, null)
+                if (idsRaw == null) {
+                    playbackRestoreCompleted = true
+                    return@launch
+                }
                 val arr = org.json.JSONArray(idsRaw)
-                if (arr.length() == 0) return@launch
-                // espera biblioteca carregar
+                if (arr.length() == 0) {
+                    playbackRestoreCompleted = true
+                    return@launch
+                }
                 var tries = 0
-                while (_library.value.isEmpty() && tries < 40) {
-                    kotlinx.coroutines.delay(150)
+                while (controller == null && tries < 150) {
+                    delay(100)
                     tries++
                 }
-                val byId = _library.value.associateBy { it.id }
-                val q = (0 until arr.length()).mapNotNull { byId[arr.getString(it)] }
-                if (q.isEmpty()) return@launch
-                val idx = prefs.getInt(KEY_QUEUE_INDEX, 0).coerceIn(0, q.lastIndex)
-                val pos = prefs.getLong(KEY_QUEUE_POS, 0L)
-                val c = controller
-                if (c == null) {
-                    // espera controller
-                    tries = 0
-                    while (controller == null && tries < 30) {
-                        kotlinx.coroutines.delay(100)
-                        tries++
-                    }
-                }
                 val ctrl = controller ?: return@launch
+                // Se o serviço ainda está vivo, sua sessão em memória é a fonte mais recente.
+                if (ctrl.mediaItemCount > 0) {
+                    syncFromController()
+                    playbackRestoreCompleted = true
+                    return@launch
+                }
+                // Aguarda um scan em andamento para não restaurar uma fila parcial.
+                while (_isScanning.value) delay(150)
+
+                val ids = (0 until arr.length()).mapNotNull { originalIndex ->
+                    arr.optString(originalIndex).takeIf { it.isNotBlank() }
+                        ?.let { originalIndex to it }
+                }
+                val externalById = mutableMapOf<String, Track>()
+                try {
+                    val externalRaw = prefs.getString(KEY_QUEUE_EXTERNAL_TRACKS, null)
+                    if (!externalRaw.isNullOrBlank()) {
+                        val externalArray = org.json.JSONArray(externalRaw)
+                        for (i in 0 until externalArray.length()) {
+                            val item = externalArray.optJSONObject(i) ?: continue
+                            val id = item.optString("id")
+                            val uriText = item.optString("uri")
+                            if (id.isBlank() || uriText.isBlank()) continue
+                            val uri = Uri.parse(uriText)
+                            externalById[id] = Track(
+                                id = id,
+                                title = item.optString("title", "Música"),
+                                artist = item.optString("artist"),
+                                album = item.optString("album"),
+                                genre = item.optString("genre"),
+                                duration = item.optLong("duration"),
+                                uri = uri,
+                                path = item.optString("path", uriText),
+                                folder = item.optString("folder", "Arquivo externo"),
+                                artPath = item.optString("artPath").takeIf { it.isNotBlank() }
+                            )
+                        }
+                    }
+                } catch (_: Exception) { }
+                val byId = _library.value.associateBy { it.id }
+                val restored = ids.mapNotNull { (originalIndex, id) ->
+                    (byId[id] ?: externalById[id])?.let { originalIndex to it }
+                }
+                val q = restored.map { it.second }
+                if (q.isEmpty()) return@launch
+                // Não sobrescreve uma fila que o usuário iniciou enquanto o scan terminava.
+                if (ctrl.mediaItemCount > 0) {
+                    syncFromController()
+                    playbackRestoreCompleted = true
+                    return@launch
+                }
+
+                val savedIndex = prefs.getInt(KEY_QUEUE_INDEX, 0)
+                val savedCurrentId = prefs.getString(KEY_QUEUE_CURRENT_ID, null)
+                val currentIndex = savedCurrentId
+                    ?.let { id -> q.indexOfFirst { it.id == id }.takeIf { it >= 0 } }
+                    ?: restored.indexOfFirst { it.first == savedIndex }.takeIf { it >= 0 }
+                    ?: 0
+                val pos = prefs.getLong(KEY_QUEUE_POS, 0L).coerceAtLeast(0L)
+                // Ao reabrir, a fila volta pronta na música/posição salvas, mas pausada.
+                val wasPlaying = false
+
                 _queue.value = q
-                ctrl.setMediaItems(q.map { it.toMediaItem() }, idx, pos)
+                _nowPlaying.value = q[currentIndex]
+                _positionMs.value = pos
+                _durationMs.value = q[currentIndex].duration
+                _isPlaying.value = wasPlaying
+                _playbackButtonIsPlaying.value = wasPlaying
+                ctrl.setMediaItems(q.map { it.toMediaItem() }, currentIndex, pos)
                 ctrl.prepare()
-                ctrl.pause() // sempre pausado ao restaurar
-                _nowPlaying.value = q[idx]
-                _isPlaying.value = false
-            } catch (_: Exception) {}
+                if (wasPlaying) {
+                    ctrl.play()
+                    startPositionTicker()
+                } else {
+                    ctrl.pause()
+                }
+                persistPlaybackStateNow(q, q[currentIndex].id, pos, paused = !wasPlaying)
+                playbackRestoreCompleted = true
+            } catch (e: Exception) {
+                android.util.Log.w("MusicVM", "Falha ao restaurar fila de reprodução", e)
+            } finally {
+                playbackRestoreInProgress = false
+            }
         }
     }
 
@@ -3287,6 +3581,9 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("shareBrandColor", _shareBrandColor.value)
         obj.put("lyricsPrimary", _lyricsPrimaryColor.value)
         obj.put("lyricsSecondary", _lyricsSecondaryColor.value)
+        obj.put("lyricsBackingFont", _lyricsBackingFontPath.value)
+        obj.put("lyricsBackingPrimary", _lyricsBackingColor.value)
+        obj.put("lyricsBackingSecondary", _lyricsBackingSecondaryColor.value)
         obj.put("lyricsBorder", _lyricsBorderColor.value)
         obj.put("lyricsBorderWidth", _lyricsBorderWidth.value.toDouble())
         obj.put("autoFetchLyrics", _autoFetchLyrics.value)
@@ -3307,14 +3604,16 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("seekBarStyle", _seekBarStyle.value.name)
         obj.put("immersiveNowPlaying", _immersiveNowPlaying.value)
         obj.put("milkIntervalSec", _milkIntervalSec.value)
-        obj.put("changeSongWithMilkInterval", _changeSongWithMilkInterval.value)
-        obj.put("changePresetOnSongChange", _changePresetOnSongChange.value)
+        obj.put("milkSwitchMode", _milkSwitchMode.value)
+        obj.put("milkPresetOrder", _milkPresetOrder.value)
+        obj.put("milkFavoritesOnly", _milkFavoritesOnly.value)
         obj.put("playCountThreshold", _playCountThreshold.value)
         obj.put("playCountMinutes", _playCountMinutes.value)
         obj.put("splashEnabled", _splashEnabled.value)
         obj.put("splashSoundEnabled", _splashSoundEnabled.value)
         obj.put("floatingIconsEnabled", _floatingIconsEnabled.value)
         obj.put("glassQuality", _glassQuality.value.name)
+        obj.put("menuVisualStyle", _menuVisualStyle.value.name)
         obj.put("dynamicDefaultColor", _dynamicDefaultColor.value)
         obj.put("groupSort", prefs.getString(KEY_GROUP_SORT, null))
         obj.put("groupOrder", prefs.getString(KEY_GROUP_ORDER, null))
@@ -3486,8 +3785,9 @@ private val _firstPlayedAt = MutableStateFlow(
             obj.optString("theme").takeIf { it.isNotBlank() }?.let {
                 try { setThemeId(AppThemeId.valueOf(it)) } catch (_: Exception) {}
             }
-            if (obj.has("lyricsFont")) setLyricsFontPath(obj.optString("lyricsFont").ifBlank { null })
+            if (obj.has("lyricsFont")) setMainLyricsFontPath(obj.optString("lyricsFont").ifBlank { null })
             if (obj.has("lyricsEmphasisFont")) setLyricsEmphasisFontPath(obj.optString("lyricsEmphasisFont").ifBlank { null })
+            if (obj.has("lyricsBackingFont")) setLyricsBackingFontPath(obj.optString("lyricsBackingFont").ifBlank { null })
             if (obj.has("uiFont")) setUiFontPath(obj.optString("uiFont").ifBlank { null })
             if (obj.has("lyricsFontSize")) setLyricsFontSize(obj.getDouble("lyricsFontSize").toFloat())
             if (obj.has("homeButtonFont")) setHomeButtonFontPath(obj.optString("homeButtonFont").ifBlank { null })
@@ -3497,6 +3797,8 @@ private val _firstPlayedAt = MutableStateFlow(
             if (obj.has("shareBrandColor")) setShareBrandColor(obj.getInt("shareBrandColor"))
             if (obj.has("lyricsPrimary")) setLyricsPrimaryColor(obj.getInt("lyricsPrimary"))
             if (obj.has("lyricsSecondary")) setLyricsSecondaryColor(obj.getInt("lyricsSecondary"))
+            if (obj.has("lyricsBackingPrimary")) setLyricsBackingColor(obj.getInt("lyricsBackingPrimary"))
+            if (obj.has("lyricsBackingSecondary")) setLyricsBackingSecondaryColor(obj.getInt("lyricsBackingSecondary"))
             if (obj.has("lyricsBorder")) setLyricsBorderColor(obj.getInt("lyricsBorder"))
             if (obj.has("lyricsBorderWidth")) setLyricsBorderWidth(obj.getDouble("lyricsBorderWidth").toFloat())
             if (obj.has("autoFetchLyrics")) setAutoFetchLyrics(obj.getBoolean("autoFetchLyrics"))
@@ -3505,8 +3807,11 @@ private val _firstPlayedAt = MutableStateFlow(
             }
             if (obj.has("audioOutput")) {
                 try {
-                    val high = com.tolete.player.data.AudioOutputPrefs.isHighQuality(obj.getString("audioOutput"))
-                    setAudioOutput(if (high) AudioOutputBackend.HIGH_QUALITY else AudioOutputBackend.DEFAULT)
+                    val backend = when (com.tolete.player.data.AudioOutputPrefs.normalize(obj.getString("audioOutput"))) {
+                        com.tolete.player.data.AudioOutputPrefs.FIDELITY -> AudioOutputBackend.FIDELITY
+                        else -> AudioOutputBackend.DEFAULT
+                    }
+                    setAudioOutput(backend)
                 } catch (_: Exception) {}
             }
             if (obj.has("preferredSampleRate")) setPreferredSampleRate(obj.getInt("preferredSampleRate"))
@@ -3517,14 +3822,19 @@ private val _firstPlayedAt = MutableStateFlow(
             }
             if (obj.has("immersiveNowPlaying")) setImmersiveNowPlaying(obj.getBoolean("immersiveNowPlaying"))
             if (obj.has("milkIntervalSec")) setMilkIntervalSec(obj.getInt("milkIntervalSec"))
-            if (obj.has("changeSongWithMilkInterval")) setChangeSongWithMilkInterval(obj.getBoolean("changeSongWithMilkInterval"))
-            if (obj.has("changePresetOnSongChange")) setChangePresetOnSongChange(obj.getBoolean("changePresetOnSongChange"))
+            if (obj.has("milkSwitchMode")) setMilkSwitchMode(obj.getString("milkSwitchMode"))
+            else if (obj.has("changePresetOnSongChange")) {
+                setMilkSwitchMode(if (obj.getBoolean("changePresetOnSongChange")) "TRACK" else "TIME")
+            }
+            if (obj.has("milkPresetOrder")) setMilkPresetOrder(obj.getString("milkPresetOrder"))
+            if (obj.has("milkFavoritesOnly")) setMilkFavoritesOnly(obj.getBoolean("milkFavoritesOnly"))
             if (obj.has("playCountThreshold")) setPlayCountThreshold(obj.getInt("playCountThreshold"))
             if (obj.has("playCountMinutes")) setPlayCountMinutes(obj.getInt("playCountMinutes"))
             if (obj.has("splashEnabled")) setSplashEnabled(obj.getBoolean("splashEnabled"))
             if (obj.has("splashSoundEnabled")) setSplashSoundEnabled(obj.getBoolean("splashSoundEnabled"))
             if (obj.has("floatingIconsEnabled")) setFloatingIconsEnabled(obj.getBoolean("floatingIconsEnabled"))
             if (obj.has("glassQuality")) setGlassQuality(GlassQuality.fromName(obj.getString("glassQuality")))
+            if (obj.has("menuVisualStyle")) setMenuVisualStyle(MenuVisualStyle.fromName(obj.getString("menuVisualStyle")))
             if (obj.has("dynamicDefaultColor")) setDynamicDefaultColor(obj.getInt("dynamicDefaultColor"))
             if (obj.has("splitArtists")) setSplitArtists(obj.getBoolean("splitArtists"))
             if (obj.has("artistSeparators")) setArtistSeparators(obj.getString("artistSeparators"))
@@ -3670,6 +3980,8 @@ private val _firstPlayedAt = MutableStateFlow(
                     it.sourceTree in valid || (allFiles && it.sourceTree == "all_files")
                 }
                 syncFromController()
+                // Restaura a fila salva assim que a biblioteca em cache estiver pronta
+                if (_library.value.isNotEmpty() && controller != null) restorePlaybackState()
                 if (allFiles && _library.value.none { it.sourceTree == "all_files" }) {
                     refreshAllFiles()
                 } else if (valid.isNotEmpty() || allFiles) {
@@ -3681,13 +3993,14 @@ private val _firstPlayedAt = MutableStateFlow(
             } else if (valid.isNotEmpty()) {
                 refreshLibrary()
             }
+            restorePlaybackState()
         }
     }
 
     override fun onCleared() {
         persistJob?.cancel()
         // síncrono: o viewModelScope já foi cancelado quando o onCleared roda
-        persistPlaybackState(paused = true, immediate = true)
+        persistPlaybackState(paused = !_isPlaying.value, immediate = true)
         if (FavoritesBridge.owner === favoritesOwner) FavoritesBridge.owner = null
         controller?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
@@ -3713,6 +4026,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val HISTORY_MAX = 50
         const val KEY_LYRICS_FONT = "lyrics_font_path"
         const val KEY_LYRICS_TRANSLATION_FONT = "lyrics_translation_font_path"
+        const val KEY_LYRICS_BACKING_FONT = "lyrics_backing_font_path"
         const val KEY_LYRICS_EMPHASIS_FONT = "lyrics_emphasis_font_path"
         const val KEY_UI_FONT = "ui_font_path"
         const val KEY_SPLIT_ARTISTS = "split_artists"
@@ -3722,12 +4036,18 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_GENRE_SEPARATORS = "genre_separators"
         const val KEY_IGNORED_FOLDERS = "ignored_folders"
         const val KEY_MIN_DURATION_SEC = "min_duration_sec"
+        const val KEY_FIRST_LETTER_ORDER = "first_letter_order"
         const val KEY_ALL_FILES = "all_files_mode"
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
         const val KEY_SHUFFLE_TYPE = "shuffle_type"
+        const val KEY_QUEUE_CURRENT_ID = "queue_current_id"
         const val KEY_BIT_PERFECT = "bit_perfect"
         const val KEY_IMMERSIVE_NOW_PLAYING = "immersive_now_playing"
         const val KEY_MILK_INTERVAL = "milk_interval_sec"
+        const val KEY_MILK_SWITCH_MODE = "milk_switch_mode"
+        const val KEY_MILK_PRESET_ORDER = "milk_preset_order"
+        const val KEY_MILK_FAVORITES_ONLY = "milk_favorites_only"
+        // Chaves legadas preservadas apenas para migrar a instalação para o modo equivalente.
         const val KEY_MILK_CHANGE_SONG = "milk_change_song_with_interval"
         const val KEY_MILK_PRESET_ON_SONG = "milk_preset_on_song_change"
         const val KEY_AUDIO_OUTPUT = com.tolete.player.data.AudioOutputPrefs.KEY
@@ -3742,10 +4062,12 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_LYRICS_BORDER_W = "lyrics_border_width"
         const val KEY_LYRICS_TRANSLATION = "lyrics_translation_color"
         const val KEY_LYRICS_BACKING = "lyrics_backing_color"
+        const val KEY_LYRICS_BACKING_SECONDARY = "lyrics_backing_secondary_color"
         const val KEY_SPLASH_ENABLED = "splash_enabled"
         const val KEY_SPLASH_SOUND = "splash_sound_enabled"
         const val KEY_FLOATING_ICONS = "floating_icons_enabled"
         const val KEY_GLASS_QUALITY = "glass_quality"
+        const val KEY_MENU_VISUAL_STYLE = "menu_visual_style"
         const val KEY_HOME_BUTTON_FONT = "home_button_font_path"
         const val KEY_HOME_BUTTON_COLOR = "home_button_color"
         const val KEY_SHARE_FONT = "share_font_path"
@@ -3760,6 +4082,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_TRACK_SORT = "track_sort"
         const val KEY_TRACK_ORDER = "track_order"
         const val KEY_QUEUE_IDS = "queue_ids"
+        const val KEY_QUEUE_EXTERNAL_TRACKS = "queue_external_tracks"
         const val KEY_QUEUE_INDEX = "queue_index"
         const val KEY_QUEUE_POS = "queue_pos"
         const val KEY_QUEUE_PAUSED = "queue_paused"
@@ -3792,25 +4115,26 @@ private val _firstPlayedAt = MutableStateFlow(
     }
 
 
-    fun playExternalUri(uri: Uri, title: String) {
-        viewModelScope.launch {
-            // Aguarda o MediaController ficar pronto
-            var tries = 0
-            while (controller == null && tries < 40) {
-                kotlinx.coroutines.delay(100)
-                tries++
-            }
-            val c = controller ?: return@launch
-            val item = MediaItem.Builder()
-                .setUri(uri)
-                .setMediaMetadata(
-                    MediaMetadata.Builder().setTitle(title).build()
-                )
-                .build()
-            c.setMediaItem(item)
+    suspend fun playExternalUri(track: Track): Boolean {
+        // Aguarda o MediaController ficar pronto antes de permitir o salto para Now Playing.
+        var tries = 0
+        while (controller == null && tries < 40) {
+            kotlinx.coroutines.delay(100)
+            tries++
+        }
+        val c = controller ?: return false
+        return try {
+            _queue.value = listOf(track)
+            _nowPlaying.value = track
+            c.setMediaItem(track.toMediaItem())
             c.prepare()
+            requestPlaybackButtonState(playing = true)
             c.play()
             startPositionTicker()
+            persistPlaybackState(paused = false)
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 

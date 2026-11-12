@@ -123,10 +123,13 @@ object LyronStorage {
         }
     }
 
+    private val ILLEGAL_FILE_CHARS = Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]")
+    private val MULTI_SPACE = Regex("\\s+")
+
     fun sanitizeFileName(name: String): String {
         val cleaned = name.trim()
-            .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
-            .replace(Regex("\\s+"), " ")
+            .replace(ILLEGAL_FILE_CHARS, "_")
+            .replace(MULTI_SPACE, " ")
             .trim()
             .trim('.')
         return cleaned.take(120).ifBlank { "unknown" }

@@ -48,7 +48,7 @@ fun EqualizerSheet(
     val bands by EqualizerManager.bands.collectAsState()
     val presetName by EqualizerManager.presetName.collectAsState()
 
-    val accent = menuPalette(LocalAppColors.current).accent
+    val accent = menuPalette(LocalAppColors.current, LocalMenuVisualStyle.current).accent
     val glassBg = Brush.verticalGradient(
         listOf(
             Color.White.copy(alpha = 0.14f),
@@ -61,9 +61,12 @@ fun EqualizerSheet(
     )
 
     AppMenuTheme {
-ModalBottomSheet(
+    val menuStyle = LocalMenuVisualStyle.current
+    val backdrop = LocalGlassBackdrop.current
+    val glassMenu = menuStyle == MenuVisualStyle.GLASS && backdrop != null
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = LocalMenuPalette.current.container,
+        containerColor = if (glassMenu) Color.Transparent else LocalMenuPalette.current.container,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         dragHandle = {
             Box(
@@ -76,6 +79,7 @@ ModalBottomSheet(
             )
         }
     ) {
+        val sheetContent: @Composable () -> Unit = {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -221,6 +225,23 @@ ModalBottomSheet(
             ) {
                 Text("Resetar (Flat)", color = LocalMenuPalette.current.content.copy(0.75f))
             }
+        }
+        }
+        if (glassMenu) {
+            GlassSurface(
+                backdrop = backdrop!!,
+                sourceOrigin = LocalGlassBackdropOrigin.current,
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                modifier = Modifier.fillMaxWidth(),
+                style = GlassStyle.Panel.copy(
+                    refraction = 6.dp,
+                    edgeWidth = 14.dp,
+                    magnification = 0.015f,
+                    dispersion = 0.18f
+                )
+            ) { sheetContent() }
+        } else {
+            sheetContent()
         }
     }
 }

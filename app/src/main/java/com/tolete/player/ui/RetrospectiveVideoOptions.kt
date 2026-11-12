@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -37,13 +36,9 @@ import com.tolete.player.data.Track
 import com.tolete.player.video.RetrospectiveVideoGenerator
 import com.tolete.player.video.RetrospectiveVideoGenerator.AudioKind
 import com.tolete.player.video.RetrospectiveVideoGenerator.CardAudioOptions
+import kotlin.math.roundToInt
 
-private val panel = Color(0xFF1A1528)
-
-/**
- * Opções antes de gerar os vídeos: duração (3–15 s) e música de cada card.
- * Escolher música é opcional: card em “Automática” usa a música escolhida pelo app, como antes.
- */
+/** Opções antes de gerar os vídeos: duração, música por card e recorte manual. */
 @Composable
 internal fun RetrospectiveVideoOptionsDialog(
     cards: List<CardAudioOptions>,
@@ -53,12 +48,13 @@ internal fun RetrospectiveVideoOptionsDialog(
 ) {
     var duration by remember { mutableFloatStateOf(initial.durationSec.toFloat()) }
     var chosen by remember { mutableStateOf(initial.audioByCard) }
+    var segmentStarts by remember { mutableStateOf(initial.audioStartMsByCard) }
+    var fps by remember { mutableStateOf(initial.fps) }
     var picking by remember { mutableStateOf<CardAudioOptions?>(null) }
     val seconds = duration.toInt()
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = panel,
         title = { Text("Opções dos vídeos", color = Color.White, fontWeight = FontWeight.SemiBold) },
         text = {
             Column(
@@ -79,6 +75,33 @@ internal fun RetrospectiveVideoOptionsDialog(
                     )
                 )
                 Text(
+                    "Quadros por segundo",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(RetrospectiveVideoGenerator.FPS_30, RetrospectiveVideoGenerator.FPS_60).forEach { option ->
+                        val selected = fps == option
+                        Text(
+                            "$option fps",
+                            color = if (selected) Color.Black else Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (selected) dialogAccent else Color.White.copy(0.12f))
+                                .clickable { fps = option }
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+                Text(
+                    "60 fps usa mais processamento e pode aumentar o tamanho do vídeo.",
+                    color = Color.White.copy(0.65f),
+                    fontSize = 12.sp
+                )
+                Text(
                     "Música de cada card (opcional)",
                     color = Color.White,
                     fontSize = 15.sp,
@@ -86,54 +109,76 @@ internal fun RetrospectiveVideoOptionsDialog(
                     modifier = Modifier.padding(top = 4.dp)
                 )
                 Text(
-                    "Deixe em “Automática” para o app escolher. Nos cards de top 5 só dá para escolher entre os itens listados.",
+                    "Em “Automática”, o app escolhe entre as músicas listadas no card. Artista e álbum mais ouvidos ficam limitados ao artista/álbum exibido. Ao escolher manualmente, ajuste também o início do trecho.",
                     color = Color.White.copy(0.7f),
                     fontSize = 13.sp
                 )
                 cards.forEach { card ->
                     val current = chosen[card.cardId]
-                    val enabled = card.kind == AudioKind.FREE || (card.kind == AudioKind.RESTRICTED && card.candidates.isNotEmpty())
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color.White.copy(if (enabled) 0.08f else 0.04f))
-                            .clickable(enabled = enabled) { picking = card }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(card.label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    val enabled = card.kind == AudioKind.FREE ||
+                        (card.kind == AudioKind.RESTRICTED && card.candidates.isNotEmpty())
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.White.copy(if (enabled) 0.08f else 0.04f))
+                                .clickable(enabled = enabled) { picking = card }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(card.label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    when {
+                                        card.kind == AudioKind.LOCKED -> "Usa a própria música (não editável)"
+                                        !enabled -> "Nenhuma música permitida da biblioteca · Automática"
+                                        current != null -> "${current.title} · ${current.artist}"
+                                        else -> "Automática"
+                                    },
+                                    color = if (current != null) dialogAccent else Color.White.copy(0.72f),
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (enabled) Text("Trocar", color = dialogAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        if (current != null) {
+                            val maxStartMs = (current.duration - seconds * 1000L).coerceAtLeast(0L)
+                            val startMs = (segmentStarts[card.cardId] ?: 0L).coerceIn(0L, maxStartMs)
                             Text(
-                                when {
-                                    card.kind == AudioKind.LOCKED -> "Usa a própria música (não editável)"
-                                    !enabled -> "Nenhuma música da biblioteca encontrada · Automática"
-                                    current != null -> "${current.title} · ${current.artist}"
-                                    else -> "Automática"
+                                "Trecho: ${formatTime(startMs)} – ${formatTime((startMs + seconds * 1000L).coerceAtMost(current.duration))}",
+                                color = Color.White.copy(0.82f),
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(start = 10.dp, top = 2.dp)
+                            )
+                            Slider(
+                                value = startMs.toFloat(),
+                                onValueChange = { value ->
+                                    segmentStarts = segmentStarts +
+                                        (card.cardId to (value / 1000f).roundToInt().toLong() * 1000L)
                                 },
-                                color = if (current != null) dialogAccent else Color.White.copy(0.72f),
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                valueRange = 0f..maxStartMs.toFloat().coerceAtLeast(1f),
+                                enabled = maxStartMs > 0L,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = dialogAccent,
+                                    activeTrackColor = dialogAccent,
+                                    inactiveTrackColor = Color.White.copy(0.25f)
+                                )
                             )
                         }
-                        if (enabled) Text("Trocar", color = dialogAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                onGenerate(RetrospectiveVideoGenerator.VideoOptions(seconds, chosen))
+                onGenerate(RetrospectiveVideoGenerator.VideoOptions(seconds, chosen, segmentStarts, fps))
             }) { Text("Gerar", color = dialogAccent, fontWeight = FontWeight.SemiBold) }
         },
         dismissButton = {
-            Row {
-                TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White.copy(0.8f)) }
-                TextButton(onClick = {
-                    onGenerate(RetrospectiveVideoGenerator.VideoOptions(seconds, emptyMap()))
-                }) { Text("Pular músicas", color = Color.White.copy(0.8f)) }
-            }
+            TextButton(onClick = onDismiss) { Text("Cancelar", color = Color.White.copy(0.8f)) }
         }
     )
 
@@ -142,13 +187,24 @@ internal fun RetrospectiveVideoOptionsDialog(
             title = card.label,
             tracks = card.candidates,
             selected = chosen[card.cardId],
-            onPick = { t ->
-                chosen = if (t == null) chosen - card.cardId else chosen + (card.cardId to t)
+            onPick = { track ->
+                if (track == null) {
+                    chosen = chosen - card.cardId
+                    segmentStarts = segmentStarts - card.cardId
+                } else {
+                    chosen = chosen + (card.cardId to track)
+                    segmentStarts = segmentStarts + (card.cardId to 0L)
+                }
                 picking = null
             },
             onDismiss = { picking = null }
         )
     }
+}
+
+private fun formatTime(ms: Long): String {
+    val totalSeconds = (ms.coerceAtLeast(0L) / 1000L).toInt()
+    return "%02d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
 
 @Composable
@@ -166,9 +222,8 @@ private fun TrackPickerDialog(
             it.title.lowercase().contains(q) || it.artist.lowercase().contains(q) || it.album.lowercase().contains(q)
         }).take(200)
     }
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = panel,
         title = { Text(title, color = Color.White, fontWeight = FontWeight.SemiBold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,8 +241,8 @@ private fun TrackPickerDialog(
                     item {
                         PickerRow("Automática", "O app escolhe a música", selected == null) { onPick(null) }
                     }
-                    items(shown, key = { it.id }) { t ->
-                        PickerRow(t.title, t.artist, selected?.id == t.id) { onPick(t) }
+                    items(shown, key = { it.id }) { track ->
+                        PickerRow(track.title, track.artist, selected?.id == track.id) { onPick(track) }
                     }
                 }
             }

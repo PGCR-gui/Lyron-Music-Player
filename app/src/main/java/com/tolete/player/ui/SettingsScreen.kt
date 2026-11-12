@@ -50,6 +50,7 @@ import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -83,6 +85,8 @@ import com.tolete.player.ui.MusicViewModel
 import com.tolete.player.ui.MusicViewModel.AppThemeId
 import com.tolete.player.ui.MusicViewModel.ShuffleType
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED, SCROBBLE }
 
@@ -103,6 +107,7 @@ fun SettingsScreen(
     themeId: AppThemeId,
     lyricsFontPath: String?,
     lyricsTranslationFontPath: String? = null,
+    lyricsBackingFontPath: String? = null,
     uiFontPath: String?,
     librarySettings: LibrarySettings,
     appColors: AppColors,
@@ -125,6 +130,9 @@ fun SettingsScreen(
     onPickTranslationFont: () -> Unit = {},
     onClearTranslationFont: () -> Unit = {},
     onSelectTranslationFont: (String?) -> Unit = {},
+    onPickBackingFont: () -> Unit = {},
+    onClearBackingFont: () -> Unit = {},
+    onSelectBackingFont: (String?) -> Unit = {},
     onSplitArtistsChange: (Boolean) -> Unit,
     onArtistSeparatorsChange: (String) -> Unit,
     onArtistExceptionsChange: (String) -> Unit,
@@ -133,6 +141,7 @@ fun SettingsScreen(
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
+    onFirstLetterOrderChange: (Boolean) -> Unit = {},
     lastFmUsername: String? = null,
     onLastFmUsernameChange: (String?) -> Unit = {},
     lastFmSyncMessage: String? = null,
@@ -165,6 +174,8 @@ fun SettingsScreen(
     onLyricsTranslationColorChange: (Int) -> Unit = {},
     lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
     onLyricsBackingColorChange: (Int) -> Unit = {},
+    lyricsBackingSecondaryColor: Int = 0x99CE93D8.toInt(),
+    onLyricsBackingSecondaryColorChange: (Int) -> Unit = {},
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     splashEnabled: Boolean = true,
@@ -208,15 +219,19 @@ fun SettingsScreen(
     onPickMilkFiles: () -> Unit = {},
     onClearMilkPresets: () -> Unit = {},
     onMilkIntervalChange: (Int) -> Unit = {},
-    changeSongWithInterval: Boolean = false,
-    onChangeSongWithIntervalChange: (Boolean) -> Unit = {},
-    changePresetOnSongChange: Boolean = true,
-    onChangePresetOnSongChange: (Boolean) -> Unit = {},
+    milkSwitchMode: String = "TIME",
+    onMilkSwitchModeChange: (String) -> Unit = {},
+    milkPresetOrder: String = "RANDOM",
+    onMilkPresetOrderChange: (String) -> Unit = {},
+    milkFavoritesOnly: Boolean = false,
+    onMilkFavoritesOnlyChange: (Boolean) -> Unit = {},
     onManageMilkPresets: () -> Unit = {},
     onOpenRecommendedPresets: () -> Unit = {},
     onPickDataFolder: () -> Unit = {},
     lyricsEmphasisFontPath: String? = null,
-    onSelectLyricsEmphasisFont: (String?) -> Unit = {}
+    onSelectLyricsEmphasisFont: (String?) -> Unit = {},
+    menuVisualStyle: MenuVisualStyle = MenuVisualStyle.COLORFUL,
+    onMenuVisualStyleChange: (MenuVisualStyle) -> Unit = {}
 ) {
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
@@ -294,6 +309,7 @@ fun SettingsScreen(
                 onIgnoredFoldersChange = onIgnoredFoldersChange,
                 onPickIgnoredFolder = onPickIgnoredFolder,
                 onMinDurationSecChange = onMinDurationSecChange,
+                onFirstLetterOrderChange = onFirstLetterOrderChange,
                 onAllFilesModeChange = onAllFilesModeChange,
                 onRequestAllFilesPermission = onRequestAllFilesPermission,
                 lastFmUsername = lastFmUsername,
@@ -366,11 +382,14 @@ fun SettingsScreen(
                 shareBgColor = shareBgColor,
                 onShareBgColorChange = onShareBgColorChange,
                 shareBrandColor = shareBrandColor,
-                onShareBrandColorChange = onShareBrandColorChange
+                onShareBrandColorChange = onShareBrandColorChange,
+                menuVisualStyle = menuVisualStyle,
+                onMenuVisualStyleChange = onMenuVisualStyleChange
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,
                 lyricsTranslationFontPath = lyricsTranslationFontPath,
+                lyricsBackingFontPath = lyricsBackingFontPath,
                 lyricsEmphasisFontPath = lyricsEmphasisFontPath,
                 lyricsFontSize = lyricsFontSize,
                 lyricsPrimaryColor = lyricsPrimaryColor,
@@ -379,12 +398,16 @@ fun SettingsScreen(
                 lyricsBorderWidth = lyricsBorderWidth,
                 lyricsTranslationColor = lyricsTranslationColor,
                 lyricsBackingColor = lyricsBackingColor,
+                lyricsBackingSecondaryColor = lyricsBackingSecondaryColor,
                 onPickFont = onPickFont,
                 onClearFont = onClearFont,
                 onSelectFont = onSelectLyricsFont,
                 onPickTranslationFont = onPickTranslationFont,
                 onClearTranslationFont = onClearTranslationFont,
                 onSelectTranslationFont = onSelectTranslationFont,
+                onPickBackingFont = onPickBackingFont,
+                onClearBackingFont = onClearBackingFont,
+                onSelectBackingFont = onSelectBackingFont,
                 onSelectLyricsEmphasisFont = onSelectLyricsEmphasisFont,
                 onFontSizeChange = onLyricsFontSizeChange,
                 onPrimaryColorChange = onLyricsPrimaryColorChange,
@@ -392,7 +415,8 @@ fun SettingsScreen(
                 onBorderColorChange = onLyricsBorderColorChange,
                 onBorderWidthChange = onLyricsBorderWidthChange,
                 onTranslationColorChange = onLyricsTranslationColorChange,
-                onBackingColorChange = onLyricsBackingColorChange
+                onBackingColorChange = onLyricsBackingColorChange,
+                onBackingSecondaryColorChange = onLyricsBackingSecondaryColorChange
             )
             SettingsPage.VISUALIZER -> VisualizerPage(
                 presetCount = milkPresetCount,
@@ -400,10 +424,12 @@ fun SettingsScreen(
                 onPickFiles = onPickMilkFiles,
                 onClear = onClearMilkPresets,
                 onIntervalChange = onMilkIntervalChange,
-                changeSongWithInterval = changeSongWithInterval,
-                onChangeSongWithIntervalChange = onChangeSongWithIntervalChange,
-                changePresetOnSongChange = changePresetOnSongChange,
-                onChangePresetOnSongChange = onChangePresetOnSongChange,
+                switchMode = milkSwitchMode,
+                onSwitchModeChange = onMilkSwitchModeChange,
+                presetOrder = milkPresetOrder,
+                onPresetOrderChange = onMilkPresetOrderChange,
+                favoritesOnly = milkFavoritesOnly,
+                onFavoritesOnlyChange = onMilkFavoritesOnlyChange,
                 onManagePresets = onManageMilkPresets,
                 onOpenRecommendedPresets = onOpenRecommendedPresets
             )
@@ -599,7 +625,7 @@ private fun AdvancedPage(
             modifier = Modifier.padding(bottom = 8.dp)
         )
         Text(
-            "Barras, mini player e menus usam vidro. Os efeitos mais pesados gastam GPU e bateria; reduza se o app travar ou esquentar.",
+            "As barras e o mini player usam vidro; os menus também usam esses efeitos quando o estilo Vidro está selecionado. Os efeitos mais pesados gastam GPU e bateria; reduza se o app travar ou esquentar.",
             fontSize = 13.sp,
             color = Color.White.copy(0.6f),
             modifier = Modifier.padding(bottom = 16.dp)
@@ -622,6 +648,54 @@ private fun AdvancedPage(
             subtitle = "Sem desfoque nem distorção: fundo translúcido simples. O mais leve para o aparelho.",
             onClick = { onGlassQualityChange(GlassQuality.LIGHT) }
         )
+
+        Spacer(Modifier.height(32.dp))
+        Text(
+            "Armazenamento",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Veja quanto espaço o app usa e limpe o cache, cada item separadamente ou todos os dados.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.6f),
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+        val usedBytes by produceState<Long?>(initialValue = null) {
+            value = withContext(Dispatchers.IO) {
+                try { com.tolete.player.data.StorageManager.computeUsage(context).totalBytes } catch (_: Exception) { null }
+            }
+        }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.05f))
+                .clickable {
+                    context.startActivity(Intent(context, com.tolete.player.ManageSpaceActivity::class.java))
+                }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.Storage, contentDescription = null, tint = Color.White.copy(0.85f))
+            Column(Modifier.padding(start = 14.dp).weight(1f)) {
+                Text("Gerenciar espaço", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Color.White)
+                Text(
+                    usedBytes?.let { "Dados do app: " + com.tolete.player.data.StorageManager.formatSize(context, it) }
+                        ?: "Dados do app, cache e limpeza",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.55f)
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.4f)
+            )
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 

@@ -41,6 +41,7 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.tolete.player.data.AudioOutputInfo
+import com.tolete.player.data.UsbMixer
 import com.tolete.player.data.AudioOutputPrefs
 import com.tolete.player.data.FavoritesBridge
 import com.tolete.player.data.FavoritesFile
@@ -88,7 +89,7 @@ class PlaybackService : MediaSessionService() {
                 android.util.Log.w("PlaybackService", "setSpeed($speed): exoPlayerRef=null")
                 return false
             }
-            val s = speed.coerceIn(0.5f, 2f)
+            val s = speed.coerceIn(0.25f, 2f)
             val apply = Runnable {
                 try {
                     // Duas formas: API dedicada + PlaybackParameters
@@ -117,6 +118,8 @@ class PlaybackService : MediaSessionService() {
             exoPlayerRef?.playbackParameters?.speed?.takeIf { it > 0f } ?: 1f
 
         private const val MAX_CONSECUTIVE_ERRORS = 3
+        private fun formatSampleRate(hz: Int): String =
+            if (hz % 1000 == 0) "${hz / 1000} kHz" else String.format(java.util.Locale.ROOT, "%.1f kHz", hz / 1000.0)
         /** 7 minutos pausado → remove notificação e encerra o serviço. */
         private const val IDLE_STOP_MS = 7 * 60 * 1000L
         const val ACTION_TOGGLE_FAVORITE = "com.tolete.player.TOGGLE_FAVORITE"
@@ -129,10 +132,15 @@ class PlaybackService : MediaSessionService() {
         @Volatile var appliedPreferredSampleRate: Int = 0
         @Volatile var appliedFloatOutput: Boolean = false
         @Volatile var appliedDeviceLabel: String = ""
+        @Volatile var appliedConversionInfo: String = ""
+        @Volatile var appliedTrackSampleRate: Int = 0
+        @Volatile var appliedTrackChannelCount: Int = 0
+        @Volatile var appliedTrackEncoding: Int = AudioFormat.ENCODING_INVALID
     }
 
     private var mediaSession: MediaSession? = null
-    private var backendIsHighQuality = false
+    private var dedicatedOutputActive = false
+    @Volatile private var currentTrackIsDsf = false
     private var deviceCallback: android.media.AudioDeviceCallback? = null
     private var consecutiveErrors = 0
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -153,6 +161,15 @@ class PlaybackService : MediaSessionService() {
     /** Fade de saída no fim da faixa (crossfade). Separado para poder ser cancelado em seek/repetição/troca. */
     private var endFadeJob: Job? = null
     private var endCrossfadeStarted = false
+    /** Player auxiliar somente para a janela de crossfade; não pertence à MediaSession nem ao scrobbler. */
+    private var crossfadePreviewPlayer: ExoPlayer? = null
+    private var crossfadePreviewKey: String? = null
+    private var crossfadeFailedKey: String? = null
+    private var crossfadeNextKey: String? = null
+    private var crossfadeActive = false
+    private var crossfadeHandoffInProgress = false
+    private var crossfadeMonitorJob: Job? = null
+    private var crossfadeMixJob: Job? = null
 
     private fun prefs() = getSharedPreferences("tolete", MODE_PRIVATE)
     private fun fadeMs(): Int = prefs().getInt("fade_ms", 300).coerceIn(0, 3000)
@@ -198,6 +215,204 @@ class PlaybackService : MediaSessionService() {
         endCrossfadeStarted = false
     }
 
+    private fun mediaItemKey(item: MediaItem?): String = item?.mediaId
+        ?.takeIf { it.isNotBlank() }
+        ?: item?.localConfiguration?.uri?.toString().orEmpty()
+
+    private fun releaseCrossfadePreview() {
+        crossfadeMixJob?.cancel()
+        crossfadeMixJob = null
+        try { crossfadePreviewPlayer?.release() } catch (_: Throwable) { }
+        crossfadePreviewPlayer = null
+        crossfadePreviewKey = null
+        crossfadeNextKey = null
+        crossfadeActive = false
+        crossfadeHandoffInProgress = false
+    }
+
+    private fun cancelCrossfade(player: ExoPlayer, restoreMainVolume: Boolean) {
+        val wasActive = crossfadeActive
+        releaseCrossfadePreview()
+        if (restoreMainVolume && wasActive) player.volume = 1f
+    }
+
+    private fun prepareCrossfadePreview(
+        item: MediaItem,
+        key: String,
+        renderersFactory: DefaultRenderersFactory,
+        mediaSourceFactory: DefaultMediaSourceFactory,
+        audioAttributes: AudioAttributes
+    ) {
+        releaseCrossfadePreview()
+        try {
+            val preview = ExoPlayer.Builder(this, renderersFactory)
+                .setMediaSourceFactory(mediaSourceFactory)
+                .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ false)
+                .setHandleAudioBecomingNoisy(false)
+                .build()
+            preview.volume = 0f
+            preview.setMediaItem(item)
+            preview.prepare()
+            crossfadePreviewPlayer = preview
+            crossfadePreviewKey = key
+        } catch (t: Throwable) {
+            crossfadeFailedKey = key
+            android.util.Log.w("PlaybackService", "Não foi possível preparar o próximo áudio para crossfade", t)
+            releaseCrossfadePreview()
+        }
+    }
+
+    private fun beginCrossfade(player: ExoPlayer, preview: ExoPlayer, nextKey: String, durationMs: Long) {
+        if (durationMs <= 0L || crossfadeActive) return
+        fadeVolumeJob?.cancel()
+        endFadeJob?.cancel()
+        crossfadeNextKey = nextKey
+        crossfadeActive = true
+        preview.volume = 0f
+        preview.play()
+        val startVolume = player.volume.coerceIn(0f, 1f)
+        val startedAt = System.currentTimeMillis()
+        crossfadeMixJob?.cancel()
+        crossfadeMixJob = scope.launch {
+            while (isActive && crossfadeActive) {
+                val fraction = ((System.currentTimeMillis() - startedAt).toFloat() / durationMs)
+                    .coerceIn(0f, 1f)
+                val angle = fraction * (Math.PI.toFloat() / 2f)
+                // Curvas equal-power: a soma percebida permanece estável enquanto as duas faixas se sobrepõem.
+                player.volume = startVolume * kotlin.math.cos(angle).coerceIn(0f, 1f)
+                preview.volume = kotlin.math.sin(angle).coerceIn(0f, 1f)
+                if (fraction >= 1f) break
+                delay(16)
+            }
+            if (crossfadeActive) {
+                player.volume = 0f
+                preview.volume = 1f
+            }
+        }
+    }
+
+    /** Inicia uma sobreposição real apenas quando existe próxima faixa e a saída permite mixagem. */
+    private fun startCrossfadeMonitor(
+        player: ExoPlayer,
+        renderersFactory: DefaultRenderersFactory,
+        mediaSourceFactory: DefaultMediaSourceFactory,
+        audioAttributes: AudioAttributes,
+        allowed: Boolean
+    ) {
+        crossfadeMonitorJob?.cancel()
+        crossfadeMonitorJob = scope.launch {
+            while (isActive) {
+                if (crossfadeHandoffInProgress) {
+                    delay(16)
+                    continue
+                }
+                val crossfadeDuration = crossfadeMs().toLong()
+                val nextIndex = player.nextMediaItemIndex
+                val nextItem = if (nextIndex in 0 until player.mediaItemCount) {
+                    player.getMediaItemAt(nextIndex)
+                } else null
+                val currentItem = player.currentMediaItem
+                val duration = player.duration
+                val remaining = if (duration > 0L) duration - player.currentPosition else Long.MAX_VALUE
+                val speedIsNormal = kotlin.math.abs(player.playbackParameters.speed - 1f) < 0.001f
+                val canPrepare = allowed && crossfadeDuration > 0L && player.isPlaying &&
+                    speedIsNormal && currentItem != null && nextItem != null &&
+                    !isDsfMediaItem(currentItem) && !isDsfMediaItem(nextItem)
+
+                if (!canPrepare) {
+                    if (crossfadeActive) cancelCrossfade(player, restoreMainVolume = true)
+                    else if (!crossfadeActive) releaseCrossfadePreview()
+                    delay(100)
+                    continue
+                }
+                if (currentItem == null || nextItem == null) {
+                    delay(100)
+                    continue
+                }
+                val activeItem = currentItem
+                val upcomingItem = nextItem
+
+                val nextKey = mediaItemKey(upcomingItem)
+                if (nextKey.isBlank() || nextKey == crossfadeFailedKey) {
+                    if (!crossfadeActive) releaseCrossfadePreview()
+                    delay(100)
+                    continue
+                }
+                if (crossfadeActive && mediaItemKey(activeItem) == crossfadeNextKey) {
+                    delay(16)
+                    continue
+                }
+                if (!crossfadeActive && remaining in 1..(crossfadeDuration + 1_600L) &&
+                    crossfadePreviewKey != nextKey
+                ) {
+                    prepareCrossfadePreview(
+                        upcomingItem,
+                        nextKey,
+                        renderersFactory,
+                        mediaSourceFactory,
+                        audioAttributes
+                    )
+                }
+                if (!crossfadeActive && remaining in 1..crossfadeDuration) {
+                    val preview = crossfadePreviewPlayer
+                    if (preview?.playbackState == Player.STATE_READY &&
+                        crossfadePreviewKey == nextKey && preview.duration > crossfadeDuration
+                    ) {
+                        beginCrossfade(player, preview, nextKey, minOf(crossfadeDuration, remaining))
+                    } else if (preview?.playbackState == Player.STATE_READY &&
+                        preview.duration in 1..crossfadeDuration
+                    ) {
+                        crossfadeFailedKey = nextKey
+                        releaseCrossfadePreview()
+                    } else if (preview?.playbackState == Player.STATE_IDLE) {
+                        crossfadeFailedKey = nextKey
+                        releaseCrossfadePreview()
+                    }
+                }
+                if (!crossfadeActive && remaining > crossfadeDuration + 1_600L &&
+                    crossfadePreviewPlayer != null
+                ) {
+                    releaseCrossfadePreview()
+                }
+                delay(if (crossfadeActive) 16 else 80)
+            }
+        }
+    }
+
+    /** Troca para a faixa principal já avançada pelo trecho ouvido no player auxiliar. */
+    private fun completeCrossfadeHandoff(player: ExoPlayer, mediaItem: MediaItem?): Boolean {
+        val preview = crossfadePreviewPlayer ?: return false
+        if (!crossfadeActive || mediaItemKey(mediaItem) != crossfadeNextKey) return false
+        val targetPosition = preview.currentPosition.coerceAtLeast(0L)
+        crossfadeMixJob?.cancel()
+        crossfadeMixJob = null
+        crossfadeHandoffInProgress = true
+        player.volume = 0f
+        player.seekTo(targetPosition)
+        scope.launch {
+            var waited = 0L
+            while (isActive && waited < 400L &&
+                kotlin.math.abs(player.currentPosition - targetPosition) > 120L
+            ) {
+                delay(20)
+                waited += 20L
+            }
+            if (mediaItemKey(player.currentMediaItem) == mediaItemKey(mediaItem)) {
+                preview.volume = 0f
+                rampVolume(player, 0f, 1f, 100)
+            } else {
+                player.volume = 1f
+            }
+            try { preview.release() } catch (_: Throwable) { }
+            crossfadePreviewPlayer = null
+            crossfadePreviewKey = null
+            crossfadeNextKey = null
+            crossfadeActive = false
+            crossfadeHandoffInProgress = false
+        }
+        return true
+    }
+
     private val sessionCallback = object : MediaSession.Callback {
         // Aceita qualquer controlador (shade do sistema, Bluetooth, outros apps, Android Auto…)
         override fun onConnect(
@@ -237,7 +452,7 @@ class PlaybackService : MediaSessionService() {
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
                 ACTION_SET_SPEED -> {
-                    val speed = args.getFloat(EXTRA_SPEED, 1f).coerceIn(0.5f, 2f)
+                    val speed = args.getFloat(EXTRA_SPEED, 1f).coerceIn(0.25f, 2f)
                     try {
                         session.player.setPlaybackSpeed(speed)
                     } catch (_: Exception) { }
@@ -256,15 +471,18 @@ class PlaybackService : MediaSessionService() {
         val prefs = getSharedPreferences("tolete", MODE_PRIVATE)
         // Saída de áudio escolhida em Configurações > Player:
         //  • Padrão do sistema: o Android decide a rota e o formato.
-        //  • Alta qualidade: prioriza DAC USB / fone com fio, mantém PCM float (sem cair para 16-bit)
-        //    e, no USB com Android 14+, pede ao sistema a taxa de amostragem da própria faixa.
-        val highQuality = AudioOutputPrefs.isHighQuality(prefs)
-        // Bit-perfect só vale no modo Alta qualidade (e só age no USB, Android 14+).
-        val bitPerfect = highQuality && prefs.getBoolean("bit_perfect", false)
+        // Fidelidade preserva a taxa da fonte (com o ajuste de compatibilidade 44,1→48 kHz).
+        val fidelityMode = AudioOutputPrefs.isFidelity(prefs)
+        val dedicatedOutput = fidelityMode
+        val resample44100To48000 = fidelityMode
+        val bitPerfect = fidelityMode && prefs.getBoolean("bit_perfect", false)
         val preferredSr = 0
-        val backendName = if (highQuality) "HIGH_QUALITY" else "DEFAULT"
+        val backendName = when {
+            fidelityMode -> AudioOutputPrefs.FIDELITY
+            else -> AudioOutputPrefs.DEFAULT
+        }
         // Float PCM: ajuda em caminhos hi-res e evita quantização extra em 24/32-bit
-        val wantFloat = !bitPerfect && highQuality
+        val wantFloat = !bitPerfect && dedicatedOutput
         appliedBackend = backendName
         appliedPreferredSampleRate = preferredSr
         appliedFloatOutput = wantFloat
@@ -289,9 +507,28 @@ class PlaybackService : MediaSessionService() {
                 enableFloatOutput: Boolean,
                 enableAudioOutputPlaybackParameters: Boolean
             ): AudioSink? {
-                val usbExclusive = highQuality
-                val outDevice = if (highQuality) AudioOutputInfo.findHighQualityOutput(context) else null
+                val usbExclusive = dedicatedOutput
+                val outDevice = if (dedicatedOutput) AudioOutputInfo.findPreferredOutput(context) else null
+                val rateDevice = outDevice ?: AudioOutputInfo.activeDevice(context)
                 appliedDeviceLabel = if (outDevice != null) AudioOutputInfo.describeDevice(outDevice) else ""
+                val supportedOutputSampleRatesProvider = {
+                    try {
+                        val advertisedRates = buildSet {
+                            addAll(rateDevice?.sampleRates?.filter { it > 0 }?.toSet().orEmpty())
+                            if (usbExclusive && outDevice != null) {
+                                addAll(UsbMixer.supportedMixerSampleRates(context, outDevice))
+                            }
+                        }
+                        if (advertisedRates.isNotEmpty()) {
+                            advertisedRates
+                        } else {
+                            val mixerRate = try { AudioOutputInfo.probe(context).sampleRateHz } catch (_: Throwable) { 0 }
+                            setOf(mixerRate.takeIf { it > 0 } ?: 48_000)
+                        }
+                    } catch (_: Throwable) {
+                        setOf(48_000)
+                    }
+                }
                 // Float: hi-res, USB DAC ou backends explícitos.
                 // CORREÇÃO: manter float também em bit-perfect. O Media3 só preserva
                 // 24/32 bits com a saída float ligada; sem ela ele converte hi-res para
@@ -301,59 +538,119 @@ class PlaybackService : MediaSessionService() {
                 appliedFloatOutput = useFloat
                 val builder = DefaultAudioSink.Builder(context)
                     .setEnableFloatOutput(useFloat)
-                    .setAudioProcessors(arrayOf(HighRatePcmDownsampler()))
+                    .setAudioProcessors(arrayOf(
+                        HighRatePcmDownsampler(
+                            resample44100To48000 = resample44100To48000,
+                            dsfSourceProvider = { currentTrackIsDsf },
+                            forceStereoProvider = { channels ->
+                                !routeSupportsMultichannel(context, channels)
+                            },
+                            supportedOutputSampleRatesProvider = supportedOutputSampleRatesProvider
+                        )
+                    ))
                     .setEnableAudioOutputPlaybackParameters(true)
                 android.util.Log.i(
                     "PlaybackService",
-                    "AudioSink: highQuality=$usbExclusive device=${appliedDeviceLabel.ifBlank { "-" }} float=$useFloat"
+                    "AudioSink: mode=$backendName device=${appliedDeviceLabel.ifBlank { "-" }} float=$useFloat"
                 )
                 val sink = builder.build()
                 // AudioTapSink (visualizador .milk) fica por fora de tudo e só espia o PCM.
-                if (!usbExclusive) return AudioTapSink(sink)
-                // Alta qualidade: antes de cada AudioTrack ser criado, pede ao Android 14+ que
-                // reabra a saída USB na taxa da faixa (senão o DAC fica preso em 48 kHz).
-                // Sem DAC USB conectado, o UsbMixer simplesmente não faz nada.
+                // Fidelidade tenta alinhar o mixer USB à taxa PCM efetivamente selecionada.
                 val appCtx = context.applicationContext
                 return AudioTapSink(object : ForwardingAudioSink(sink) {
                     // Media3 1.11: o override agora é configure(AudioSinkConfig)
                     override fun configure(audioSinkConfig: AudioSink.AudioSinkConfig) {
                         val inputFormat = audioSinkConfig.format
-                        if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
-                            inputFormat.sampleRate > 0
-                        ) {
-                            val pcm = inputFormat.pcmEncoding
-                            val inputChannels = audioSinkConfig.outputChannelMapping?.length()?.takeIf { it > 0 }
-                                ?: inputFormat.channelCount
-                            val channels = HighRatePcmDownsampler.outputChannelCount(
-                                inputFormat.sampleRate,
-                                inputChannels
-                            )
-                            val outputSampleRate = HighRatePcmDownsampler.outputSampleRate(
-                                inputFormat.sampleRate,
-                                channels,
-                                pcm
-                            )
-                            val highRes = pcm == C.ENCODING_PCM_24BIT ||
-                                pcm == C.ENCODING_PCM_32BIT ||
-                                pcm == C.ENCODING_PCM_FLOAT
-                            // Mesmo critério do DefaultAudioSink: hi-res vira float se habilitado,
-                            // senão é convertido para 16-bit.
-                            val trackEncoding = when {
-                                highRes && useFloat -> AudioFormat.ENCODING_PCM_FLOAT
-                                highRes -> AudioFormat.ENCODING_PCM_16BIT
-                                pcm == C.ENCODING_PCM_8BIT -> AudioFormat.ENCODING_PCM_8BIT
-                                else -> AudioFormat.ENCODING_PCM_16BIT
+                        try {
+                            if (MimeTypes.AUDIO_RAW == inputFormat.sampleMimeType &&
+                                inputFormat.sampleRate > 0
+                            ) {
+                                val pcm = inputFormat.pcmEncoding
+                                val inputChannels = audioSinkConfig.outputChannelMapping?.length()?.takeIf { it > 0 }
+                                    ?: inputFormat.channelCount
+                                val dsf = currentTrackIsDsf
+                                val forceStereo = dsf && inputChannels > 2 &&
+                                    !routeSupportsMultichannel(appCtx, inputChannels)
+                                val channels = HighRatePcmDownsampler.outputChannelCount(
+                                    inputFormat.sampleRate,
+                                    inputChannels,
+                                    forceStereo
+                                )
+                                val outputSampleRate = HighRatePcmDownsampler.outputSampleRate(
+                                    inputFormat.sampleRate,
+                                    channels,
+                                    pcm,
+                                    resample44100To48000,
+                                    dsf,
+                                    supportedOutputSampleRatesProvider()
+                                )
+                                val sourceBits = when (pcm) {
+                                    C.ENCODING_PCM_8BIT -> 8
+                                    C.ENCODING_PCM_16BIT -> 16
+                                    C.ENCODING_PCM_24BIT -> 24
+                                    C.ENCODING_PCM_32BIT, C.ENCODING_PCM_FLOAT -> 32
+                                    else -> 0
+                                }
+                                val outputBits = when {
+                                    pcm == C.ENCODING_PCM_24BIT || pcm == C.ENCODING_PCM_32BIT ||
+                                        pcm == C.ENCODING_PCM_FLOAT -> if (useFloat) 32 else 16
+                                    pcm == C.ENCODING_PCM_8BIT -> if (useFloat) 32 else 16
+                                    else -> sourceBits
+                                }
+                                val conversions = mutableListOf<String>()
+                                if (sourceBits > 0 && outputBits > sourceBits) {
+                                    conversions += "${sourceBits}-bit→${outputBits}-bit"
+                                }
+                                if (inputFormat.sampleRate != outputSampleRate) {
+                                    conversions += "${formatSampleRate(inputFormat.sampleRate)}→${formatSampleRate(outputSampleRate)}"
+                                }
+                                if (dsf && inputFormat.sampleRate > 0) conversions += "FIR DSF · filtro anti-ruído"
+                                if (forceStereo) conversions += "${inputChannels}ch→2ch"
+                                appliedConversionInfo = conversions.joinToString(" · ").ifBlank {
+                                    "Sem conversão adicional para esta faixa"
+                                }
+                                val highRes = pcm == C.ENCODING_PCM_24BIT ||
+                                    pcm == C.ENCODING_PCM_32BIT || pcm == C.ENCODING_PCM_FLOAT
+                                val trackEncoding = when {
+                                    highRes && useFloat -> AudioFormat.ENCODING_PCM_FLOAT
+                                    highRes -> AudioFormat.ENCODING_PCM_16BIT
+                                    pcm == C.ENCODING_PCM_8BIT -> AudioFormat.ENCODING_PCM_8BIT
+                                    else -> AudioFormat.ENCODING_PCM_16BIT
+                                }
+                                appliedTrackSampleRate = outputSampleRate
+                                appliedTrackChannelCount = channels
+                                appliedTrackEncoding = trackEncoding
+                                if (usbExclusive) {
+                                    com.tolete.player.data.UsbMixer.applyForTrack(
+                                        appCtx,
+                                        sampleRate = outputSampleRate,
+                                        channelCount = channels,
+                                        encoding = trackEncoding,
+                                        preferredHz = preferredSr,
+                                        bitPerfect = bitPerfect && inputFormat.sampleRate == outputSampleRate
+                                    )
+                                }
+                                android.util.Log.i(
+                                    "PlaybackService",
+                                    "AudioSink.configure source=${inputFormat.sampleRate}Hz/" +
+                                        "${inputChannels}ch/enc=${pcm} dsf=$dsf -> " +
+                                        "${outputSampleRate}Hz/${channels}ch/enc=$trackEncoding " +
+                                        "route=${appliedDeviceLabel.ifBlank { "system" }}"
+                                )
                             }
-                            com.tolete.player.data.UsbMixer.applyForTrack(
-                                appCtx,
-                                sampleRate = outputSampleRate,
-                                channelCount = channels,
-                                encoding = trackEncoding,
-                                preferredHz = preferredSr,
-                                bitPerfect = bitPerfect
+                            super.configure(audioSinkConfig)
+                        } catch (t: Throwable) {
+                            android.util.Log.e(
+                                "PlaybackService",
+                                "AudioSink.configure failed input=${inputFormat.sampleRate}Hz/" +
+                                    "${inputFormat.channelCount}ch/enc=${inputFormat.pcmEncoding} " +
+                                    "mime=${inputFormat.sampleMimeType} dsf=$currentTrackIsDsf " +
+                                    "output=${appliedTrackSampleRate}Hz/" +
+                                    "${appliedTrackChannelCount}ch/enc=${appliedTrackEncoding}",
+                                t
                             )
+                            throw t
                         }
-                        super.configure(audioSinkConfig)
                     }
                 })
             }
@@ -394,14 +691,15 @@ class PlaybackService : MediaSessionService() {
                 arrayOf(DsfExtractor(), *DefaultExtractorsFactory().createExtractors())
             }
         )
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
 
         val player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                    .setUsage(C.USAGE_MEDIA)
-                    .build(),
+                audioAttributes,
                 /* handleAudioFocus = */ true
             )
             .setHandleAudioBecomingNoisy(true) // pausa ao desconectar o fone
@@ -417,9 +715,9 @@ class PlaybackService : MediaSessionService() {
         currentAudioSessionId = player.audioSessionId
         exoPlayerRef = player
 
-        // Alta qualidade: roteia ao DAC USB (ou ao fone com fio) e reage a conectar/desconectar
-        backendIsHighQuality = highQuality
-        if (highQuality) {
+        // Fidelidade roteia ao DAC USB (ou ao fone com fio) e reage a conectar/desconectar
+        dedicatedOutputActive = dedicatedOutput
+        if (dedicatedOutput) {
             applyOutputRouting(player)
             val cb = object : android.media.AudioDeviceCallback() {
                 override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) =
@@ -464,6 +762,11 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                currentTrackIsDsf = isDsfMediaItem(mediaItem)
+                android.util.Log.i(
+                    "PlaybackService",
+                    "Faixa ativa DSF/DSD=$currentTrackIsDsf uri=${mediaItem?.localConfiguration?.uri}"
+                )
                 refreshCustomButtons()
                 // Nova faixa (ou repetição): atualiza a faixa atual do scrobbler agora, tocando ou pausado.
                 syncScrobbleCurrent(newPlay = true)
@@ -473,15 +776,24 @@ class PlaybackService : MediaSessionService() {
                 // O fade de saída da faixa anterior NÃO pode continuar rodando na faixa nova
                 // (nem ao repetir a mesma faixa): ele terminava em volume 0 e deixava tudo mudo.
                 cancelEndFade()
+                if (mediaItemKey(mediaItem) == crossfadeFailedKey) crossfadeFailedKey = null
                 val cf = crossfadeMs()
-                if (cf > 0 &&
+                val crossfaded = (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) &&
+                    completeCrossfadeHandoff(player, mediaItem)
+                if (crossfaded) {
+                    // A faixa auxiliar já tocou o início e o player da sessão assume na posição equivalente.
+                } else if (cf > 0 &&
                     (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
                         reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
                 ) {
-                    // Nova faixa (ou repetição): fade in (simula crossfade na transição automática)
+                    // Fallback curto quando a sobreposição não foi possível (ex.: saída exclusiva/DSF).
                     player.volume = 0f
-                    rampVolume(player, 0f, 1f, cf)
+                    rampVolume(player, 0f, 1f, minOf(cf, 350))
                 } else if (player.volume < 0.99f && fadeVolumeJob?.isActive != true) {
+                    if (crossfadePreviewPlayer != null || crossfadeActive) {
+                        cancelCrossfade(player, restoreMainVolume = false)
+                    }
                     player.volume = 1f
                 }
             }
@@ -495,6 +807,9 @@ class PlaybackService : MediaSessionService() {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
                 ) {
+                    if (!crossfadeHandoffInProgress && (crossfadeActive || crossfadePreviewPlayer != null)) {
+                        cancelCrossfade(player, restoreMainVolume = true)
+                    }
                     if (endFadeJob?.isActive == true || endCrossfadeStarted) {
                         cancelEndFade()
                         if (fadeVolumeJob?.isActive != true) player.volume = 1f
@@ -533,12 +848,19 @@ class PlaybackService : MediaSessionService() {
 
             override fun pause() {
                 val ms = fadeMs()
+                val mainVolume = player.volume.coerceIn(0f, 1f)
+                val previewVolume = crossfadePreviewPlayer?.volume?.coerceIn(0f, 1f) ?: 0f
+                val start = if (crossfadeActive) {
+                    kotlin.math.sqrt((mainVolume * mainVolume + previewVolume * previewVolume).toDouble())
+                        .toFloat().coerceIn(0.01f, 1f)
+                } else mainVolume.coerceIn(0.01f, 1f)
+                cancelCrossfade(player, restoreMainVolume = false)
+                player.volume = start
                 if (ms <= 0) {
                     super.pause()
                     player.volume = 1f
                     return
                 }
-                val start = player.volume.coerceIn(0.01f, 1f)
                 rampVolume(player, start, 0f, ms) {
                     super.pause()
                     player.volume = 1f
@@ -565,6 +887,16 @@ class PlaybackService : MediaSessionService() {
             .setCallback(sessionCallback)
             .setSessionActivity(sessionActivity)
             .build()
+
+        // O preview toca em paralelo no mixer do Android. Em saída exclusiva/bit-perfect e DSF,
+        // mantém-se o fallback de fade-in para evitar duas AudioTracks incompatíveis no DAC.
+        startCrossfadeMonitor(
+            player,
+            renderersFactory,
+            mediaSourceFactory,
+            audioAttributes,
+            allowed = !dedicatedOutput && !bitPerfect
+        )
 
         // Qualquer mudança nos favoritos (no app ou aqui) redesenha o ícone
         scope.launch {
@@ -603,54 +935,8 @@ class PlaybackService : MediaSessionService() {
             syncScrobbleCurrent(newPlay = false)
         }
 
-        // Crossfade cruzado: no início do fade-out já avança para a próxima faixa e faz fade-in.
-        // Com um único ExoPlayer não há sobreposição real de PCM, mas a troca acontece no
-        // começo da janela de crossfade (não só no fim natural), com fade-out→next→fade-in.
-        scope.launch {
-            while (true) {
-                delay(100)
-                val p = exoPlayerRef ?: continue
-                val cf = crossfadeMs()
-                if (!p.isPlaying) {
-                    if (endFadeJob?.isActive == true) endFadeJob?.cancel()
-                    endFadeJob = null
-                    endCrossfadeStarted = false
-                    continue
-                }
-                val dur = p.duration
-                val remain = if (dur > 0) dur - p.currentPosition else Long.MAX_VALUE
-                val inEndZone = cf > 0 && remain in 1 until cf.toLong()
-                val fading = fadeVolumeJob?.isActive == true || endFadeJob?.isActive == true
-                if (!fading && p.volume < 0.99f && (!endCrossfadeStarted || !inEndZone)) {
-                    p.volume = 1f
-                    if (!inEndZone) endCrossfadeStarted = false
-                }
-                if (cf <= 0) {
-                    endCrossfadeStarted = false
-                    continue
-                }
-                if (inEndZone && !endCrossfadeStarted) {
-                    endCrossfadeStarted = true
-                    val start = p.volume.coerceIn(0.05f, 1f)
-                    val half = (cf / 2).coerceAtLeast(80)
-                    // 1) Fade-out da faixa atual na primeira metade da janela
-                    rampVolume(p, start, 0f, half, isEndFade = true) {
-                        // 2) Assim que o fade-out termina (ainda dentro da janela), pula para a próxima
-                        //    e inicia o fade-in — efeito cruzado percebido pelo usuário.
-                        try {
-                            if (p.hasNextMediaItem()) {
-                                p.seekToNextMediaItem()
-                            }
-                            // onMediaItemTransition também faz fade-in; reforça se ainda estiver em 0
-                            if (p.volume < 0.05f) {
-                                p.volume = 0f
-                                rampVolume(p, 0f, 1f, half)
-                            }
-                        } catch (_: Exception) { }
-                    }
-                }
-            }
-        }
+        // A sobreposição só começa quando o monitor confirma que há próxima faixa e ela está pronta;
+        // assim a faixa atual não é cortada nem fica muda quando a fila termina.
     }
 
     // ---------- Faixa atual do scrobbler (fonte da verdade = player do serviço) ----------
@@ -771,6 +1057,19 @@ class PlaybackService : MediaSessionService() {
      */
     private fun handlePlayerError(player: ExoPlayer, error: PlaybackException) {
         consecutiveErrors++
+        val item = player.currentMediaItem
+        val causes = generateSequence(error.cause) { it.cause }
+            .mapIndexed { index, cause -> "cause[$index]=${cause.javaClass.name}: ${cause.message}" }
+            .joinToString(" <- ")
+        android.util.Log.e(
+            "PlaybackService",
+            "PlaybackException code=${error.errorCodeName}/${error.errorCode} " +
+                "track=${item?.localConfiguration?.uri} mime=${item?.localConfiguration?.mimeType} " +
+                "dsf=$currentTrackIsDsf output=${appliedTrackSampleRate}Hz/" +
+                "${appliedTrackChannelCount}ch/enc=${appliedTrackEncoding} " +
+                "causeChain=${causes.ifBlank { "<none>" }}",
+            error
+        )
         Toast.makeText(
             this,
             "Não foi possível tocar esta faixa (${error.errorCodeName})",
@@ -793,8 +1092,8 @@ class PlaybackService : MediaSessionService() {
      * Sem nenhum dos dois, passa null e o sistema volta a escolher a rota (alto-falante, Bluetooth...).
      */
     private fun applyOutputRouting(player: ExoPlayer) {
-        if (!backendIsHighQuality) return
-        val device = AudioOutputInfo.findHighQualityOutput(this)
+        if (!dedicatedOutputActive) return
+        val device = AudioOutputInfo.findPreferredOutput(this)
         appliedDeviceLabel = if (device != null) AudioOutputInfo.describeDevice(device) else ""
         // DAC conectado/desconectado: reaplica o formato do mixer na próxima faixa
         com.tolete.player.data.UsbMixer.invalidate()
@@ -804,6 +1103,37 @@ class PlaybackService : MediaSessionService() {
         } catch (e: Throwable) {
             android.util.Log.w("PlaybackService", "Falha ao rotear a saída: ${e.message}")
         }
+    }
+
+    /** DSF/DSD sources are identified from the media URI or explicit MIME type. */
+    private fun isDsfMediaItem(item: MediaItem?): Boolean {
+        val local = item?.localConfiguration ?: return false
+        val mime = local.mimeType.orEmpty().lowercase(java.util.Locale.ROOT)
+        val uri = Uri.decode(local.uri.toString()).substringBefore('?').substringBefore('#')
+            .lowercase(java.util.Locale.ROOT)
+        return mime.contains("dsf") || mime.contains("dsd") ||
+            uri.endsWith(".dsf") || uri.endsWith(".dff")
+    }
+
+    /** Unknown/unsupported routes are treated as stereo-only rather than risking AudioTrack failure. */
+    private fun routeSupportsMultichannel(context: Context, channelCount: Int): Boolean {
+        if (channelCount <= 2) return true
+        val device = AudioOutputInfo.activeDevice(context) ?: return false
+        val channelCounts = try { device.channelCounts } catch (_: Throwable) { null }
+        if (channelCounts?.contains(channelCount) != true) return false
+        if (android.os.Build.VERSION.SDK_INT >= 34 && com.tolete.player.data.UsbAudioRouter.isUsbType(device.type)) {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                ?: return false
+            return try {
+                am.getSupportedMixerAttributes(device).any {
+                    it.mixerBehavior == android.media.AudioMixerAttributes.MIXER_BEHAVIOR_DEFAULT &&
+                        it.format.channelCount == channelCount
+                }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        return true
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
@@ -818,6 +1148,9 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         ScrobbleNotifier.cancel(applicationContext)
+        crossfadeMonitorJob?.cancel()
+        crossfadeMixJob?.cancel()
+        releaseCrossfadePreview()
         idleStopJob?.cancel()
         idleStopJob = null
         scope.cancel()
@@ -828,7 +1161,7 @@ class PlaybackService : MediaSessionService() {
             } catch (_: Exception) {}
         }
         deviceCallback = null
-        if (backendIsHighQuality) {
+        if (dedicatedOutputActive) {
             // Devolve o DAC ao formato padrão do sistema para os outros apps
             try { com.tolete.player.data.UsbMixer.clear(this) } catch (_: Exception) {}
         }

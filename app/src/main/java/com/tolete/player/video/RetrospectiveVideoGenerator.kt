@@ -19,24 +19,28 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
- * Gera vídeos de 3–15s (padrão 8s; 1080×1920 @ 30fps) para cada card da retrospectiva:
+ * Gera vídeos de 3–15s (padrão 8s; 1080×1920 @ 30 ou 60fps) para cada card da retrospectiva:
  * fundo na cor primária da capa/tema, formas e ícones flutuantes, texto/fotos do card,
- * marca d’água Lyron e áudio (top 10 aleatória ou regra especial do card).
+ * marca d’água Lyron e áudio (faixas listadas ou regra especial do card).
  */
 object RetrospectiveVideoGenerator {
 
     private const val TAG = "RetroVideo"
     private const val W = 1080
     private const val H = 1920
-    private const val FPS = 30
+    const val FPS_30 = 30
+    const val FPS_60 = 60
     const val MIN_DURATION_SEC = 3
     const val MAX_DURATION_SEC = 15
     const val DEFAULT_DURATION_SEC = 8
 
-    /** Escolhas do usuário: duração (3–15 s) e música por card; card sem escolha usa a automática. */
+    /** Escolhas do usuário: duração, FPS e música por card; card sem escolha usa a automática. */
     data class VideoOptions(
         val durationSec: Int = DEFAULT_DURATION_SEC,
-        val audioByCard: Map<String, Track> = emptyMap()
+        val audioByCard: Map<String, Track> = emptyMap(),
+        /** Início do trecho em ms para escolhas manuais; ausente = corte automático. */
+        val audioStartMsByCard: Map<String, Long> = emptyMap(),
+        val fps: Int = FPS_30
     )
 
     /** Como a música de um card pode ser escolhida. */
@@ -82,6 +86,7 @@ object RetrospectiveVideoGenerator {
     ): Result = withContext(Dispatchers.IO) {
         cancelFlag = false
         val durationMs = options.durationSec.coerceIn(MIN_DURATION_SEC, MAX_DURATION_SEC) * 1000L
+        val fps = if (options.fps == FPS_60) FPS_60 else FPS_30
         val app = context.applicationContext
         val manifestFile = File(exportDir, "manifest.json")
         if (!manifestFile.isFile) throw IllegalArgumentException("manifest.json não encontrado")
@@ -130,10 +135,11 @@ object RetrospectiveVideoGenerator {
                 // Card 005 (música mais ouvida) sempre usa a própria música; os demais aceitam escolha manual.
                 val audioTrack = (if (card.id == "005") null else options.audioByCard[card.id])
                     ?: resolveAudioTrack(card, tracks, topTracks, topArtists, topAlbums)
+                val manualStartMs = if (card.id == "005") null else options.audioStartMsByCard[card.id]
                 val model = models.firstOrNull { it.id == card.id }
                     ?: throw IllegalStateException("modelo do card ${card.id} não encontrado")
                 val out = File(exportDir, "${card.id}.mp4")
-                renderCardVideo(app, card, model, audioTrack, durationMs, out) { f ->
+                renderCardVideo(app, card, model, audioTrack, manualStartMs, durationMs, fps, out) { f ->
                     onProgress(index, cards.size, f)
                 }
                 if (cancelFlag) {
@@ -171,6 +177,7 @@ object RetrospectiveVideoGenerator {
     /**
      * Músicas que podem ser escolhidas em cada card:
      * - 005 (música mais ouvida): travado, usa a própria música;
+     * - 003/007: só faixas do artista/álbum mais ouvido;
      * - 004/006/008 (top 5): só faixas dos artistas/músicas/álbuns listados no card;
      * - demais: qualquer música da biblioteca (as do ranking aparecem primeiro).
      */
@@ -194,13 +201,22 @@ object RetrospectiveVideoGenerator {
         val everything = (ranked + library.sortedBy { norm(it.title) }).distinctBy { it.id }
 
         val listedArtists = topArtists.take(5).flatMap { a ->
-            library.filter { norm(it.artist).contains(norm(a.name)) }.sortedBy { norm(it.title) }
+            library.filter { artistMatches(it.artist, a.name) }.sortedBy { norm(it.title) }
         }.distinctBy { it.id }
+        val mostHeardArtist = topArtists.firstOrNull()?.let { artist ->
+            library.filter { artistMatches(it.artist, artist.name) }.sortedBy { norm(it.title) }
+        }.orEmpty().distinctBy { it.id }
         val listedTracks = topTracks.take(5).mapNotNull { matchTrack(library, it.name, it.artist) }.distinctBy { it.id }
+        val mostHeardAlbum = topAlbums.firstOrNull()?.let { album ->
+            library.filter {
+                norm(it.album) == norm(album.name) &&
+                    (album.artist.isBlank() || artistMatches(it.artist, album.artist))
+            }.sortedBy { it.trackNumber ?: Int.MAX_VALUE }
+        }.orEmpty().distinctBy { it.id }
         val listedAlbums = topAlbums.take(5).flatMap { al ->
             library.filter {
                 norm(it.album) == norm(al.name) &&
-                    (al.artist.isBlank() || norm(it.artist).contains(norm(al.artist)) || norm(al.artist).contains(norm(it.artist)))
+                    (al.artist.isBlank() || artistMatches(it.artist, al.artist))
             }.sortedBy { it.trackNumber ?: Int.MAX_VALUE }
         }.distinctBy { it.id }
 
@@ -212,8 +228,10 @@ object RetrospectiveVideoGenerator {
                 add(
                     when (id) {
                         "005" -> CardAudioOptions(id, label, AudioKind.LOCKED, emptyList())
+                        "003" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, mostHeardArtist)
                         "004" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, listedArtists)
                         "006" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, listedTracks)
+                        "007" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, mostHeardAlbum)
                         "008" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, listedAlbums)
                         else -> CardAudioOptions(id, label, AudioKind.FREE, everything)
                     }
@@ -242,12 +260,20 @@ object RetrospectiveVideoGenerator {
 
     private fun norm(s: String) = s.lowercase(Locale.ROOT).trim()
 
+    private fun artistMatches(localArtist: String, rankedArtist: String): Boolean {
+        val ranked = norm(rankedArtist)
+        if (ranked.isBlank()) return false
+        val local = norm(localArtist)
+        val boundaryMatch = Regex("(^|[^\\p{L}\\p{N}])${Regex.escape(ranked)}($|[^\\p{L}\\p{N}])")
+        return boundaryMatch.containsMatchIn(local)
+    }
+
     private fun matchTrack(library: List<Track>, title: String, artist: String): Track? {
         val t = norm(title)
         val a = norm(artist)
-        return library.firstOrNull {
-            norm(it.title) == t && (a.isBlank() || norm(it.artist).contains(a) || a.contains(norm(it.artist)))
-        } ?: library.firstOrNull { norm(it.title) == t }
+        val titleMatches = library.filter { norm(it.title) == t }
+        return if (a.isBlank()) titleMatches.firstOrNull()
+        else titleMatches.firstOrNull { artistMatches(it.artist, a) }
     }
 
     private fun resolveAudioTrack(
@@ -262,25 +288,19 @@ object RetrospectiveVideoGenerator {
             "005" -> topTracks.firstOrNull()?.let { matchTrack(library, it.name, it.artist) }
             "003" -> {
                 val artist = topArtists.firstOrNull()?.name ?: return null
-                // música mais tocada do artista (entre tops ou biblioteca)
-                topTracks.firstOrNull { norm(it.artist).contains(norm(artist)) }
-                    ?.let { matchTrack(library, it.name, it.artist) }
-                    ?: library.filter { norm(it.artist).contains(norm(artist)) }
-                        .maxByOrNull { it.duration }
+                // O automático só sorteia entre faixas locais do artista exibido no card.
+                library.filter { artistMatches(it.artist, artist) }.randomOrNull()
             }
             "007" -> {
                 val album = topAlbums.firstOrNull() ?: return null
                 library.filter {
                     norm(it.album) == norm(album.name) &&
-                        (album.artist.isBlank() || norm(it.artist).contains(norm(album.artist)))
-                }.maxByOrNull { it.duration }
-                    ?: topTracks.firstOrNull()?.let { matchTrack(library, it.name, it.artist) }
+                        (album.artist.isBlank() || artistMatches(it.artist, album.artist))
+                }.randomOrNull()
             }
             else -> {
-                // top 10 aleatória
-                val pool = topTracks.take(10).mapNotNull { matchTrack(library, it.name, it.artist) }
-                if (pool.isNotEmpty()) pool.random()
-                else library.randomOrNull()
+                // Somente as cinco músicas mostradas no card; nunca cair para toda a biblioteca.
+                topTracks.take(5).mapNotNull { matchTrack(library, it.name, it.artist) }.randomOrNull()
             }
         }
     }
@@ -290,16 +310,18 @@ object RetrospectiveVideoGenerator {
         card: CardSpec,
         model: RetrospectiveCardRenderer.Model,
         audioTrack: Track?,
+        manualStartMs: Long?,
         durationMs: Long,
+        fps: Int,
         out: File,
         onProgress: (Float) -> Unit
     ) = coroutineScope {
-        val totalFrames = (durationMs * FPS / 1000L).toInt()
+        val totalFrames = (durationMs * fps / 1000L).toInt()
         val cache = File(app.cacheDir, "retro_video").apply { mkdirs() }
         val ts = System.currentTimeMillis()
         val videoTmp = File(cache, "rv_${card.id}_v_$ts.mp4")
         val audioTmp = File(cache, "rv_${card.id}_a_$ts.m4a")
-        val bitrate = (W.toLong() * H * FPS * 0.10).toInt().coerceIn(2_500_000, 12_000_000)
+        val bitrate = (W.toLong() * H * fps * 0.10).toInt().coerceIn(2_500_000, 12_000_000)
 
         val glExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "lyron-retro-gl") }
         val glDispatcher = glExecutor.asCoroutineDispatcher()
@@ -307,7 +329,8 @@ object RetrospectiveVideoGenerator {
             val audioJob = async(Dispatchers.Default) {
                 if (audioTrack != null) {
                     val dur = audioTrack.duration.coerceAtLeast(durationMs + 500)
-                    val start = if (dur > durationMs + 1000) {
+                    val start = manualStartMs?.coerceIn(0L, (audioTrack.duration - durationMs).coerceAtLeast(0L))
+                        ?: if (dur > durationMs + 1000) {
                         ((dur - durationMs) / 3).coerceAtLeast(0L)
                     } else 0L
                     val end = (start + durationMs).coerceAtMost(dur)
@@ -335,14 +358,14 @@ object RetrospectiveVideoGenerator {
                 val nowPlaying = audioTrack?.let { RetrospectiveCardRenderer.NowPlaying(it.title, it.artist) }
                 var finished = false
                 try {
-                    enc = GlVideoEncoder(W, H, FPS, bitrate, muxer, gles3 = false)
+                    enc = GlVideoEncoder(W, H, fps, bitrate, muxer, gles3 = false)
                     for (i in 0 until totalFrames) {
                         if (cancelFlag) throw CancellationException("cancelado")
-                        val tSec = i.toFloat() / FPS
+                        val tSec = i.toFloat() / fps
                         RetrospectiveCardRenderer.render(app, frameBmp, model, tSec, assets, nowPlaying)
-                        val ptsNs = i * 1_000_000_000L / FPS
+                        val ptsNs = i * 1_000_000_000L / fps
                         enc!!.encodeFrame(frameBmp, ptsNs)
-                        if (i % 12 == 0) onProgress(i.toFloat() / totalFrames)
+                        if (i % (fps / 2).coerceAtLeast(1) == 0) onProgress(i.toFloat() / totalFrames)
                     }
                     enc!!.finish()
                     finished = true

@@ -223,13 +223,13 @@ object LyricsExtractor {
         val candidates = mutableListOf<String>()
         if (track.path.startsWith("/")) {
             val base = track.path.substringBeforeLast('.')
-            // eLRC / TTML first (syllable sync), then plain LRC
+            // eLRC keeps word-level sync; a newly saved plain LRC takes precedence over TTML.
             candidates += "$base.elrc"
             candidates += "$base.ELRC"
-            candidates += "$base.ttml"
-            candidates += "$base.TTML"
             candidates += "$base.lrc"
             candidates += "$base.LRC"
+            candidates += "$base.ttml"
+            candidates += "$base.TTML"
         }
         for (p in candidates) {
             val f = File(p)
@@ -253,21 +253,24 @@ object LyricsExtractor {
         val wordRegex = Regex("""<(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?>""")
         val lines = mutableListOf<LyricLine>()
         val rawLines = text.lines()
-        val hasTimestampedLine = rawLines.any { lineRegex.containsMatchIn(it.trim()) }
         for (raw in rawLines) {
             val trimmed = raw.trim()
             if (trimmed.isEmpty() || trimmed.startsWith("[ti:") || trimmed.startsWith("[ar:") ||
                 trimmed.startsWith("[al:") || trimmed.startsWith("[by:") || trimmed.startsWith("[offset:")) continue
             val m = lineRegex.find(trimmed)
-            if (m == null && hasTimestampedLine &&
-                !trimmed.startsWith("{tr}", ignoreCase = true) &&
-                !wordMarkerRegex.containsMatchIn(trimmed)) continue
             val time = m?.let { parseTimestamp(it.groupValues[1], it.groupValues[2], it.groupValues[3]) } ?: -1L
             var lyricPart = m?.groupValues?.get(4) ?: trimmed
-            // Marcador de tradução {tr} no início da linha
-            val isTranslation = lyricPart.trimStart().startsWith("{tr}", ignoreCase = true)
-            if (isTranslation) {
-                lyricPart = lyricPart.trimStart().drop("{tr}".length).trimStart()
+            // Marcadores de tipo de linha vêm antes da primeira palavra, logo após o timestamp.
+            var isTranslation = false
+            var isBackground = false
+            val lineTypeMarker = Regex("^\\s*\\{(tr|bg)\\}", RegexOption.IGNORE_CASE)
+            while (true) {
+                val marker = lineTypeMarker.find(lyricPart) ?: break
+                when (marker.groupValues[1].lowercase()) {
+                    "tr" -> isTranslation = true
+                    "bg" -> isBackground = true
+                }
+                lyricPart = lyricPart.substring(marker.range.last + 1)
             }
             val words = mutableListOf<LyricWord>()
             if (wordRegex.containsMatchIn(lyricPart)) {
@@ -282,11 +285,7 @@ object LyricsExtractor {
                     val rawText = if (i + 1 < parts.size) parts[i + 1] else ""
                     appendWordSegment(words, rawText, wTime)
                 }
-                // Preenche endMs de cada palavra com o início da próxima
-                for (i in words.indices) {
-                    val end = if (i < words.lastIndex) words[i + 1].timeMs else -1L
-                    if (end > 0) words[i] = words[i].copy(endMs = end)
-                }
+                // endMs e fim de linha são preenchidos em finalizeLyricsTimings
             } else if (wordMarkerRegex.containsMatchIn(lyricPart)) {
                 // Mantém animações/sílabas em linhas simples, sem timestamps de palavra.
                 appendWordSegment(words, lyricPart, time)
@@ -298,12 +297,60 @@ object LyricsExtractor {
                         timeMs = time,
                         text = if (plainText.isNotEmpty()) plainText else words.joinToString("") { it.text },
                         words = words,
-                        isTranslation = isTranslation
+                        isTranslation = isTranslation,
+                        isBackground = isBackground
                     )
                 )
             }
         }
-        return if (lines.all { it.timeMs >= 0 }) lines.sortedBy { it.timeMs } else lines
+        val ordered = if (lines.all { it.timeMs >= 0 }) lines.sortedBy { it.timeMs } else lines
+        return finalizeLyricsTimings(ordered)
+    }
+
+    /**
+     * Preenche endMs de cada palavra (início da próxima com tempo) e o fim de cada linha.
+     * Usado no parse de LRC/TTML e ao salvar letras sincronizadas manualmente, para o
+     * karaokê ter a mesma suavidade em ambos os casos.
+     */
+    fun finalizeLyricsTimings(lines: List<LyricLine>): List<LyricLine> {
+        if (lines.isEmpty()) return lines
+        val withWordEnds = lines.map { line ->
+            if (line.words.isEmpty()) return@map line
+            val words = line.words.toMutableList()
+            for (i in words.indices) {
+                val current = words[i]
+                if (current.timeMs < 0L) continue
+                // Preserva endMs definido manualmente (ex.: fim da última palavra no editor).
+                if (current.endMs > current.timeMs) continue
+                val nextTimed = words.drop(i + 1).firstOrNull { it.timeMs > current.timeMs }
+                val end = nextTimed?.timeMs ?: -1L
+                if (end > current.timeMs) {
+                    words[i] = current.copy(endMs = end)
+                }
+            }
+            line.copy(words = words)
+        }
+        return inferLineEnds(withWordEnds)
+    }
+
+    /**
+     * Prepara fins de exibição para fontes sem duração explícita. BG expira 1,5 s
+     * após a última palavra sincronizada (ou o começo da linha como fallback),
+     * mas um novo BG encerra o anterior imediatamente.
+     */
+    private fun inferLineEnds(lines: List<LyricLine>): List<LyricLine> = lines.mapIndexed { index, line ->
+        val nextLineTime = lines.drop(index + 1).firstOrNull { it.timeMs > line.timeMs }?.timeMs
+        val nextBackgroundTime = if (line.isBackground) {
+            lines.drop(index + 1).firstOrNull { it.isBackground && it.timeMs > line.timeMs }?.timeMs
+        } else null
+        if (line.isBackground) {
+            val lastTimedWord = line.words.mapNotNull { it.timeMs.takeIf { time -> time >= 0 } }.maxOrNull()
+            val fallbackEnd = ((lastTimedWord ?: line.timeMs).coerceAtLeast(0L)) + 1_500L
+            val inferredEnd = nextBackgroundTime?.let { minOf(fallbackEnd, it) } ?: fallbackEnd
+            line.copy(endMs = inferredEnd)
+        } else if (line.endMs <= line.timeMs && nextLineTime != null) {
+            line.copy(endMs = nextLineTime)
+        } else line
     }
 
     private val wordMarkerRegex = Regex("\\{(sil|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE)
@@ -496,7 +543,27 @@ object LyricsExtractor {
                 )
             }
         }
-        return lines.sortedWith(compareBy({ it.timeMs }, { if (it.isBackground) 1 else 0 }))
+        val ordered = lines.sortedWith(compareBy({ it.timeMs }, { if (it.isBackground) 1 else 0 }))
+        return ordered.mapIndexed { index, line ->
+            val nextLineTime = ordered.drop(index + 1).firstOrNull { it.timeMs > line.timeMs }?.timeMs
+            val nextBackgroundTime = if (line.isBackground) {
+                ordered.drop(index + 1).firstOrNull { it.isBackground }?.timeMs
+            } else null
+            val lastTimedWord = line.words.mapNotNull { it.timeMs.takeIf { time -> time >= 0 } }.maxOrNull()
+            val bgFallback = if (line.isBackground) {
+                ((lastTimedWord ?: line.timeMs).coerceAtLeast(0L)) + 1_500L
+            } else null
+            val inferredEnd = when {
+                line.isBackground -> {
+                    val desiredEnd = bgFallback ?: line.timeMs + 1_500L
+                    nextBackgroundTime?.let { minOf(desiredEnd, it) } ?: desiredEnd
+                }
+                line.endMs > line.timeMs -> line.endMs
+                nextLineTime != null -> nextLineTime
+                else -> -1L
+            }
+            line.copy(endMs = inferredEnd)
+        }
     }
 
     private fun decodeXmlEntities(s: String): String =

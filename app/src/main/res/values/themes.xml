@@ -11,4 +11,6 @@
     <item name="android:windowNoTitle">true</item>
     <item name="android:backgroundDimEnabled">false</item>
   </style>
+
+  <style name="Theme.Lyron.ExternalPlayer" parent="Theme.Lyron.Transparent" />
 </resources>

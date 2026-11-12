@@ -18,7 +18,14 @@ data class LibrarySettings(
     /** Pastas a ignorar (uma por linha; compara com o caminho do arquivo). */
     val ignoredFolders: String = "",
     /** Duração mínima em segundos (2–50). Faixas menores são excluídas. 0 = desligado. */
-    val minDurationSec: Int = 0
+    val minDurationSec: Int = 0,
+    /**
+     * Ordem alfabética pela primeira letra: textos (títulos, artistas, álbuns) que começam
+     * com caracteres que não são letras nem números são organizados pela primeira letra,
+     * e letras acentuadas valem pela letra base. Desligado, vale o texto como está.
+     * @see com.tolete.player.data.AlphaSort
+     */
+    val firstLetterOrder: Boolean = false
 )
 
 /**

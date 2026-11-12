@@ -53,6 +53,14 @@ object ArtistMetaStore {
     /** Caminho da foto local do artista, só consultando memória (sem disco). */
     fun cachedPhotoPath(name: String): String? = photoIndex[indexKey(name)]
 
+    /** A chave de memória do Coil é "<path>@<px>"; ao trocar a foto, limpa as entradas antigas. */
+    private fun evictImageCache(context: Context, path: String) {
+        try {
+            val cache = coil.Coil.imageLoader(context).memoryCache ?: return
+            cache.keys.filter { it.key.startsWith("$path@") }.forEach { cache.remove(it) }
+        } catch (_: Throwable) {}
+    }
+
     private fun indexSet(name: String, path: String?) = synchronized(lock) {
         val m = photoIndex.toMutableMap()
         if (path == null) m.remove(indexKey(name)) else m[indexKey(name)] = path
@@ -153,6 +161,7 @@ object ArtistMetaStore {
                     val photo = LyronStorage.artistPhotoFile(name)
                     photo.delete()
                     File(photo.parentFile, photo.nameWithoutExtension + ".url").delete()
+                    evictImageCache(context, photo.absolutePath)
                     indexSet(name, null)
                 }
                 key.startsWith("album_") -> {
@@ -177,6 +186,7 @@ object ArtistMetaStore {
                         val dest = LyronStorage.artistPhotoFile(name)
                         if (src.exists() && src.absolutePath != dest.absolutePath) {
                             src.copyTo(dest, overwrite = true)
+                            evictImageCache(context, dest.absolutePath)
                             indexSet(name, dest.absolutePath)
                         }
                     }
@@ -234,6 +244,7 @@ object ArtistMetaStore {
             }
             // Foto nova substitui qualquer .url antigo
             File(dest.parentFile, dest.nameWithoutExtension + ".url").delete()
+            evictImageCache(context, dest.absolutePath)
             indexSet(name, dest.absolutePath)
             dest.absolutePath
         } catch (_: Exception) {

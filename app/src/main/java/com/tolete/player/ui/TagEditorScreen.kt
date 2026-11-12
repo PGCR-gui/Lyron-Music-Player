@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.TagReader
 import com.tolete.player.data.TagWriter
 import com.tolete.player.data.Track
@@ -167,6 +168,7 @@ fun TagEditorScreen(
     var techLine by remember(track.id) { mutableStateOf<String?>(null) }
     var loading by remember(track.id) { mutableStateOf(true) }
     var showLyricsSync by remember { mutableStateOf(false) }
+    var savingLyricsSync by remember { mutableStateOf(false) }
     var fileHint by remember(track.id) { mutableStateOf<String?>(null) }
     var localArtPath by remember(track.id) { mutableStateOf(track.artPath) }
     var savingArt by remember { mutableStateOf(false) }
@@ -615,7 +617,11 @@ fun TagEditorScreen(
             TagField("Comentário", comment, fieldColors, singleLine = false, minLines = 2) { comment = it }
             TagField("Letras (embed)", lyrics, fieldColors, singleLine = false, minLines = 4) { lyrics = it }
             Button(
-                onClick = { showLyricsSync = true },
+                onClick = {
+                    // Pausa o player principal ao abrir o sincronizador de letras
+                    if (isPlaying) onToggle()
+                    showLyricsSync = true
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
@@ -790,13 +796,28 @@ fun TagEditorScreen(
             LyricsEditorScreen(
                 track = track,
                 initialLines = initialLines,
-                isPlaying = isPlaying,
-                getPosition = getPosition,
-                onSeek = onSeek,
-                onToggle = onToggle,
-                onSave = { lines, _ ->
-                    lyrics = lyricLinesToTagText(lines)
-                    showLyricsSync = false
+                onSave = { lines, saveTarget ->
+                    if (!savingLyricsSync) {
+                        savingLyricsSync = true
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) {
+                                LyricsEmbedder.save(context, track, lines, saveTarget)
+                            }
+                            savingLyricsSync = false
+                            if (saved) {
+                                lyrics = lyricLinesToTagText(lines)
+                                originalLyrics = lyrics
+                                showLyricsSync = false
+                                Toast.makeText(context, "Sincronizações salvas no arquivo", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Não foi possível confirmar a gravação das sincronizações",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
                 },
                 onClose = { showLyricsSync = false },
                 appColors = appColors

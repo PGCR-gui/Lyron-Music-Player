@@ -59,6 +59,7 @@ internal fun LibraryPage(
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
+    onFirstLetterOrderChange: (Boolean) -> Unit = {},
     lastFmUsername: String? = null,
     onLastFmUsernameChange: (String?) -> Unit = {},
     lastFmSyncMessage: String? = null,
@@ -116,6 +117,24 @@ internal fun LibraryPage(
                 onOpenFolders
             )
         )
+
+        // Ordem alfabética pela primeira letra
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Ordem alfabética pela primeira letra", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Ignora símbolos no começo de músicas, artistas e álbuns (&, (, ', ♪…) e acentos: \"É\" conta como E. Números continuam no lugar.",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.55f)
+                    )
+                }
+                Switch(
+                    checked = settings.firstLetterOrder,
+                    onCheckedChange = onFirstLetterOrderChange
+                )
+            }
+        }
 
         Text(
             "Tags",

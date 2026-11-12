@@ -222,7 +222,7 @@ object RetrospectiveExporter {
                 "Usuário Last.fm: @$user\n" +
                 "Gerado em: $stamp\n\n" +
                 "Cada 00x.txt é um card. Use manifest.json para renderizar vídeos de 8s " +
-                "(ícones flutuantes + faixa das top 10 / regra especial por card).\n"
+                "(ícones flutuantes + faixa entre as músicas listadas / regra especial por card).\n"
         )
         return dir.absolutePath
     }

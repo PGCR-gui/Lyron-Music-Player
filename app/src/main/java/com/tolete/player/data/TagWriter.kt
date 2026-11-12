@@ -109,11 +109,14 @@ object TagWriter {
         editFile(context, track, { name -> "Letras gravadas em $name" }) { audio ->
             val tag = audio.tagOrCreateAndSetDefault
             val v = lyrics.trim()
-            try {
-                if (v.isEmpty()) tag.deleteField(FieldKey.LYRICS)
-                else tag.setField(FieldKey.LYRICS, v)
-            } catch (_: Exception) {
-                // formato sem suporte a LYRICS
+            if (v.isEmpty()) {
+                tag.deleteField(FieldKey.LYRICS)
+            } else {
+                tag.setField(FieldKey.LYRICS, v)
+                val storedLyrics = tag.getFirst(FieldKey.LYRICS).orEmpty().trim()
+                if (storedLyrics != v) {
+                    throw IllegalStateException("O formato não confirmou a gravação da letra sincronizada")
+                }
             }
         }
 
@@ -163,7 +166,15 @@ object TagWriter {
             set(FieldKey.LYRICIST, fields.lyricist)
             set(FieldKey.COMMENT, fields.comment)
             if (fields.lyrics.isNotBlank()) {
-                set(FieldKey.LYRICS, fields.lyrics)
+                val requestedLyrics = fields.lyrics.trim()
+                val previousLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
+                if (requestedLyrics != previousLyrics) {
+                    set(FieldKey.LYRICS, requestedLyrics)
+                    val storedLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
+                    if (storedLyrics != requestedLyrics) {
+                        throw IllegalStateException("O formato não confirmou a gravação da letra sincronizada")
+                    }
+                }
             } else if (fields.clearLyrics) {
                 try { tag.deleteField(FieldKey.LYRICS) } catch (_: Exception) { }
             }
@@ -221,8 +232,13 @@ object TagWriter {
     /** Salva uma cópia da capa em filesDir/art (mesma pasta das capas da biblioteca; nome único, para o Coil não reutilizar a imagem antiga). */
     fun saveCoverPreview(context: Context, imageBytes: ByteArray, mimeType: String = "image/jpeg"): String {
         val cacheDir = File(context.filesDir, "art").apply { mkdirs() }
-        val ext = if (mimeType.contains("png")) "png" else "jpg"
-        val out = File(cacheDir, "cover_${System.currentTimeMillis()}.$ext")
+        val ext = when {
+            mimeType.contains("png", ignoreCase = true) -> "png"
+            mimeType.contains("webp", ignoreCase = true) -> "webp"
+            mimeType.contains("gif", ignoreCase = true) -> "gif"
+            else -> "jpg"
+        }
+        val out = File(cacheDir, "cover_${System.currentTimeMillis()}_${System.nanoTime()}.$ext")
         out.writeBytes(imageBytes)
         return out.absolutePath
     }

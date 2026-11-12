@@ -48,10 +48,12 @@ internal fun VisualizerPage(
     onPickFiles: () -> Unit,
     onClear: () -> Unit,
     onIntervalChange: (Int) -> Unit,
-    changeSongWithInterval: Boolean = false,
-    onChangeSongWithIntervalChange: (Boolean) -> Unit = {},
-    changePresetOnSongChange: Boolean = true,
-    onChangePresetOnSongChange: (Boolean) -> Unit = {},
+    switchMode: String = "TIME",
+    onSwitchModeChange: (String) -> Unit = {},
+    presetOrder: String = "RANDOM",
+    onPresetOrderChange: (String) -> Unit = {},
+    favoritesOnly: Boolean = false,
+    onFavoritesOnlyChange: (Boolean) -> Unit = {},
     onManagePresets: () -> Unit = {},
     onOpenRecommendedPresets: () -> Unit = {}
 ) {
@@ -142,7 +144,7 @@ internal fun VisualizerPage(
             Column(Modifier.weight(1f)) {
                 Text("Presets recomendados", fontSize = 16.sp)
                 Text(
-                    "Cream of the Crop no GitHub — coleção de alta qualidade",
+                    "Cream of the Crop no GitHub — coleção completa de presets",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.5f)
                 )
@@ -155,63 +157,72 @@ internal fun VisualizerPage(
         }
 
         Spacer(Modifier.height(20.dp))
-        Text(
-            if (intervalSec == 0) "Trocar de preset: nunca"
-            else "Trocar de preset a cada $intervalSec s",
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium
-        )
-        androidx.compose.material3.Slider(
-            value = intervalSec.toFloat(),
-            onValueChange = { onIntervalChange((it / 5f).toInt() * 5) },
-            valueRange = 0f..120f,
-            steps = 23
-        )
-        Text(
-            "A troca de preset é aleatória e com transição suave. Com apenas 1 preset ela não acontece.",
-            fontSize = 12.sp,
-            color = Color.White.copy(0.4f)
-        )
-
-        Spacer(Modifier.height(16.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Mudar de música aleatoriamente no intervalo", fontSize = 15.sp)
-                Text(
-                    "Quando o timer do preset dispara, também troca para uma música aleatória da fila/biblioteca.",
-                    fontSize = 12.sp,
-                    color = Color.White.copy(0.45f)
+        Text("Modo de troca de preset", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        listOf(
+            "TIME" to ("Trocar no tempo definido" to "Usa o intervalo abaixo enquanto a música toca."),
+            "TRACK" to ("Trocar por música" to "Ignora o intervalo e escolhe outro preset ao mudar de faixa.")
+        ).forEach { (mode, copy) ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onSwitchModeChange(mode) }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(
+                    selected = switchMode == mode,
+                    onClick = { onSwitchModeChange(mode) },
+                    colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF69F0AE))
                 )
+                Column(Modifier.weight(1f)) {
+                    Text(copy.first, fontSize = 14.sp)
+                    Text(copy.second, fontSize = 12.sp, color = Color.White.copy(0.45f))
+                }
             }
-            Switch(
-                checked = changeSongWithInterval,
-                onCheckedChange = onChangeSongWithIntervalChange,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Color(0xFF69F0AE)
-                )
+        }
+
+        if (switchMode == "TIME") {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (intervalSec == 0) "Intervalo: desligado"
+                else "Trocar de preset a cada $intervalSec s",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            androidx.compose.material3.Slider(
+                value = intervalSec.toFloat(),
+                onValueChange = { onIntervalChange((it / 5f).toInt() * 5) },
+                valueRange = 0f..120f,
+                steps = 23
             )
         }
 
         Spacer(Modifier.height(12.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Text("Ordem dos presets", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        listOf("RANDOM" to "Aleatória", "SEQUENTIAL" to "Sequencial").forEach { (order, title) ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPresetOrderChange(order) }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(
+                    selected = presetOrder == order,
+                    onClick = { onPresetOrderChange(order) },
+                    colors = RadioButtonDefaults.colors(selectedColor = Color(0xFF69F0AE))
+                )
+                Text(title, fontSize = 14.sp)
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Trocar preset ao mudar de música", fontSize = 15.sp)
+                Text("Tocar só presets favoritos", fontSize = 15.sp)
                 Text(
-                    "Quando a faixa atual muda, escolhe um preset aleatório automaticamente.",
+                    "Limita as trocas automáticas aos presets marcados como favoritos.",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.45f)
                 )
             }
             Switch(
-                checked = changePresetOnSongChange,
-                onCheckedChange = onChangePresetOnSongChange,
+                checked = favoritesOnly,
+                onCheckedChange = onFavoritesOnlyChange,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White,
                     checkedTrackColor = Color(0xFF69F0AE)
@@ -220,4 +231,3 @@ internal fun VisualizerPage(
         }
     }
 }
-

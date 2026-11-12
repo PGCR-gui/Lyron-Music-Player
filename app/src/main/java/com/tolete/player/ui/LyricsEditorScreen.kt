@@ -53,6 +53,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -92,6 +93,9 @@ import java.io.File
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 
 /**
  * Editor de sincronização de letras (tags embutidas):
@@ -100,23 +104,33 @@ import kotlinx.coroutines.launch
  * - Ao mudar de simples → sincronizado, cada linha do texto vira uma caixa
  * - Miniplayer com -10s / play / +10s
  */
+@OptIn(UnstableApi::class)
 @Composable
 fun LyricsEditorScreen(
     track: Track,
     initialLines: List<LyricLine>,
-    isPlaying: Boolean,
-    getPosition: () -> Long,
-    onSeek: (Long) -> Unit,
-    onToggle: () -> Unit,
     onSave: (List<LyricLine>, LyricsEmbedder.Target) -> Unit,
     onClose: () -> Unit,
     appColors: AppColors,
     /** Target fixo desta sessão: LRC_FILE ou EMBEDDED — o save vai direto para esse destino. */
     initialTarget: LyricsEmbedder.Target = LyricsEmbedder.Target.EMBEDDED,
-    getPlaybackSpeed: () -> Float = { 1f },
-    onPlaybackSpeed: (Float) -> Unit = {}
+    sourceWasTtml: Boolean = false
 ) {
     val editorContext = LocalContext.current
+    val editorPlayer = remember(track.id) { createEditorPreviewPlayer(editorContext, track) }
+    var previewIsPlaying by remember(track.id) { mutableStateOf(editorPlayer.isPlaying) }
+    DisposableEffect(editorPlayer) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                previewIsPlaying = isPlaying
+            }
+        }
+        editorPlayer.addListener(listener)
+        onDispose {
+            editorPlayer.removeListener(listener)
+            editorPlayer.release()
+        }
+    }
     val lines = remember(track.id, initialLines) {
         mutableStateListOf<EditableLine>().apply {
             if (initialLines.isEmpty()) {
@@ -129,21 +143,27 @@ fun LyricsEditorScreen(
                     if (src.isTranslation) {
                         // Tradução solta — trata como linha normal marcada
                         val words = src.words.map {
-                            EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation)
+                            EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation, endMs = it.endMs)
                         }
-                        add(EditableLine(timeMs = src.timeMs, text = src.text, words = words, isTranslation = true))
+                        add(EditableLine(
+                            timeMs = src.timeMs,
+                            text = src.text,
+                            words = words,
+                            isTranslation = true,
+                            isBackground = src.isBackground
+                        ))
                         i++
                         continue
                     }
                     val words = src.words.map {
-                        EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation)
+                        EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation, endMs = it.endMs)
                     }
                     var trText = ""
                     var trWords = emptyList<EditableWord>()
                     if (i + 1 < initialLines.size && initialLines[i + 1].isTranslation) {
                         trText = initialLines[i + 1].text
                         trWords = initialLines[i + 1].words.map {
-                            EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation)
+                            EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation, endMs = it.endMs)
                         }
                         i++ // consome a tradução
                     }
@@ -151,6 +171,7 @@ fun LyricsEditorScreen(
                         timeMs = src.timeMs,
                         text = src.text,
                         words = words,
+                        isBackground = src.isBackground,
                         translationText = trText,
                         translationWords = trWords
                     ))
@@ -159,7 +180,7 @@ fun LyricsEditorScreen(
             }
         }
     }
-    var position by remember { mutableLongStateOf(getPosition()) }
+    var position by remember(track.id) { mutableLongStateOf(editorPlayer.currentPosition) }
     // Editor manual de tempo (long-press no relógio)
     var manualTimeTarget by remember { mutableStateOf<Pair<Int, Int?>?>(null) } // lineIndex to wordIndex?
     var manualTimeMs by remember { mutableLongStateOf(0L) }
@@ -225,8 +246,8 @@ fun LyricsEditorScreen(
         mutableStateOf(
             if (initialLines.isEmpty()) ""
             else initialLines.joinToString("\n") {
-                (if (it.isTranslation) "{tr}" else "") + wordsWithMarkers(
-                    it.words.map { w -> EditableWord(w.timeMs, w.text, w.isSyllable, w.animation) },
+                (if (it.isBackground) "{bg}" else "") + (if (it.isTranslation) "{tr}" else "") + wordsWithMarkers(
+                    it.words.map { w -> EditableWord(w.timeMs, w.text, w.isSyllable, w.animation, w.endMs) },
                     it.text
                 )
             }
@@ -234,23 +255,22 @@ fun LyricsEditorScreen(
     }
     fun simpleTextFromLines(): String = lines.flatMap { line ->
         buildList {
-            add((if (line.isTranslation) "{tr}" else "") + wordsWithMarkers(line.words, line.text))
+            add((if (line.isBackground) "{bg}" else "") + (if (line.isTranslation) "{tr}" else "") +
+                wordsWithMarkers(line.words, line.text))
             if (line.translationText.isNotBlank()) {
                 add("{tr}" + wordsWithMarkers(line.translationWords, line.translationText))
             }
         }
     }.joinToString("\n")
     val duration = track.duration.coerceAtLeast(1L)
-    // Velocidades úteis para sincronizar (cicla no botão)
-    val speedSteps = remember { listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f) }
-    var playbackSpeed by remember { mutableStateOf(getPlaybackSpeed().let { cur ->
-        speedSteps.minByOrNull { kotlin.math.abs(it - cur) } ?: 1f
-    }) }
+    var playbackSpeed by remember(track.id) { mutableStateOf(1f) }
+    var showSpeedDialog by remember { mutableStateOf(false) }
+    var speedDraft by remember { mutableStateOf(playbackSpeed) }
 
-    LaunchedEffect(isPlaying) {
+    LaunchedEffect(editorPlayer, previewIsPlaying) {
         while (true) {
-            position = getPosition()
-            if (!isPlaying) break
+            position = editorPlayer.currentPosition
+            if (!previewIsPlaying) break
             delay(50)
         }
     }
@@ -289,7 +309,7 @@ fun LyricsEditorScreen(
         }
         if (taggedWords.isEmpty()) return text to emptyList()
         return parsed.text to parsed.words.map {
-            EditableWord(it.timeMs, it.text, it.isSyllable, it.animation)
+            EditableWord(it.timeMs, it.text, it.isSyllable, it.animation, it.endMs)
         }
     }
 
@@ -300,6 +320,7 @@ fun LyricsEditorScreen(
         val previous = previousWords.getOrNull(index)
         parsedWord.copy(
             timeMs = previous?.timeMs?.takeIf { it >= 0 } ?: parsedWord.timeMs,
+            endMs = previous?.endMs?.takeIf { it >= 0 } ?: parsedWord.endMs,
             animation = parsedWord.animation,
             isSyllable = parsedWord.isSyllable
         )
@@ -411,8 +432,18 @@ fun LyricsEditorScreen(
         val rebuilt = mutableListOf<EditableLine>()
         var mainIndex = 0
         parts.forEach { rawPart ->
-            val startsWithTranslation = rawPart.trimStart().startsWith("{tr}", ignoreCase = true)
-            val sourcePart = if (startsWithTranslation) rawPart.trimStart().drop("{tr}".length).trimStart() else rawPart
+            var sourcePart = rawPart.trimStart()
+            var startsWithTranslation = false
+            var startsWithBackground = false
+            val lineMarker = Regex("^\\{(tr|bg)\\}", RegexOption.IGNORE_CASE)
+            while (true) {
+                val marker = lineMarker.find(sourcePart) ?: break
+                when (marker.groupValues[1].lowercase()) {
+                    "tr" -> startsWithTranslation = true
+                    "bg" -> startsWithBackground = true
+                }
+                sourcePart = sourcePart.substring(marker.range.last + 1).trimStart()
+            }
             val (part, parsedWords) = decodeTaggedText(sourcePart)
             if (startsWithTranslation) {
                 val previous = rebuilt.lastOrNull()
@@ -429,7 +460,8 @@ fun LyricsEditorScreen(
                             timeMs = -1L,
                             text = part.trim(),
                             words = parsedWords,
-                            isTranslation = true
+                            isTranslation = true,
+                            isBackground = startsWithBackground
                         )
                     )
                 }
@@ -452,7 +484,7 @@ fun LyricsEditorScreen(
                     }
                     ?: EditableLine(timeMs = -1L, text = part, words = parsedWords)
             }
-            rebuilt.add(next.copy(isTranslation = false))
+            rebuilt.add(next.copy(isTranslation = false, isBackground = startsWithBackground))
             mainIndex++
         }
         lines.clear()
@@ -461,6 +493,63 @@ fun LyricsEditorScreen(
         } else {
             lines.addAll(rebuilt)
         }
+    }
+
+    /** Quebra Enter/colagens em entradas independentes sem deixar newline dentro do texto. */
+    fun splitLineInput(index: Int, rawInput: String) {
+        val original = lines.getOrNull(index) ?: return
+        val normalized = rawInput.replace("\r\n", "\n").replace('\r', '\n')
+        val chunks = normalized.split('\n', ignoreCase = false, limit = Int.MAX_VALUE)
+        if (chunks.size <= 1) return
+        val oldWords = original.words
+        val consumed = BooleanArray(oldWords.size)
+        val replacements = chunks.mapIndexed { chunkIndex, rawChunk ->
+            val parsed = LyricsExtractor.parseLyricsContent(rawChunk).firstOrNull()
+            val cleanText = parsed?.text ?: rawChunk
+            val parsedWords = parsed?.words.orEmpty()
+            val wordSources = if (parsedWords.isNotEmpty()) parsedWords.map { it.text } else cleanText.trim()
+                .split(Regex("\\s+" )).filter { it.isNotEmpty() }
+            val editableWords = wordSources.map { wordText ->
+                val matchIndex = oldWords.indices.firstOrNull { wi ->
+                    !consumed[wi] && oldWords[wi].text.trim() == wordText.trim()
+                }
+                if (matchIndex != null) {
+                    consumed[matchIndex] = true
+                    val prior = oldWords[matchIndex]
+                    val fromParsed = parsedWords.firstOrNull { it.text.trim() == wordText.trim() }
+                    EditableWord(
+                        timeMs = fromParsed?.timeMs?.takeIf { it >= 0 } ?: prior.timeMs,
+                        text = wordText,
+                        isSyllable = fromParsed?.isSyllable ?: prior.isSyllable,
+                        animation = fromParsed?.animation?.takeIf { it != LyricAnimation.NONE } ?: prior.animation,
+                        endMs = fromParsed?.endMs?.takeIf { it >= 0 } ?: prior.endMs
+                    )
+                } else {
+                    val fromParsed = parsedWords.firstOrNull { it.text.trim() == wordText.trim() }
+                    EditableWord(
+                        timeMs = fromParsed?.timeMs ?: -1L,
+                        text = wordText,
+                        isSyllable = fromParsed?.isSyllable ?: false,
+                        animation = fromParsed?.animation ?: LyricAnimation.NONE,
+                        endMs = fromParsed?.endMs ?: -1L
+                    )
+                }
+            }
+            val explicitBg = rawChunk.trimStart().startsWith("{bg}", ignoreCase = true) || parsed?.isBackground == true
+            val explicitTranslation = rawChunk.trimStart().startsWith("{tr}", ignoreCase = true) || parsed?.isTranslation == true
+            original.copy(
+                timeMs = if (chunkIndex == 0) original.timeMs else -1L,
+                text = cleanText.replace(Regex("[\\r\\n]+"), " ").trim(),
+                words = editableWords,
+                isBackground = if (chunkIndex == 0) original.isBackground else (explicitBg || original.isBackground),
+                isTranslation = if (chunkIndex == 0) original.isTranslation else (explicitTranslation || original.isTranslation),
+                translationText = if (chunkIndex == 0) original.translationText else "",
+                translationWords = if (chunkIndex == 0) original.translationWords else emptyList(),
+                id = if (chunkIndex == 0) original.id else System.nanoTime() + chunkIndex
+            )
+        }
+        lines.removeAt(index)
+        lines.addAll(index, replacements)
     }
 
     fun switchToMode(target: EditorMode) {
@@ -496,17 +585,16 @@ fun LyricsEditorScreen(
 
 
     fun seekBy(deltaMs: Long) {
-        val next = (getPosition() + deltaMs).coerceIn(0L, duration)
-        onSeek(next)
+        val next = (editorPlayer.currentPosition + deltaMs).coerceIn(0L, duration)
+        editorPlayer.seekTo(next)
         position = next
     }
 
     fun applySpeed(next: Float) {
-        playbackSpeed = next
-        // Callback do ViewModel (MediaController + serviço)
-        onPlaybackSpeed(next)
-        // Caminho direto no ExoPlayer (mesmo processo) — não depende do wiring
-        com.tolete.player.PlaybackService.setSpeed(next)
+        val clamped = next.coerceIn(0.25f, 1f)
+        playbackSpeed = clamped
+        // A velocidade desta pré-escuta fica isolada do player principal.
+        editorPlayer.playbackParameters = PlaybackParameters(clamped, 1f)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -610,6 +698,7 @@ fun LyricsEditorScreen(
                                     LyricWord(
                                         timeMs = it.timeMs,
                                         text = it.text,
+                                        endMs = it.endMs,
                                         isSyllable = it.isSyllable,
                                         animation = it.animation
                                     )
@@ -621,7 +710,8 @@ fun LyricsEditorScreen(
                                 timeMs = adjusted.timeMs,
                                 text = text,
                                 words = words,
-                                isTranslation = adjusted.isTranslation
+                                isTranslation = adjusted.isTranslation,
+                                isBackground = adjusted.isBackground
                             )
                             // Linha de tradução associada
                             if (adjusted.translationText.isNotBlank() || adjusted.translationWords.any { it.text.isNotBlank() }) {
@@ -631,6 +721,7 @@ fun LyricsEditorScreen(
                                         LyricWord(
                                             timeMs = it.timeMs,
                                             text = it.text,
+                                            endMs = it.endMs,
                                             isSyllable = it.isSyllable,
                                             animation = it.animation
                                         )
@@ -662,7 +753,9 @@ fun LyricsEditorScreen(
                             ).show()
                             return@IconButton
                         }
-                        onSave(out, initialTarget)
+                        // Preenche endMs de palavras e linhas — mesmo pós-processamento do parse de LRC baixado,
+                        // para o karaokê ter a mesma suavidade nas letras sincronizadas manualmente.
+                        onSave(com.tolete.player.data.LyricsExtractor.finalizeLyricsTimings(out), initialTarget)
                     },
                     modifier = Modifier
                         .size(40.dp)
@@ -688,6 +781,15 @@ fun LyricsEditorScreen(
                 maxLines = 1,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp)
             )
+
+            if (sourceWasTtml) {
+                Text(
+                    "Fonte TTML aberta para conversão. O original não será alterado; somente Salvar grava um .lrc.",
+                    color = appColors.accent,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 5.dp)
+                )
+            }
 
             // Offset global (modos Linhas e Palavras)
             if (editorMode != EditorMode.SIMPLE) {
@@ -819,6 +921,10 @@ fun LyricsEditorScreen(
                             line = line,
                             formatTime = ::formatTime,
                             onTextChange = { newText ->
+                                if (newText.contains('\n') || newText.contains('\r')) {
+                                    splitLineInput(index, newText)
+                                    return@LineBox
+                                }
                                 val (cleanText, taggedWords) = decodeTaggedText(newText)
                                 if (taggedWords.isNotEmpty()) {
                                     lines[index] = line.copy(
@@ -852,13 +958,13 @@ fun LyricsEditorScreen(
                             },
                             onPlayLine = {
                                 if (line.timeMs >= 0) {
-                                    onSeek(line.timeMs)
+                                    editorPlayer.seekTo(line.timeMs)
                                     position = line.timeMs
-                                    if (!isPlaying) onToggle()
+                                    if (!previewIsPlaying) editorPlayer.play()
                                 }
                             },
                             onSync = {
-                                val t = getPosition()
+                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
                                 lines[index] = line.copy(timeMs = t)
                                 val info = lineListState.layoutInfo
                                 info.visibleItemsInfo.firstOrNull { it.index == index }?.let { item ->
@@ -873,11 +979,22 @@ fun LyricsEditorScreen(
                             },
                             onLongSync = {
                                 manualTimeTarget = index to null
-                                manualTimeMs = if (line.timeMs >= 0) line.timeMs else getPosition()
+                                manualTimeMs = if (line.timeMs >= 0) line.timeMs else editorPlayer.currentPosition
+                            },
+                            onToggleBackground = {
+                                lines[index] = line.copy(isBackground = !line.isBackground)
                             },
                             onDelete = {
                                 if (lines.size > 1) lines.removeAt(index)
-                                else lines[index] = line.copy(timeMs = -1L, text = "", words = emptyList())
+                                else lines[index] = line.copy(
+                                    timeMs = -1L,
+                                    text = "",
+                                    words = emptyList(),
+                                    isTranslation = false,
+                                    isBackground = false,
+                                    translationText = "",
+                                    translationWords = emptyList()
+                                )
                             },
                             accent = appColors.accent
                         )
@@ -940,22 +1057,22 @@ fun LyricsEditorScreen(
                             onPlayLine = {
                                 val time = lines[index].timeMs
                                 if (time >= 0) {
-                                    onSeek(time)
+                                    editorPlayer.seekTo(time)
                                     position = time
-                                    if (!isPlaying) onToggle()
+                                    if (!previewIsPlaying) editorPlayer.play()
                                 }
                             },
                             onLineSync = { coords ->
-                                val t = getPosition()
+                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
                                 lines[index] = lines[index].copy(timeMs = t)
                                 autoScrollWordList(coords)
                             },
                             onLongLineSync = {
                                 manualTimeTarget = index to null
-                                manualTimeMs = if (lines[index].timeMs >= 0) lines[index].timeMs else getPosition()
+                                manualTimeMs = if (lines[index].timeMs >= 0) lines[index].timeMs else editorPlayer.currentPosition
                             },
                             onWordSync = { wordIndex, coords ->
-                                val t = getPosition()
+                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
                                 val el = lines[index].ensureWords()
                                 val newWords = el.words.toMutableList()
                                 if (wordIndex in newWords.indices) {
@@ -970,7 +1087,21 @@ fun LyricsEditorScreen(
                                 val el = lines[index].ensureWords()
                                 val t = el.words.getOrNull(wordIndex)?.timeMs ?: -1L
                                 manualTimeTarget = index to wordIndex
-                                manualTimeMs = if (t >= 0) t else getPosition()
+                                manualTimeMs = if (t >= 0) t else editorPlayer.currentPosition
+                            },
+                            onLastWordEndSync = {
+                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
+                                val el = lines[index].ensureWords()
+                                val newWords = el.words.toMutableList()
+                                if (newWords.isNotEmpty()) {
+                                    val last = newWords.lastIndex
+                                    // endMs só faz sentido se for depois do início da palavra (ou da linha)
+                                    val minStart = newWords[last].timeMs.takeIf { it >= 0 }
+                                        ?: el.timeMs.takeIf { it >= 0 }
+                                        ?: 0L
+                                    newWords[last] = newWords[last].copy(endMs = t.coerceAtLeast(minStart))
+                                    lines[index] = el.copy(words = newWords)
+                                }
                             },
                             onOpenAnimationMenu = { wordIndex ->
                                 animationTarget = AnimationTarget(lineIndex = index, wordIndex = wordIndex)
@@ -1003,6 +1134,9 @@ fun LyricsEditorScreen(
                                     newWords[wordIndex] = w.copy(isSyllable = !w.isSyllable)
                                     lines[index] = el.copy(words = newWords).rebuildTextFromWords()
                                 }
+                            },
+                            onToggleBackground = {
+                                lines[index] = lines[index].copy(isBackground = !lines[index].isBackground)
                             },
                             onAddWord = {
                                 val el = lines[index].ensureWords()
@@ -1099,9 +1233,9 @@ fun LyricsEditorScreen(
                                     IconButton(
                                         onClick = {
                                             if (line.timeMs >= 0) {
-                                                onSeek(line.timeMs)
+                                                editorPlayer.seekTo(line.timeMs)
                                                 position = line.timeMs
-                                                if (!isPlaying) onToggle()
+                                                if (!previewIsPlaying) editorPlayer.play()
                                             }
                                         },
                                         enabled = line.timeMs >= 0,
@@ -1193,6 +1327,42 @@ fun LyricsEditorScreen(
                 } // EditorMode.TRANSLATION
             } // when
 
+            if (showSpeedDialog) {
+                AppAlertDialog(
+                    onDismissRequest = { showSpeedDialog = false },
+                    title = { Text("Velocidade de reprodução") },
+                    text = {
+                        Column {
+                            Text(
+                                "${(speedDraft * 100f).toInt()}%",
+                                color = appColors.accent,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Slider(
+                                value = speedDraft,
+                                onValueChange = { speedDraft = it.coerceIn(0.25f, 1f) },
+                                valueRange = 0.25f..1f,
+                                steps = 14,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = appColors.accent,
+                                    activeTrackColor = appColors.accent
+                                )
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            applySpeed(speedDraft)
+                            showSpeedDialog = false
+                        }) { Text("Aplicar") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showSpeedDialog = false }) { Text("Cancelar") }
+                    }
+                )
+            }
+
             // Diálogo de tempo manual (long-press no relógio)
             if (manualTimeTarget != null) {
                 val (lineIdx, wordIdx) = manualTimeTarget!!
@@ -1239,7 +1409,7 @@ fun LyricsEditorScreen(
                             Spacer(Modifier.height(10.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 TextButton(onClick = {
-                                    manualTimeMs = getPosition()
+                                    manualTimeMs = editorPlayer.currentPosition
                                     timeText = formatTime(manualTimeMs)
                                 }) {
                                     Text("Agora", color = MaterialTheme.colorScheme.primary)
@@ -1303,7 +1473,11 @@ fun LyricsEditorScreen(
             ) {
                 Slider(
                     value = (position.toFloat() / duration).coerceIn(0f, 1f),
-                    onValueChange = { onSeek((it * duration).toLong()) },
+                    onValueChange = {
+                        val target = (it * duration).toLong()
+                        editorPlayer.seekTo(target)
+                        position = target
+                    },
                     colors = SliderDefaults.colors(
                         thumbColor = appColors.accent,
                         activeTrackColor = appColors.accent,
@@ -1324,23 +1498,22 @@ fun LyricsEditorScreen(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Diminuir velocidade (Linhas / Palavras)
                     if (editorMode != EditorMode.SIMPLE) {
-                        Box(
+                        TextButton(
+                            onClick = {
+                                speedDraft = playbackSpeed
+                                showSpeedDialog = true
+                            },
                             modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(Color.White.copy(0.12f))
-                                .border(1.dp, Color.White.copy(0.22f), CircleShape)
-                                .clickable {
-                                    val idx = speedSteps.indexOf(playbackSpeed).let {
-                                        if (it < 0) speedSteps.indexOf(1f) else it
-                                    }
-                                    applySpeed(speedSteps[(idx - 1).coerceAtLeast(0)])
-                                },
-                            contentAlignment = Alignment.Center
+                                .clip(RoundedCornerShape(50))
+                                .background(if (playbackSpeed != 1f) appColors.accent.copy(0.18f) else Color.White.copy(0.10f))
+                                .border(1.dp, Color.White.copy(0.22f), RoundedCornerShape(50))
                         ) {
-                            Text("−", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${(playbackSpeed * 100f).toInt()}%",
+                                color = if (playbackSpeed != 1f) appColors.accent else Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         Spacer(Modifier.width(6.dp))
                     }
@@ -1354,14 +1527,19 @@ fun LyricsEditorScreen(
                     }
                     Spacer(Modifier.width(6.dp))
                     IconButton(
-                        onClick = onToggle,
+                        onClick = {
+                            if (previewIsPlaying) editorPlayer.pause() else {
+                                if (editorPlayer.playbackState == Player.STATE_ENDED) editorPlayer.seekTo(0L)
+                                editorPlayer.play()
+                            }
+                        },
                         modifier = Modifier
                             .size(52.dp)
                             .clip(CircleShape)
                             .background(appColors.accent)
                     ) {
                         Icon(
-                            if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                            if (previewIsPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                             contentDescription = null,
                             tint = Color.Black,
                             modifier = Modifier.size(28.dp)
@@ -1374,47 +1552,6 @@ fun LyricsEditorScreen(
                             contentDescription = "+10 segundos",
                             tint = Color.White,
                             modifier = Modifier.size(32.dp)
-                        )
-                    }
-                    // Aumentar velocidade + indicador (Linhas / Palavras)
-                    if (editorMode != EditorMode.SIMPLE) {
-                        Spacer(Modifier.width(6.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(Color.White.copy(0.12f))
-                                .border(1.dp, Color.White.copy(0.22f), CircleShape)
-                                .clickable {
-                                    val idx = speedSteps.indexOf(playbackSpeed).let {
-                                        if (it < 0) speedSteps.indexOf(1f) else it
-                                    }
-                                    applySpeed(speedSteps[(idx + 1).coerceAtMost(speedSteps.lastIndex)])
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("+", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = when {
-                                playbackSpeed == 1f -> "1x"
-                                playbackSpeed == 0.5f -> "0.5x"
-                                playbackSpeed == 0.75f -> "0.75x"
-                                playbackSpeed == 1.25f -> "1.25x"
-                                playbackSpeed == 1.5f -> "1.5x"
-                                else -> "${"%.2f".format(playbackSpeed)}x"
-                            },
-                            color = if (playbackSpeed != 1f) appColors.accent else Color.White.copy(0.75f),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (playbackSpeed != 1f) appColors.accent.copy(0.18f)
-                                    else Color.White.copy(0.08f)
-                                )
-                                .padding(horizontal = 8.dp, vertical = 6.dp)
                         )
                     }
                 }
@@ -1850,6 +1987,7 @@ private fun LineBox(
     onPlayLine: () -> Unit,
     onSync: () -> Unit,
     onLongSync: () -> Unit = {},
+    onToggleBackground: () -> Unit,
     onDelete: () -> Unit,
     accent: Color
 ) {
@@ -1926,6 +2064,18 @@ private fun LineBox(
             }
         )
         Text(
+            text = "BG",
+            color = if (line.isBackground) Color.Black else Color.White.copy(0.65f),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .padding(horizontal = 4.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .background(if (line.isBackground) accent else Color.White.copy(0.10f))
+                .clickable(onClick = onToggleBackground)
+                .padding(horizontal = 7.dp, vertical = 6.dp)
+        )
+        Text(
             "FX",
             color = accent,
             fontSize = 11.sp,
@@ -1958,8 +2108,11 @@ private fun WordLineBox(
     onLongLineSync: () -> Unit = {},
     onWordSync: (Int, LayoutCoordinates?) -> Unit,
     onLongWordSync: (Int) -> Unit = {},
+    /** Sincroniza só o endMs da última palavra da linha (posição atual do player). */
+    onLastWordEndSync: () -> Unit = {},
     onWordTextChange: (Int, String) -> Unit,
     onToggleSyllable: (Int) -> Unit = {},
+    onToggleBackground: () -> Unit,
     onOpenAnimationMenu: (Int) -> Unit,
     onAddWord: () -> Unit,
     onDeleteWord: (Int) -> Unit,
@@ -2031,6 +2184,18 @@ private fun WordLineBox(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 2,
                 modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "BG",
+                color = if (line.isBackground) Color.Black else Color.White.copy(0.65f),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .padding(horizontal = 2.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(if (line.isBackground) accent else Color.White.copy(0.10f))
+                    .clickable(onClick = onToggleBackground)
+                    .padding(horizontal = 7.dp, vertical = 6.dp)
             )
             IconButton(onClick = onDeleteLine, modifier = Modifier.size(32.dp)) {
                 Icon(
@@ -2144,6 +2309,33 @@ private fun WordLineBox(
                             .clickable { onToggleSyllable(wi) }
                             .padding(horizontal = 6.dp, vertical = 4.dp)
                     )
+                    // Só na última palavra: botão para marcar o endMs (fim do fill do karaokê)
+                    if (wi == line.words.lastIndex) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (word.endMs > word.timeMs && word.timeMs >= 0)
+                                        accent.copy(alpha = 0.18f)
+                                    else Color.White.copy(0.08f)
+                                )
+                                .clickable(onClick = onLastWordEndSync)
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                "fim",
+                                color = if (word.endMs > word.timeMs && word.timeMs >= 0) accent else Color.White.copy(0.55f),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                formatTime(word.endMs),
+                                fontSize = 9.sp,
+                                color = if (word.endMs > word.timeMs && word.timeMs >= 0) accent else Color.White.copy(0.4f)
+                            )
+                        }
+                    }
                     IconButton(onClick = { onDeleteWord(wi) }, modifier = Modifier.size(28.dp)) {
                         Icon(
                             Icons.Rounded.Close,
@@ -2311,6 +2503,8 @@ private data class EditableWord(
     val text: String,
     val isSyllable: Boolean = false,
     val animation: LyricAnimation = LyricAnimation.NONE,
+    /** Fim explícito da palavra (ms). Usado sobretudo na última palavra da linha. -1 = desconhecido. */
+    val endMs: Long = -1L,
     val id: Long = System.nanoTime()
 )
 
@@ -2319,6 +2513,7 @@ private data class EditableLine(
     val text: String,
     val words: List<EditableWord> = emptyList(),
     val isTranslation: Boolean = false,
+    val isBackground: Boolean = false,
     val translationText: String = "",
     val translationWords: List<EditableWord> = emptyList(),
     val id: Long = System.nanoTime()
@@ -2341,10 +2536,15 @@ private data class EditableLine(
         return copy(text = sb.toString())
     }
 
-    /** Se a linha tem palavras com tempo e o tempo da linha não bate, usa o da 1ª palavra. */
+    /**
+     * Só puxa o tempo da linha para o da 1ª palavra quando a linha está
+     * *depois* da 1ª palavra (timeMs da linha > timeMs da palavra).
+     * Assim o usuário pode manter um início de linha anterior ao da 1ª palavra
+     * (ex.: intro instrumental) sem ser sobrescrito ao sincronizar a palavra.
+     */
     fun autoAdjustLineTime(): EditableLine {
         val firstWordTime = words.firstOrNull { it.timeMs >= 0 }?.timeMs ?: return this
-        if (timeMs < 0 || timeMs != firstWordTime) {
+        if (timeMs > firstWordTime) {
             return copy(timeMs = firstWordTime)
         }
         return this
