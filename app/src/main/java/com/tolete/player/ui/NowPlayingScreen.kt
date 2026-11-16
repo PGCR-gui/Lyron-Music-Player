@@ -2146,7 +2146,8 @@ enum class SeekBarStyle {
     Slim,      // trilha bem fina
     Liquid,    // bolha/elipse no ponto de progresso (efeito “líquido”)
     WavyLiquid, // onda que corre (Wavy) + thumb de vidro líquido (Liquid)
-    Waveform   // forma de onda real da música; o desenho é escolhido em Configurações
+    Waveform,  // forma de onda real da música; o desenho é escolhido em Configurações
+    Glass      // trilho escuro de vidro fumê, progresso champagne e cursor branco
 }
 
 /**
@@ -2198,6 +2199,7 @@ private fun SeekBar(
         SeekBarStyle.Wavy -> 8.dp
         SeekBarStyle.WavyLiquid -> 8.dp
         SeekBarStyle.Waveform -> 38.dp
+        SeekBarStyle.Glass -> 8.dp
         SeekBarStyle.Liquid -> 6.dp
         SeekBarStyle.Standard -> 5.dp
     }
@@ -2207,11 +2209,12 @@ private fun SeekBar(
         SeekBarStyle.Liquid -> 16.dp
         SeekBarStyle.WavyLiquid -> 16.dp
         SeekBarStyle.Waveform -> 14.dp
+        SeekBarStyle.Glass -> 13.dp
         SeekBarStyle.Wavy -> 12.dp
         SeekBarStyle.Standard -> 14.dp
     }
     val boxHeight = when (style) {
-        SeekBarStyle.Thick, SeekBarStyle.Liquid, SeekBarStyle.Wavy, SeekBarStyle.WavyLiquid -> 32.dp
+        SeekBarStyle.Thick, SeekBarStyle.Liquid, SeekBarStyle.Wavy, SeekBarStyle.WavyLiquid, SeekBarStyle.Glass -> 32.dp
         SeekBarStyle.Waveform -> 48.dp
         else -> 28.dp
     }
@@ -2319,6 +2322,38 @@ private fun SeekBar(
             val progW = size.width * frac
 
             when (style) {
+                SeekBarStyle.Glass -> {
+                    val border = 1.dp.toPx()
+                    val innerHeight = (h - border * 2f).coerceAtLeast(1f)
+                    val radius = CornerRadius(h / 2f, h / 2f)
+                    val innerRadius = CornerRadius(innerHeight / 2f, innerHeight / 2f)
+                    drawRoundRect(
+                        color = Color(0xFF101114).copy(alpha = 0.82f),
+                        cornerRadius = radius
+                    )
+                    if (progW > border) {
+                        drawRoundRect(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(Color(0xFFB9A77A), Color(0xFFF2E8C8))
+                            ),
+                            topLeft = androidx.compose.ui.geometry.Offset(border, border),
+                            size = Size((progW - border).coerceAtMost(size.width - border), innerHeight),
+                            cornerRadius = innerRadius
+                        )
+                    }
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.20f),
+                        start = androidx.compose.ui.geometry.Offset(border * 2f, border),
+                        end = androidx.compose.ui.geometry.Offset(size.width - border * 2f, border),
+                        strokeWidth = 0.7.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 0.22f),
+                        cornerRadius = radius,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = border)
+                    )
+                }
                 SeekBarStyle.Wavy -> {
                     val strokeW = 3.dp.toPx()
                     val amp = 2.5.dp.toPx() * waveAmp
@@ -2460,6 +2495,36 @@ private fun SeekBar(
         }
 
         when (style) {
+            SeekBarStyle.Glass -> {
+                Canvas(Modifier.fillMaxSize()) {
+                    val thumbW = 13.dp.toPx()
+                    val thumbH = 10.dp.toPx()
+                    val cx = (fraction.coerceIn(0f, 1f) * size.width)
+                        .coerceIn(thumbW / 2f, size.width - thumbW / 2f)
+                    val cy = size.height / 2f
+                    val top = cy - thumbH / 2f
+                    val radius = CornerRadius(thumbH / 2f, thumbH / 2f)
+                    drawRoundRect(
+                        color = Color.Black.copy(alpha = 0.56f),
+                        topLeft = androidx.compose.ui.geometry.Offset(cx - thumbW / 2f - 1.dp.toPx(), top - 1.dp.toPx()),
+                        size = Size(thumbW + 2.dp.toPx(), thumbH + 2.dp.toPx()),
+                        cornerRadius = radius
+                    )
+                    drawRoundRect(
+                        color = Color(0xFFF5F5F2),
+                        topLeft = androidx.compose.ui.geometry.Offset(cx - thumbW / 2f, top),
+                        size = Size(thumbW, thumbH),
+                        cornerRadius = radius
+                    )
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.72f),
+                        start = androidx.compose.ui.geometry.Offset(cx - thumbW * 0.28f, top + 1.5.dp.toPx()),
+                        end = androidx.compose.ui.geometry.Offset(cx + thumbW * 0.28f, top + 1.5.dp.toPx()),
+                        strokeWidth = 0.8.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                }
+            }
             SeekBarStyle.Liquid, SeekBarStyle.WavyLiquid -> {
                 // Thumb: pílula branca em repouso → “lente de vidro” maior ao arrastar.
                 Canvas(Modifier.fillMaxSize()) {

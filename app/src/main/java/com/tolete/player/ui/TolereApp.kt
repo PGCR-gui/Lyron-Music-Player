@@ -261,7 +261,6 @@ fun TolereApp(
     onPickMilkFiles: () -> Unit = {},
     onDeleteTracks: (List<Track>) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
-    onRequestMediaStorePermission: () -> Unit = {},
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     openLastFmDashboard: Boolean = false,
@@ -318,7 +317,6 @@ fun TolereApp(
     val uiFontPath by vm.uiFontPath.collectAsStateWithLifecycle()
     val librarySettings by vm.librarySettings.collectAsStateWithLifecycle()
     val allFilesMode by vm.allFilesMode.collectAsStateWithLifecycle()
-    val mediaStoreMode by vm.mediaStoreMode.collectAsStateWithLifecycle()
     // Indexa as fotos de artista uma vez (IO) e converte .url antigos em .jpg
     LaunchedEffect(allFilesMode, librarySettings.artistAutoFetchMode) {
         withContext(Dispatchers.IO) {
@@ -918,7 +916,7 @@ fun TolereApp(
                                     verticalArrangement = Arrangement.Center
                                 ) {
                                     Text(
-                                        if (!allFilesMode && !mediaStoreMode) "Escolha como carregar sua biblioteca"
+                                        if (!allFilesMode) "Escolha como carregar sua biblioteca"
                                         else "Nenhuma música encontrada",
                                         fontSize = 20.sp,
                                         fontWeight = FontWeight.SemiBold,
@@ -927,23 +925,18 @@ fun TolereApp(
                                     Text(
                                         when {
                                             allFilesMode -> "Nenhuma faixa encontrada no armazenamento."
-                                            mediaStoreMode -> "O modo Músicas e áudio usa o índice do Android. Alguns arquivos não indexados, como certos DSF, podem não aparecer; operações de arquivo também podem exigir autorização adicional."
-                                            else -> "Você pode permitir a leitura dos áudios indexados pelo Android ou escolher o acesso amplo a todos os arquivos. O modo pelo índice pode não encontrar alguns formatos/arquivos e limita operações de edição e gerenciamento."
+                                            else -> "Permita o acesso amplo ao armazenamento ou escolha pastas específicas para carregar sua biblioteca."
                                         },
                                         modifier = Modifier.padding(vertical = 12.dp),
                                         color = Color.White.copy(alpha = 0.7f),
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                     )
-                                    if (!allFilesMode && !mediaStoreMode) {
-                                        Button(onClick = onRequestMediaStorePermission) {
-                                            Text("Usar permissão Músicas e áudio")
-                                        }
-                                        TextButton(onClick = onRequestAllFilesPermission) {
+                                    if (!allFilesMode) {
+                                        Button(onClick = onRequestAllFilesPermission) {
                                             Text("Usar acesso a todos os arquivos")
                                         }
-                                    } else if (mediaStoreMode) {
-                                        Button(onClick = onRequestMediaStorePermission) {
-                                            Text("Verificar permissão e escanear")
+                                        TextButton(onClick = onPickFolder) {
+                                            Text("Escolher pastas de música")
                                         }
                                     } else {
                                         Button(onClick = onRequestAllFilesPermission) {
@@ -1501,9 +1494,6 @@ fun TolereApp(
                     allFilesMode = allFilesMode,
                     onAllFilesModeChange = vm::setAllFilesMode,
                     onRequestAllFilesPermission = onRequestAllFilesPermission,
-                    mediaStoreMode = mediaStoreMode,
-                    onMediaStoreModeChange = vm::setMediaStoreMode,
-                    onRequestMediaStorePermission = onRequestMediaStorePermission,
                     autoFetchLyrics = autoFetchLyrics,
                     onAutoFetchLyricsChange = vm::setAutoFetchLyrics,
                     autoLyricsSaveTarget = autoLyricsSaveTarget,
@@ -1788,7 +1778,7 @@ fun TolereApp(
                                     val msg = when {
                                         ok && saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Letra salva no arquivo .lrc"
                                         ok && saveTarget == LyricsEmbedder.Target.EMBEDDED -> "Letra salva nas tags do arquivo"
-                                        saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Falha ao salvar .lrc (ative Acesso a todos os arquivos)"
+                                        saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Falha ao salvar .lrc; o Android não autorizou a gravação nesta pasta"
                                         else -> "Falha ao salvar letra nas tags"
                                     }
                                     android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()

@@ -48,7 +48,6 @@ internal fun LibraryPage(
     totalTracks: Int,
     settings: LibrarySettings,
     allFilesMode: Boolean,
-    mediaStoreMode: Boolean,
     onOpenFolders: () -> Unit,
     onSplitArtistsChange: (Boolean) -> Unit,
     onArtistSeparatorsChange: (String) -> Unit,
@@ -57,8 +56,6 @@ internal fun LibraryPage(
     onGenreSeparatorsChange: (String) -> Unit,
     onAllFilesModeChange: (Boolean) -> Unit,
     onRequestAllFilesPermission: () -> Unit,
-    onMediaStoreModeChange: (Boolean) -> Unit,
-    onRequestMediaStorePermission: () -> Unit,
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
@@ -85,50 +82,12 @@ internal fun LibraryPage(
             modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 4.dp)
         )
 
-        // Alternativas de leitura da biblioteca; habilitar uma desativa a outra.
-        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text("Músicas e áudio (índice do sistema, somente leitura)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text(
-                        "Lê os áudios que o Android encontra no MediaStore. Requer a permissão \"Músicas e áudio\", sem acesso amplo ao armazenamento.",
-                        fontSize = 13.sp,
-                        color = Color.White.copy(0.55f)
-                    )
-                }
-                Switch(
-                    checked = mediaStoreMode,
-                    onCheckedChange = { enabled ->
-                        if (enabled) onRequestMediaStorePermission()
-                        else onMediaStoreModeChange(false)
-                    }
-                )
-            }
-            if (mediaStoreMode) {
-                Text(
-                    "Modo ativo · leitura pelo índice do Android",
-                    fontSize = 12.sp,
-                    color = Color(0xFF81C784),
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-                TextButton(onClick = onRequestMediaStorePermission) {
-                    Text("Verificar ou conceder permissão novamente")
-                }
-            }
-            Text(
-                "Limitações: arquivos fora do índice (incluindo alguns DSF) podem não aparecer. Edição de tags/capas e leitura de letras .lrc/.ttml laterais não são garantidas; excluir pode pedir confirmação do Android. Mover, renomear e explorar arquivos gerais requer acesso mais amplo.",
-                fontSize = 12.sp,
-                color = Color(0xFFFFB74D),
-                modifier = Modifier.padding(top = 6.dp)
-            )
-        }
-
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text("Gerenciar todos os arquivos", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(
-                        "Varre o armazenamento diretamente, inclusive arquivos que o índice não encontrou. Requer a permissão especial \"Acesso a todos os arquivos\".",
+                        "Varre o armazenamento diretamente, inclusive arquivos que o índice não encontra. Requer a permissão especial \"Acesso a todos os arquivos\"; como alternativa, adicione pastas específicas.",
                         fontSize = 13.sp,
                         color = Color.White.copy(0.55f)
                     )
@@ -149,9 +108,9 @@ internal fun LibraryPage(
                     modifier = Modifier.padding(top = 6.dp)
                 )
             }
-            if (!allFilesMode && !mediaStoreMode) {
+            if (!allFilesMode && folders.isEmpty()) {
                 Text(
-                    "Escolha um dos modos acima para carregar a biblioteca; também é possível adicionar pastas específicas em Organizar biblioteca.",
+                    "Ative o acesso amplo ou adicione pastas específicas em Organizar biblioteca para carregar a biblioteca.",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.55f),
                     modifier = Modifier.padding(top = 6.dp)

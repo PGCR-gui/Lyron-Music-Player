@@ -160,9 +160,6 @@ fun SettingsScreen(
     allFilesMode: Boolean = false,
     onAllFilesModeChange: (Boolean) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
-    mediaStoreMode: Boolean = false,
-    onMediaStoreModeChange: (Boolean) -> Unit = {},
-    onRequestMediaStorePermission: () -> Unit = {},
     autoFetchLyrics: Boolean = false,
     onAutoFetchLyricsChange: (Boolean) -> Unit = {},
     autoLyricsSaveTarget: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE,
@@ -333,7 +330,6 @@ fun SettingsScreen(
                 totalTracks = totalTracks,
                 settings = librarySettings,
                 allFilesMode = allFilesMode,
-                mediaStoreMode = mediaStoreMode,
                 onOpenFolders = { onNavigate(SettingsPage.ORGANIZE) },
                 onSplitArtistsChange = onSplitArtistsChange,
                 onArtistSeparatorsChange = onArtistSeparatorsChange,
@@ -347,8 +343,6 @@ fun SettingsScreen(
                 onArtistAutoFetchModeChange = onArtistAutoFetchModeChange,
                 onAllFilesModeChange = onAllFilesModeChange,
                 onRequestAllFilesPermission = onRequestAllFilesPermission,
-                onMediaStoreModeChange = onMediaStoreModeChange,
-                onRequestMediaStorePermission = onRequestMediaStorePermission,
                 lastFmUsername = lastFmUsername,
                 onLastFmUsernameChange = onLastFmUsernameChange,
                 lastFmSyncMessage = lastFmSyncMessage,
@@ -520,7 +514,7 @@ fun SettingsScreen(
                     SettingsEntry(
                         Icons.Rounded.LibraryMusic,
                         "Biblioteca",
-                        "Pastas, Músicas e áudio, acesso amplo e tags"
+                        "Pastas, acesso amplo e tags"
                     ) { onNavigate(SettingsPage.LIBRARY) },
                     SettingsEntry(
                         Icons.Rounded.PlayArrow,

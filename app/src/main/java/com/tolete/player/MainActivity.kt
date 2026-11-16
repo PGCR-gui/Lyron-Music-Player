@@ -355,22 +355,17 @@ class MainActivity : ComponentActivity() {
         val ok = grants.values.any { it }
         val wasAllFilesRequest = pendingLegacyAllFilesEnable
         pendingLegacyAllFilesEnable = false
-        if (ok) {
-            if (wasAllFilesRequest) {
-                viewModel.setAllFilesMode(true)
-                Toast.makeText(this, "Permissão concedida — escaneando armazenamento", Toast.LENGTH_SHORT).show()
-            } else {
-                viewModel.setMediaStoreMode(true)
-                Toast.makeText(this, "Permissão concedida — lendo o índice de áudio", Toast.LENGTH_SHORT).show()
-            }
-        } else {
+        if (ok && wasAllFilesRequest) {
+            viewModel.setAllFilesMode(true)
+            Toast.makeText(this, "Permissão concedida — escaneando armazenamento", Toast.LENGTH_SHORT).show()
+        } else if (!ok) {
             Toast.makeText(this, "Permissão negada", Toast.LENGTH_SHORT).show()
         }
     }
 
     /** Após voltar das configurações de "Todos os arquivos". */
     private var pendingAllFilesEnable = false
-    /** Diferencia o READ_EXTERNAL_STORAGE legado solicitado pelo modo amplo do modo MediaStore. */
+    /** Marca a solicitação da permissão legada para o acesso amplo em Android antigo. */
     private var pendingLegacyAllFilesEnable = false
 
     override fun onResume() {
@@ -395,29 +390,6 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
                 PackageManager.PERMISSION_GRANTED
         }
-    }
-
-    private fun hasMediaAudioAccess(): Boolean {
-        val permission = if (Build.VERSION.SDK_INT >= 33) {
-            Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestMediaStorePermission() {
-        if (hasMediaAudioAccess()) {
-            viewModel.setMediaStoreMode(true)
-            Toast.makeText(this, "Permissão já concedida — lendo o índice de áudio", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val permission = if (Build.VERSION.SDK_INT >= 33) {
-            Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        requestReadAudio.launch(arrayOf(permission))
     }
 
     private fun requestAllFilesAccess() {
@@ -592,7 +564,6 @@ class MainActivity : ComponentActivity() {
                         onPickMilkFiles = { pickMilkFiles.launch(arrayOf("*/*")) },
                         onDeleteTracks = { tracks -> requestPermanentDelete(tracks) },
                         onRequestAllFilesPermission = { requestAllFilesAccess() },
-                        onRequestMediaStorePermission = { requestMediaStorePermission() },
                         onExportBackup = { opts ->
                             viewModel.pendingBackupOptions = opts
                             pendingBackupJson = viewModel.exportBackup(opts)

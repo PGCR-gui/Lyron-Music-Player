@@ -54,7 +54,7 @@ class MusicScanner(private val context: Context) {
 
     /**
      * Escaneia todas as faixas de áudio visíveis pelo MediaStore
-     * (requer READ_EXTERNAL_STORAGE / READ_MEDIA_AUDIO ou MANAGE_EXTERNAL_STORAGE).
+     * (requer a permissão legada de leitura ou MANAGE_EXTERNAL_STORAGE).
      */
     suspend fun scanAllMedia(
         onTrack: () -> Unit = {},

@@ -769,52 +769,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ---------- Acesso a todos os arquivos (MediaStore) ----------
+    // ---------- Acesso amplo à biblioteca ----------
     private val _allFilesMode = MutableStateFlow(prefs.getBoolean(KEY_ALL_FILES, false))
     val allFilesMode: StateFlow<Boolean> = _allFilesMode.asStateFlow()
-    private val _mediaStoreMode = MutableStateFlow(prefs.getBoolean(KEY_MEDIA_STORE_MODE, false))
-    val mediaStoreMode: StateFlow<Boolean> = _mediaStoreMode.asStateFlow()
 
     fun setAllFilesMode(enabled: Boolean) {
         _allFilesMode.value = enabled
         prefs.edit().putBoolean(KEY_ALL_FILES, enabled).apply()
         if (enabled) {
-            _mediaStoreMode.value = false
-            prefs.edit().putBoolean(KEY_MEDIA_STORE_MODE, false).apply()
             _library.value = _library.value.filter { it.sourceTree != "media_store" }
             refreshAllFiles()
         } else {
-            _library.value = _library.value.filter { it.sourceTree != "all_files" }
-            viewModelScope.launch { scanMutex.withLock { cache.save(_library.value) } }
-            if (_mediaStoreMode.value || _treeUris.value.isNotEmpty()) refreshLibrary()
-        }
-    }
-
-    /** Usa READ_MEDIA_AUDIO/READ_EXTERNAL_STORAGE e o índice do sistema, sem acesso amplo ao disco. */
-    fun setMediaStoreMode(enabled: Boolean) {
-        if (enabled && !hasAudioReadPermission()) return
-        _mediaStoreMode.value = enabled
-        prefs.edit().putBoolean(KEY_MEDIA_STORE_MODE, enabled).apply()
-        if (enabled) {
-            _allFilesMode.value = false
-            prefs.edit().putBoolean(KEY_ALL_FILES, false).apply()
-            _library.value = _library.value.filter { it.sourceTree != "all_files" }
-            refreshLibrary()
-        } else {
-            _library.value = _library.value.filter { it.sourceTree != "media_store" }
+            _library.value = _library.value.filter { it.sourceTree != "all_files" && it.sourceTree != "media_store" }
             viewModelScope.launch { scanMutex.withLock { cache.save(_library.value) } }
             if (_treeUris.value.isNotEmpty()) refreshLibrary()
         }
-    }
-
-    private fun hasAudioReadPermission(): Boolean {
-        val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
-            android.Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            android.Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        return ContextCompat.checkSelfPermission(getApplication<Application>(), permission) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
     fun refreshAllFiles() {
@@ -1452,9 +1421,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshLibrary() {
         val folders = _treeUris.value
         val allFiles = _allFilesMode.value
-        val mediaStore = _mediaStoreMode.value
-        if (folders.isEmpty() && !allFiles && !mediaStore) return
-        if (mediaStore && !hasAudioReadPermission() && folders.isEmpty()) return
+        if (folders.isEmpty() && !allFiles) return
         launchScan { onTrack ->
             val existing = _library.value.associateBy { it.id }
             val result = mutableListOf<Track>()
@@ -1465,17 +1432,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         existingById = existing,
                         sourceTree = "all_files",
                         scanUnindexedDsf = true
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) { }
-            } else if (mediaStore && hasAudioReadPermission()) {
-                try {
-                    result += scanner.scanAllMedia(
-                        onTrack = onTrack,
-                        existingById = existing,
-                        sourceTree = "media_store",
-                        scanUnindexedDsf = false
                     )
                 } catch (e: CancellationException) {
                     throw e
@@ -1501,9 +1457,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun quickRescanInBackground() {
         val folders = _treeUris.value
         val allFiles = _allFilesMode.value
-        val mediaStore = _mediaStoreMode.value
-        if (folders.isEmpty() && !allFiles && !mediaStore) return
-        if (mediaStore && !hasAudioReadPermission() && folders.isEmpty()) return
+        if (folders.isEmpty() && !allFiles) return
         if (_library.value.isEmpty()) {
             refreshLibrary()
             return
@@ -1518,17 +1472,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         existingById = existing,
                         sourceTree = "all_files",
                         scanUnindexedDsf = true
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) { }
-            } else if (mediaStore && hasAudioReadPermission()) {
-                try {
-                    result += scanner.scanAllMedia(
-                        onTrack = onTrack,
-                        existingById = existing,
-                        sourceTree = "media_store",
-                        scanUnindexedDsf = false
                     )
                 } catch (e: CancellationException) {
                     throw e
@@ -3952,7 +3895,6 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("audioOutput", _audioOutput.value.name)
         obj.put("preferredSampleRate", _preferredSampleRate.value)
         obj.put("allFilesMode", _allFilesMode.value)
-        obj.put("mediaStoreMode", _mediaStoreMode.value)
         obj.put("splitArtists", _librarySettings.value.splitArtists)
         obj.put("artistSeparators", _librarySettings.value.artistSeparators)
         obj.put("artistExceptions", _librarySettings.value.artistExceptions)
@@ -4309,7 +4251,6 @@ private val _firstPlayedAt = MutableStateFlow(
                 try { ArtistMetaStore.importAll(getApplication(), obj.getJSONObject("artistMeta").toString()) } catch (_: Exception) {}
             }
             if (obj.has("allFilesMode")) setAllFilesMode(obj.getBoolean("allFilesMode"))
-            if (obj.has("mediaStoreMode")) setMediaStoreMode(obj.getBoolean("mediaStoreMode"))
             true
         } catch (_: Exception) {
             false
@@ -4323,6 +4264,8 @@ private val _firstPlayedAt = MutableStateFlow(
 
     init {
         FavoritesBridge.owner = favoritesOwner
+        // Limpa a preferência do modo de biblioteca removido nesta versão.
+        prefs.edit().remove("media_store_mode").apply()
         connectController()
         loadPlaylists()
         // Espelha desligar o popup pela notificação → UI / botão do Now Playing / settings
@@ -4346,13 +4289,11 @@ private val _firstPlayedAt = MutableStateFlow(
             // biblioteca em cache: abre na hora; depois scan rápido só de novos/alterados
             val cached = cache.load()
             val allFiles = _allFilesMode.value
-            val mediaStore = _mediaStoreMode.value && hasAudioReadPermission()
             if (cached != null) {
                 _library.value = withContext(Dispatchers.Default) {
                     cached.filter {
                         it.sourceTree in valid ||
-                            (allFiles && it.sourceTree == "all_files") ||
-                            (mediaStore && it.sourceTree == "media_store")
+                            (allFiles && it.sourceTree == "all_files")
                     }
                 }
                 syncFromController()
@@ -4360,13 +4301,13 @@ private val _firstPlayedAt = MutableStateFlow(
                 if (_library.value.isNotEmpty() && controller != null) restorePlaybackState()
                 if (allFiles && _library.value.none { it.sourceTree == "all_files" }) {
                     refreshAllFiles()
-                } else if (valid.isNotEmpty() || allFiles || mediaStore) {
+                } else if (valid.isNotEmpty() || allFiles) {
                     // em segundo plano: procura arquivos novos sem bloquear a UI
                     quickRescanInBackground()
                 }
             } else if (allFiles) {
                 refreshAllFiles()
-            } else if (valid.isNotEmpty() || mediaStore) {
+            } else if (valid.isNotEmpty()) {
                 refreshLibrary()
             }
             restorePlaybackState()
@@ -4421,7 +4362,6 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_SEARCH_HISTORY = "library_search_history"
         const val KEY_ARTIST_AUTO_FETCH_MODE = "artist_auto_fetch_mode"
         const val KEY_ALL_FILES = "all_files_mode"
-        const val KEY_MEDIA_STORE_MODE = "media_store_mode"
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
         const val KEY_AUTO_LYRICS_TARGET = "auto_fetch_lyrics_target"
         const val KEY_PREFER_NETEASE_ROMANIZATION = "prefer_netease_romanization"

@@ -889,7 +889,7 @@ private fun HelpPageLibrarySettings(onNext: () -> Unit, onBack: () -> Unit, hide
             Column {
                 Text("Configurações de biblioteca", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
                 Text(
-                    "Na configuração inicial ou em Configurações → Biblioteca, escolha como ler a biblioteca: Músicas e áudio usa a permissão do Android e o índice MediaStore; pode não encontrar alguns arquivos não indexados (como certos DSF) e não libera gerenciamento geral de arquivos. Acesso a todos os arquivos faz uma busca mais ampla, mas requer a permissão especial do Android.\n\nVocê também encontra o separador de tags, a blacklist de pastas, a duração mínima e as opções Last.fm.",
+                    "Na configuração inicial ou em Configurações → Biblioteca, ative Acesso a todos os arquivos para uma busca ampla ou adicione pastas específicas em Organizar biblioteca. O acesso amplo requer a permissão especial do Android.\n\nVocê também encontra o separador de tags, a blacklist de pastas, a duração mínima e as opções Last.fm.",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
                 OptionalHelpDrawable("help_foto_05")

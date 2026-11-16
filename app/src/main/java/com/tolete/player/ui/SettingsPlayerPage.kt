@@ -406,7 +406,8 @@ internal fun PlayerPage(
             SeekBarStyle.Slim to "Slim — bem fina",
             SeekBarStyle.Liquid to "Liquid — bolha no progresso",
             SeekBarStyle.WavyLiquid to "Wavy Liquid — onda + bolha líquida",
-            SeekBarStyle.Waveform to "Waveform — forma de onda da música"
+            SeekBarStyle.Waveform to "Waveform — forma de onda da música",
+            SeekBarStyle.Glass to "Glass — vidro fumê + progresso champagne"
         )
         seekStyles.forEach { (style, label) ->
             val selected = seekBarStyle == style
