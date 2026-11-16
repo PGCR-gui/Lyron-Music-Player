@@ -61,6 +61,7 @@ internal fun themeLabel(id: AppThemeId) = when (id) {
     AppThemeId.EMBER -> "Ember"
     AppThemeId.AMOLED -> "AMOLED"
     AppThemeId.TWILIGHT -> "Twilight"
+    AppThemeId.PHOTO -> "Por foto"
 }
 
 
@@ -98,10 +99,22 @@ internal fun AppearancePage(
     shareBrandColor: Int = 0xFFFFFFFF.toInt(),
     onShareBrandColorChange: (Int) -> Unit = {},
     menuVisualStyle: MenuVisualStyle = MenuVisualStyle.COLORFUL,
-    onMenuVisualStyleChange: (MenuVisualStyle) -> Unit = {}
+    onMenuVisualStyleChange: (MenuVisualStyle) -> Unit = {},
+    photoThemePath: String? = null,
+    onPickPhotoTheme: () -> Unit = {},
+    onClearPhotoTheme: () -> Unit = {},
+    photoThemeBlur: Float = 0.55f,
+    onPhotoThemeBlurChange: (Float) -> Unit = {},
+    dynamicAlbumBlur: Boolean = false,
+    onDynamicAlbumBlurChange: (Boolean) -> Unit = {},
+    alphabetScrollerStyle: MusicViewModel.AlphabetScrollerStyle = MusicViewModel.AlphabetScrollerStyle.GLASS,
+    onAlphabetScrollerStyleChange: (MusicViewModel.AlphabetScrollerStyle) -> Unit = {},
+    waveformTheme: WaveformTheme = WaveformTheme.BARS,
+    onWaveformThemeChange: (WaveformTheme) -> Unit = {}
 ) {
     val themes = listOf(
         AppThemeId.DYNAMIC to "Dinâmico",
+        AppThemeId.PHOTO to "Por foto",
         AppThemeId.DEFAULT to "Padrão",
         AppThemeId.AQUA to "Aqua",
         AppThemeId.SUNSET to "Sunset",
@@ -143,12 +156,18 @@ internal fun AppearancePage(
                 )
                 Column(Modifier.weight(1f).padding(start = 14.dp)) {
                     Text(label, fontSize = 16.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
-                    if (id == AppThemeId.DYNAMIC) {
-                        Text(
+                    when (id) {
+                        AppThemeId.DYNAMIC -> Text(
                             "Cores da capa flutuam enquanto toca",
                             fontSize = 12.sp,
                             color = Color.White.copy(0.5f)
                         )
+                        AppThemeId.PHOTO -> Text(
+                            "Fundo borrado a partir de uma foto sua",
+                            fontSize = 12.sp,
+                            color = Color.White.copy(0.5f)
+                        )
+                        else -> {}
                     }
                 }
                 if (selected) {
@@ -203,6 +222,79 @@ internal fun AppearancePage(
                 )
             }
         }
+        if (themeId == AppThemeId.PHOTO) {
+            item {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Tema por foto",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                )
+                Text(
+                    "Escolha uma imagem para o fundo borrado. Enquanto toca, as cores da capa dominam o tema.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(onClick = onPickPhotoTheme) {
+                        Text(if (photoThemePath.isNullOrBlank()) "Escolher foto" else "Trocar foto")
+                    }
+                    if (!photoThemePath.isNullOrBlank()) {
+                        TextButton(onClick = onClearPhotoTheme) {
+                            Text("Remover")
+                        }
+                    }
+                }
+                if (!photoThemePath.isNullOrBlank()) {
+                    Text(
+                        "Foto salva ✓",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(0.55f),
+                        modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)
+                    )
+                }
+                Text(
+                    "Nível de blur: ${(photoThemeBlur * 100).toInt()}%",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                )
+                Slider(
+                    value = photoThemeBlur,
+                    onValueChange = onPhotoThemeBlurChange,
+                    valueRange = 0f..1f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(0.05f))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Usar capa enquanto toca", fontSize = 15.sp, color = Color.White)
+                        Text(
+                            "Substitui a foto escolhida pela capa do álbum durante a reprodução.",
+                            fontSize = 12.sp,
+                            color = Color.White.copy(0.5f)
+                        )
+                    }
+                    Switch(
+                        checked = dynamicAlbumBlur,
+                        onCheckedChange = onDynamicAlbumBlurChange
+                    )
+                }
+            }
+        }
         if (themeId == AppThemeId.DYNAMIC) {
             item {
                 Spacer(Modifier.height(12.dp))
@@ -235,7 +327,7 @@ internal fun AppearancePage(
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
                 Text(
-                    "Estas cores derivam lentamente no fundo do tema dinâmico. Vazio = usa as cores da capa automaticamente.",
+                    "Estas cores derivam lentamente no fundo do tema dinâmico quando não há música tocando. A partir de 3 cores podem ofuscar os ícones flutuantes.",
                     fontSize = 12.sp,
                     color = Color.White.copy(0.45f),
                     modifier = Modifier.padding(bottom = 10.dp)
@@ -394,6 +486,102 @@ internal fun AppearancePage(
                     checked = floatingIconsEnabled,
                     onCheckedChange = onFloatingIconsChange
                 )
+            }
+
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Índice alfabético",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Text(
+                "Escolha entre o trilho de vidro, a faixa clássica de letras (A–Z) ou a barra fina Slim.",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.45f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            listOf(
+                MusicViewModel.AlphabetScrollerStyle.GLASS to ("Vidro" to "Trilho com língua e detalhe de prefixos."),
+                MusicViewModel.AlphabetScrollerStyle.CLASSIC to ("Clássico" to "Faixa vertical simples de letras, como em apps de música."),
+                MusicViewModel.AlphabetScrollerStyle.SLIM to ("Slim" to "Barra fina que acompanha a rolagem; ao arrastar, destaca a inicial escolhida.")
+            ).forEach { (style, copy) ->
+                val selected = alphabetScrollerStyle == style
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.04f))
+                        .clickable { onAlphabetScrollerStyleChange(style) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(copy.first, fontSize = 15.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, color = Color.White)
+                        Text(copy.second, fontSize = 12.sp, color = Color.White.copy(0.58f))
+                    }
+                    if (selected) Text("✓", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // --- Tema da forma de onda (cortadores de áudio) ---
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Forma de onda dos cortadores de áudio",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Text(
+                "Estilo da waveform no editor de trecho dos vídeos (Retrospectiva e letra em vídeo). " +
+                    "Todos os estilos, exceto Multicolor, usam a cor dominante do tema atual.",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.45f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            val waveAccent = LocalAppColors.current.accent
+            WaveformTheme.values().forEach { option ->
+                val selected = waveformTheme == option
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.04f))
+                        .clickable { onWaveformThemeChange(option) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            option.label,
+                            fontSize = 15.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            color = Color.White
+                        )
+                        Text(option.description, fontSize = 12.sp, color = Color.White.copy(0.58f))
+                    }
+                    WaveformThemePreview(
+                        theme = option,
+                        accent = waveAccent,
+                        modifier = Modifier
+                            .padding(start = 10.dp)
+                            .width(92.dp)
+                            .height(44.dp)
+                    )
+                    if (selected) {
+                        Text(
+                            "✓",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 10.dp)
+                        )
+                    }
+                }
             }
 
             // --- Botões da tela Início ---

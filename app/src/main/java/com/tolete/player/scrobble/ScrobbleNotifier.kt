@@ -34,6 +34,9 @@ object ScrobbleNotifier {
     const val ACTION_REFRESH = "com.tolete.player.SCROBBLE_REFRESH"
     /** Toque no corpo da notificação: o app abre o dashboard do Last.fm. */
     const val ACTION_OPEN_LASTFM_DASHBOARD = "com.tolete.player.OPEN_LASTFM_DASHBOARD"
+    /** Toque no aviso Now Playing: abre o cartão Last.fm da faixa no próprio Now Playing. */
+    const val ACTION_OPEN_NOW_PLAYING_LASTFM_INFO = "com.tolete.player.OPEN_NOW_PLAYING_LASTFM_INFO"
+    const val EXTRA_NOTIFICATION_TRACK_ID = "com.tolete.player.extra.NOTIFICATION_TRACK_ID"
     /** @deprecated Mantido só por compatibilidade com PendingIntents antigos. */
     const val ACTION_SHOW_TRACK_INFO = ACTION_OPEN_LASTFM_DASHBOARD
 
@@ -102,12 +105,12 @@ object ScrobbleNotifier {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(
-                // Request code próprio (10): o PendingIntent da sessão de mídia usa o 0 e o mesmo
-                // destino, e com UPDATE_CURRENT um sobrescreveria os extras do outro.
+                // Request code próprio para não colidir com os PendingIntents da sessão de mídia.
                 PendingIntent.getActivity(
-                    ctx, 10,
+                    ctx, 12,
                     Intent(ctx, MainActivity::class.java).apply {
-                        action = ACTION_OPEN_LASTFM_DASHBOARD
+                        action = ACTION_OPEN_NOW_PLAYING_LASTFM_INFO
+                        track?.id?.let { putExtra(EXTRA_NOTIFICATION_TRACK_ID, it) }
                         flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

@@ -2,13 +2,27 @@ package com.tolete.player.video
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Log
 import com.tolete.player.data.LibraryCache
 import com.tolete.player.data.RetrospectiveCardRenderer
 import com.tolete.player.data.RetrospectivePhotoGenerator
 import com.tolete.player.data.Track
+import android.content.Intent
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -19,7 +33,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
- * Gera vídeos de 3–15s (padrão 8s; 1080×1920 @ 30 ou 60fps) para cada card da retrospectiva:
+ * Gera vídeos (padrão 8s; trecho escolhido à mão sem limite máximo; 1080×1920 @ 30 ou 60fps) para cada card da retrospectiva:
  * fundo na cor primária da capa/tema, formas e ícones flutuantes, texto/fotos do card,
  * marca d’água Lyron e áudio (faixas listadas ou regra especial do card).
  */
@@ -30,17 +44,39 @@ object RetrospectiveVideoGenerator {
     private const val H = 1920
     const val FPS_30 = 30
     const val FPS_60 = 60
+    /** Faixa do controle de duração padrão (cards sem trecho escolhido à mão). */
     const val MIN_DURATION_SEC = 3
     const val MAX_DURATION_SEC = 15
     const val DEFAULT_DURATION_SEC = 8
 
-    /** Escolhas do usuário: duração, FPS e música por card; card sem escolha usa a automática. */
+    /**
+     * Duração mínima do trecho que o usuário corta em cada música (define a duração do vídeo).
+     * Não há duração máxima: o trecho pode ir até a música inteira.
+     */
+    const val MIN_CLIP_SEC = 3
+
+    /** Início do corte automático: mesma regra usada no render, para o editor abrir no mesmo ponto. */
+    fun autoStartMs(trackDurationMs: Long, clipMs: Long): Long {
+        val dur = trackDurationMs.coerceAtLeast(clipMs + 500)
+        return if (dur > clipMs + 1000) ((dur - clipMs) / 3).coerceAtLeast(0L) else 0L
+    }
+
+    /** Trecho da música escolhido à mão; a duração do vídeo do card é [durationMs]. */
+    data class CardClip(val startMs: Long, val endMs: Long) {
+        val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
+    }
+
+    /**
+     * Escolhas do usuário: duração padrão, FPS, música e trecho por card.
+     * Card sem trecho em [clipByCard] usa [durationSec] e o corte automático.
+     */
     data class VideoOptions(
         val durationSec: Int = DEFAULT_DURATION_SEC,
         val audioByCard: Map<String, Track> = emptyMap(),
-        /** Início do trecho em ms para escolhas manuais; ausente = corte automático. */
-        val audioStartMsByCard: Map<String, Long> = emptyMap(),
-        val fps: Int = FPS_30
+        val clipByCard: Map<String, CardClip> = emptyMap(),
+        val fps: Int = FPS_30,
+        /** Se não for null, só estes cards (ids "001"…"010") são renderizados; null = todos. */
+        val onlyCardIds: Set<String>? = null
     )
 
     /** Como a música de um card pode ser escolhida. */
@@ -50,7 +86,9 @@ object RetrospectiveVideoGenerator {
         val cardId: String,
         val label: String,
         val kind: AudioKind,
-        val candidates: List<Track>
+        val candidates: List<Track>,
+        /** Para cards LOCKED: a música fixa do card (não dá para trocar, mas dá para escolher o trecho). */
+        val lockedTrack: Track? = null
     )
 
     data class CardSpec(
@@ -69,8 +107,265 @@ object RetrospectiveVideoGenerator {
 
     @Volatile
     private var cancelFlag = false
+    private var nextGenerationId = 0L
+    private var activeGenerationId = 0L
 
-    fun cancel() { cancelFlag = true }
+    /** Estado global: a geração roda fora da tela, então sobrevive a recriação da Activity. */
+    sealed interface State {
+        object Idle : State
+        data class Running(
+            val index: Int,
+            val total: Int,
+            val frac: Float,
+            val title: String = "",
+            val stage: String = "Preparando…",
+            val overallFrac: Float = frac,
+            val batch: Boolean = total > 1,
+            val generationId: Long = 0L
+        ) : State
+        data class Finished(val result: Result, val generationId: Long = 0L) : State
+        data class Failed(val message: String, val generationId: Long = 0L) : State
+    }
+
+    private val _state = MutableStateFlow<State>(State.Idle)
+    val state: StateFlow<State> = _state
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var job: Job? = null
+
+    fun isRunning(): Boolean = _state.value is State.Running
+
+    /** Limpa Finished/Failed depois que a tela tratou o resultado. */
+    fun consume() {
+        if (_state.value !is State.Running) _state.value = State.Idle
+    }
+
+    fun cancel() {
+        cancelFlag = true
+        (_state.value as? State.Running)?.let { running ->
+            _state.value = running.copy(stage = "Cancelando…")
+        }
+    }
+
+    private fun newGenerationId(): Long = synchronized(this) {
+        (++nextGenerationId).also { activeGenerationId = it }
+    }
+
+    private fun publishProgress(
+        generationId: Long,
+        index: Int,
+        total: Int,
+        frac: Float,
+        title: String,
+        stage: String,
+        batch: Boolean
+    ) {
+        if (generationId != activeGenerationId) return
+        val safeTotal = total.coerceAtLeast(1)
+        val safeFrac = frac.coerceIn(0f, 1f)
+        _state.value = State.Running(
+            index = index,
+            total = safeTotal,
+            frac = safeFrac,
+            title = title,
+            stage = if (cancelFlag) "Cancelando…" else stage,
+            overallFrac = ((index + safeFrac) / safeTotal).coerceIn(0f, 1f),
+            batch = batch,
+            generationId = generationId
+        )
+    }
+
+    /**
+     * Inicia a geração em escopo próprio do app, com serviço em primeiro plano (notificação de
+     * progresso) e WakeLock, para o sistema não matar o processo no meio da renderização.
+     */
+    fun start(
+        context: Context,
+        exportDir: File,
+        libraryTracks: List<Track>? = null,
+        theme: RetrospectiveCardRenderer.ThemeColors? = null,
+        options: VideoOptions = VideoOptions()
+    ): Boolean {
+        if (isRunning()) return false
+        val app = context.applicationContext
+        cancelFlag = false
+        val generationId = newGenerationId()
+        publishProgress(generationId, 0, 1, 0f, "Retrospectiva", "Preparando vídeos…", true)
+        try {
+            ContextCompat.startForegroundService(app, Intent(app, RetrospectiveVideoService::class.java))
+        } catch (e: Exception) {
+            Log.w(TAG, "Não foi possível iniciar o serviço de progresso", e)
+        }
+        job = scope.launch {
+            val wl = try {
+                (app.getSystemService(Context.POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "lyron:retrovideo")
+                    .apply { acquire(60 * 60 * 1000L) }
+            } catch (_: Exception) {
+                null
+            }
+            try {
+                val result = generateAll(app, exportDir, libraryTracks, theme, options) { idx, total, frac, title, stage ->
+                    publishProgress(generationId, idx, total, frac, title, stage, true)
+                }
+                _state.value = State.Finished(result, generationId)
+            } catch (e: CancellationException) {
+                _state.value = State.Failed("cancelado", generationId)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Geração dos vídeos falhou", t)
+                _state.value = State.Failed(t.message ?: t.javaClass.simpleName, generationId)
+            } finally {
+                try {
+                    if (wl?.isHeld == true) wl.release()
+                } catch (_: Exception) { }
+            }
+        }
+        return true
+    }
+
+    /** Gera um vídeo para um info card do Last.fm, usando o mesmo pipeline H.264/AAC/MP4. */
+    fun startCardVideo(
+        context: Context,
+        cardImage: File,
+        audioTrack: Track,
+        clip: CardClip,
+        output: File
+    ): Boolean {
+        if (isRunning()) return false
+        if (!cardImage.isFile) return false
+        val app = context.applicationContext
+        cancelFlag = false
+        val generationId = newGenerationId()
+        publishProgress(generationId, 0, 1, 0f, audioTrack.title, "Preparando vídeo…", false)
+        try {
+            ContextCompat.startForegroundService(app, Intent(app, RetrospectiveVideoService::class.java))
+        } catch (e: Exception) {
+            Log.w(TAG, "Não foi possível iniciar o serviço de progresso", e)
+        }
+        job = scope.launch {
+            val wl = try {
+                (app.getSystemService(Context.POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "lyron:lfcardvideo")
+                    .apply { acquire(60 * 60 * 1000L) }
+            } catch (_: Exception) {
+                null
+            }
+            try {
+                renderInfoCardVideo(app, cardImage, audioTrack, clip, output) { frac ->
+                    publishProgress(
+                        generationId, 0, 1, frac, audioTrack.title,
+                        if (frac >= 1f) "Finalizando vídeo…" else "Renderizando vídeo", false
+                    )
+                }
+                _state.value = State.Finished(
+                    Result(output.parentFile ?: app.cacheDir, listOf(output), emptyList()), generationId
+                )
+            } catch (e: CancellationException) {
+                output.delete()
+                _state.value = State.Failed("cancelado", generationId)
+            } catch (t: Throwable) {
+                output.delete()
+                Log.e(TAG, "Geração do vídeo do info card falhou", t)
+                _state.value = State.Failed(
+                    if (cancelFlag) "cancelado" else (t.message ?: t.javaClass.simpleName), generationId
+                )
+            } finally {
+                try {
+                    if (wl?.isHeld == true) wl.release()
+                } catch (_: Exception) { }
+            }
+        }
+        return true
+    }
+
+    /** Renderiza uma imagem de info card em movimento suave e adiciona o trecho escolhido. */
+    private suspend fun renderInfoCardVideo(
+        app: Context,
+        cardImage: File,
+        audioTrack: Track,
+        clip: CardClip,
+        out: File,
+        onProgress: (Float) -> Unit
+    ) = coroutineScope {
+        val durationMs = clip.durationMs.coerceAtLeast(1L)
+        val startMs = clip.startMs.coerceIn(0L, (audioTrack.duration - durationMs).coerceAtLeast(0L))
+        val endMs = (startMs + durationMs).coerceAtMost(audioTrack.duration.coerceAtLeast(durationMs))
+        val actualDurationMs = (endMs - startMs).coerceAtLeast(1L)
+        val fps = FPS_30
+        val totalFrames = (actualDurationMs * fps / 1000L).toInt().coerceAtLeast(1)
+        val cache = File(app.cacheDir, "retro_video").apply { mkdirs() }
+        val stamp = System.currentTimeMillis()
+        val videoTmp = File(cache, "lf_card_v_$stamp.mp4")
+        val audioTmp = File(cache, "lf_card_a_$stamp.m4a")
+        val bitrate = (W.toLong() * H * fps * 0.10).toInt().coerceIn(2_500_000, 12_000_000)
+        out.parentFile?.mkdirs()
+
+        val glExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "lyron-lf-card-gl") }
+        val glDispatcher = glExecutor.asCoroutineDispatcher()
+        try {
+            val audioJob = async(Dispatchers.IO) {
+                AudioClipEncoder(app).encode(
+                    uri = audioTrack.uri,
+                    startMs = startMs,
+                    endMs = endMs,
+                    muxer = AudioMuxer(audioTmp),
+                    fadeEdges = true,
+                    cancelled = { cancelFlag }
+                )
+            }
+
+            val videoJob = async(glDispatcher) {
+                val card = BitmapFactory.decodeFile(cardImage.absolutePath)
+                    ?: throw java.io.IOException("Não foi possível abrir a imagem do info card")
+                val frame = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(frame)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                val muxer = VideoMuxer(videoTmp)
+                var encoder: GlVideoEncoder? = null
+                var finished = false
+                try {
+                    encoder = GlVideoEncoder(W, H, fps, bitrate, muxer, gles3 = false)
+                    for (i in 0 until totalFrames) {
+                        if (cancelFlag) throw CancellationException("cancelado")
+                        val p = if (totalFrames <= 1) 1f else i.toFloat() / (totalFrames - 1)
+                        val zoom = 1.015f + 0.045f * p
+                        val dw = W * zoom
+                        val dh = H * zoom
+                        canvas.drawColor(Color.BLACK)
+                        canvas.drawBitmap(
+                            card, null,
+                            RectF((W - dw) / 2f, (H - dh) / 2f, (W + dw) / 2f, (H + dh) / 2f),
+                            paint
+                        )
+                        encoder!!.encodeFrame(frame, i * 1_000_000_000L / fps)
+                        if (i % (fps / 2).coerceAtLeast(1) == 0) onProgress(i.toFloat() / totalFrames)
+                    }
+                    encoder!!.finish()
+                    finished = true
+                } finally {
+                    if (!finished) encoder?.release()
+                    frame.recycle()
+                    card.recycle()
+                    // Escreve o índice final MP4 antes do remux.
+                    muxer.finish()
+                }
+            }
+
+            videoJob.await()
+            audioJob.await()
+            if (!audioTmp.isFile || audioTmp.length() <= 512L) {
+                throw java.io.IOException("O trecho de música não pôde ser codificado")
+            }
+            AvMuxer.mux(videoTmp, audioTmp, out) { cancelFlag }
+            if (!out.isFile || out.length() < 1024L) throw java.io.IOException("Vídeo MP4 inválido")
+            onProgress(1f)
+        } finally {
+            glDispatcher.close()
+            videoTmp.delete()
+            audioTmp.delete()
+            cardImage.delete()
+        }
+    }
 
     /**
      * Lê [manifest.json] na pasta da retrospectiva e gera `001.mp4` … `010.mp4`.
@@ -82,10 +377,10 @@ object RetrospectiveVideoGenerator {
         libraryTracks: List<Track>? = null,
         theme: RetrospectiveCardRenderer.ThemeColors? = null,
         options: VideoOptions = VideoOptions(),
-        onProgress: (cardIndex: Int, total: Int, frac: Float) -> Unit = { _, _, _ -> }
+        onProgress: (cardIndex: Int, total: Int, frac: Float, title: String, stage: String) -> Unit =
+            { _, _, _, _, _ -> }
     ): Result = withContext(Dispatchers.IO) {
-        cancelFlag = false
-        val durationMs = options.durationSec.coerceIn(MIN_DURATION_SEC, MAX_DURATION_SEC) * 1000L
+        val defaultDurationMs = options.durationSec.coerceIn(MIN_DURATION_SEC, MAX_DURATION_SEC) * 1000L
         val fps = if (options.fps == FPS_60) FPS_60 else FPS_30
         val app = context.applicationContext
         val manifestFile = File(exportDir, "manifest.json")
@@ -93,7 +388,7 @@ object RetrospectiveVideoGenerator {
 
         val root = JSONObject(manifestFile.readText())
         val cardsArr = root.getJSONArray("cards")
-        val cards = buildList {
+        val cards = buildList<CardSpec> {
             for (i in 0 until cardsArr.length()) {
                 val o = cardsArr.getJSONObject(i)
                 add(
@@ -106,6 +401,9 @@ object RetrospectiveVideoGenerator {
                     )
                 )
             }
+        }.let { all ->
+            val only = options.onlyCardIds
+            if (only == null) all else all.filter { it.id in only }
         }
 
         val tracks = libraryTracks ?: LibraryCache(app).load().orEmpty()
@@ -130,17 +428,26 @@ object RetrospectiveVideoGenerator {
                 failed += "cancelado"
                 break
             }
-            onProgress(index, cards.size, 0f)
+            val cardTitle = cardLabels[card.id] ?: card.title.ifBlank { "Card ${card.id}" }
+            onProgress(index, cards.size, 0f, cardTitle, "Preparando card…")
             try {
-                // Card 005 (música mais ouvida) sempre usa a própria música; os demais aceitam escolha manual.
+                // Card 005 (música mais ouvida) sempre usa a própria música (só o trecho é editável).
                 val audioTrack = (if (card.id == "005") null else options.audioByCard[card.id])
                     ?: resolveAudioTrack(card, tracks, topTracks, topArtists, topAlbums)
-                val manualStartMs = if (card.id == "005") null else options.audioStartMsByCard[card.id]
+                // Trecho escolhido à mão: define a duração do vídeo deste card.
+                val clip = audioTrack?.let { options.clipByCard[card.id] }
+                val durationMs = clip?.durationMs
+                    ?.coerceAtLeast(MIN_CLIP_SEC * 1000L)
+                    ?: defaultDurationMs
+                val manualStartMs = clip?.startMs
                 val model = models.firstOrNull { it.id == card.id }
                     ?: throw IllegalStateException("modelo do card ${card.id} não encontrado")
                 val out = File(exportDir, "${card.id}.mp4")
                 renderCardVideo(app, card, model, audioTrack, manualStartMs, durationMs, fps, out) { f ->
-                    onProgress(index, cards.size, f)
+                    onProgress(
+                        index, cards.size, f, cardTitle,
+                        if (f >= 1f) "Finalizando vídeo…" else "Renderizando vídeo"
+                    )
                 }
                 if (cancelFlag) {
                     out.delete()
@@ -149,13 +456,20 @@ object RetrospectiveVideoGenerator {
                 }
                 if (out.isFile && out.length() > 1024L) videos += out
                 else failed += card.id
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                File(exportDir, "${card.id}.mp4").delete()
+                failed += "cancelado"
+                break
+            } catch (t: Throwable) {
+                // Inclui OutOfMemoryError: o card falha, mas o app não fecha.
                 if (cancelFlag) {
+                    File(exportDir, "${card.id}.mp4").delete()
                     failed += "cancelado"
                     break
                 }
-                Log.e(TAG, "Card ${card.id} falhou", e)
-                failed += "${card.id}: ${e.message}"
+                Log.e(TAG, "Card ${card.id} falhou", t)
+                failed += "${card.id}: ${t.message ?: t.javaClass.simpleName}"
+                System.gc()
             }
         }
         Result(exportDir, videos, failed)
@@ -227,7 +541,10 @@ object RetrospectiveVideoGenerator {
                 val label = cardLabels[id] ?: id
                 add(
                     when (id) {
-                        "005" -> CardAudioOptions(id, label, AudioKind.LOCKED, emptyList())
+                        "005" -> CardAudioOptions(
+                            id, label, AudioKind.LOCKED, emptyList(),
+                            lockedTrack = topTracks.firstOrNull()?.let { matchTrack(library, it.name, it.artist) }
+                        )
                         "003" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, mostHeardArtist)
                         "004" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, listedArtists)
                         "006" -> CardAudioOptions(id, label, AudioKind.RESTRICTED, listedTracks)
@@ -330,9 +647,7 @@ object RetrospectiveVideoGenerator {
                 if (audioTrack != null) {
                     val dur = audioTrack.duration.coerceAtLeast(durationMs + 500)
                     val start = manualStartMs?.coerceIn(0L, (audioTrack.duration - durationMs).coerceAtLeast(0L))
-                        ?: if (dur > durationMs + 1000) {
-                        ((dur - durationMs) / 3).coerceAtLeast(0L)
-                    } else 0L
+                        ?: autoStartMs(audioTrack.duration, durationMs)
                     val end = (start + durationMs).coerceAtMost(dur)
                     try {
                         AudioClipEncoder(app).encode(
@@ -341,9 +656,9 @@ object RetrospectiveVideoGenerator {
                             endMs = end,
                             muxer = AudioMuxer(audioTmp),
                             fadeEdges = true,
-                            cancelled = { false }
+                            cancelled = { cancelFlag }
                         )
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Log.w(TAG, "Áudio do card ${card.id} falhou", e)
                         audioTmp.delete()
                     }
@@ -382,7 +697,7 @@ object RetrospectiveVideoGenerator {
             audioJob.await()
 
             val hasAudio = audioTmp.isFile && audioTmp.length() > 512L
-            AvMuxer.mux(videoTmp, if (hasAudio) audioTmp else null, out) { false }
+            AvMuxer.mux(videoTmp, if (hasAudio) audioTmp else null, out) { cancelFlag }
             if (!out.exists() || out.length() < 1024L) {
                 throw java.io.IOException("Vídeo inválido para card ${card.id}")
             }

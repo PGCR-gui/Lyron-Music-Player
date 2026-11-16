@@ -13,6 +13,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -41,16 +43,23 @@ import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -87,6 +96,7 @@ import coil.compose.AsyncImage
 import com.tolete.player.data.ArtistImageResolver
 import com.tolete.player.data.ArtistMetaStore
 import com.tolete.player.data.LastFmClient
+import com.tolete.player.data.LastFmHistoryStore
 import com.tolete.player.data.LastFmClient.ChartItem
 import com.tolete.player.data.LastFmClient.ChartKind
 import com.tolete.player.data.LastFmClient.ScrobbleItem
@@ -97,6 +107,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -130,10 +141,13 @@ private val lfTabs = listOf(
  * resultado; assim, o nome que está no Last.fm leva de volta à faixa local, e mostramos as
  * tags originais (título/artista/álbum do arquivo).
  */
-private class OriginalResolver(tracks: List<Track>) {
+internal class OriginalResolver(tracks: List<Track>) {
     private val trackByKey = HashMap<String, Track>(tracks.size * 2)
     private val artistByKey = HashMap<String, String>()
     private val albumByKey = HashMap<String, Pair<String, String>>()
+    private val sentTrackByOriginalKey = HashMap<String, Pair<String, String>>()
+    private val sentArtistByOriginalKey = HashMap<String, String>()
+    private val sentAlbumByOriginalKey = HashMap<String, Pair<String, String>>()
     private val albumArtByKey = HashMap<String, String>()
     private val artistCoverByKey = HashMap<String, String>()
 
@@ -141,6 +155,15 @@ private class OriginalResolver(tracks: List<Track>) {
         // 1) como o Last.fm recebeu (edições + regras automáticas)
         for (t in tracks) {
             val m = LastFmScrobbler.metaFor(t)
+            val localArtist = ScrobbleEdits.firstArtist(t.artist)
+            sentTrackByOriginalKey.putIfAbsent(ScrobbleEdits.key(localArtist, t.title), m.artist to m.track)
+            sentArtistByOriginalKey.putIfAbsent(ScrobbleEdits.key(localArtist, ""), m.artist)
+            if (t.album.isNotBlank() && m.album.isNotBlank()) {
+                val localAlbumArtist = ScrobbleEdits.firstArtist(t.albumArtist.ifBlank { t.artist })
+                val sentAlbumArtist = m.albumArtist.ifBlank { m.artist }
+                sentAlbumByOriginalKey.putIfAbsent(ScrobbleEdits.key(localAlbumArtist, t.album), sentAlbumArtist to m.album)
+                sentAlbumByOriginalKey.putIfAbsent(ScrobbleEdits.key(localArtist, t.album), sentAlbumArtist to m.album)
+            }
             trackByKey.putIfAbsent(ScrobbleEdits.key(m.artist, m.track), t)
             artistByKey.putIfAbsent(ScrobbleEdits.key(m.artist, ""), t.artist)
             t.artPath?.takeIf { it.isNotBlank() }?.let { p ->
@@ -182,6 +205,10 @@ private class OriginalResolver(tracks: List<Track>) {
         return ScrobbleEdits.firstArtist(artist) to title
     }
 
+    /** Faixa local que originou um nome Last.fm/original, para pesquisar também metadados antigos. */
+    fun trackRef(artist: String, title: String): Track? =
+        trackByKey[ScrobbleEdits.key(artist, title)]
+
     /** Sempre um único artista: o primeiro, pelos separadores da Biblioteca. */
     fun artist(name: String): String =
         ScrobbleEdits.firstArtist(artistByKey[ScrobbleEdits.key(name, "")] ?: name)
@@ -203,6 +230,17 @@ private class OriginalResolver(tracks: List<Track>) {
     fun album(artist: String, album: String): Pair<String, String> =
         (albumByKey[ScrobbleEdits.key(artist, album)] ?: (artist to album))
             .let { (a, al) -> ScrobbleEdits.firstArtist(a) to al }
+
+    /** Identificadores para consultar no Last.fm, sem aplicar a reversão usada nos rótulos. */
+    fun scrobbleTrack(artist: String, title: String): Pair<String, String> =
+        sentTrackByOriginalKey[ScrobbleEdits.key(artist, title)]
+            ?: ScrobbleEdits.apply(ScrobbleEdits.Meta(title, artist, "", "")).let { it.artist to it.track }
+
+    fun scrobbleArtist(artist: String): String =
+        sentArtistByOriginalKey[ScrobbleEdits.key(artist, "")] ?: artist
+
+    fun scrobbleAlbum(artist: String, album: String): Pair<String, String> =
+        sentAlbumByOriginalKey[ScrobbleEdits.key(artist, album)] ?: (artist to album)
 }
 
 private fun mergeTracks(items: List<ChartItem>, r: OriginalResolver?): List<ChartItem> {
@@ -287,6 +325,13 @@ private data class RawData(
     val tracks: List<ChartItem>,
     val artists: List<ChartItem>,
     val albums: List<ChartItem>
+)
+
+private data class DetailTarget(
+    val artist: String,
+    val title: String,
+    val album: String? = null,
+    val mode: String = "track"
 )
 
 private val weekdayNames = arrayOf("Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb")
@@ -448,13 +493,51 @@ fun LastFmDashboardScreen(
     appColors: AppColors,
     onBack: () -> Unit
 ) {
+    val retroVideoState by com.tolete.player.video.RetrospectiveVideoGenerator.state.collectAsState()
+    val retroVideoRunning = retroVideoState as? com.tolete.player.video.RetrospectiveVideoGenerator.State.Running
+    var hiddenCardVideoGeneration by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(retroVideoRunning?.generationId) { hiddenCardVideoGeneration = null }
     // Back tratado em TolereApp (com prioridade sobre Now Playing quando ambos abertos).
     // Mantém handler local desabilitado via callback do pai quando NP está aberto.
 
     val user by LastFmScrobbler.username.collectAsStateWithLifecycle()
     val editsVersion by ScrobbleEdits.version.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(LfTab.SCROBBLES) }
-    var refreshKey by remember { mutableIntStateOf(0) }
+    val expiredOnEntry = remember(user) {
+        user?.takeIf { it.isNotBlank() }?.let(LastFmClient::beginDashboardSession) ?: false
+    }
+    var refreshKey by remember(user) { mutableIntStateOf(if (expiredOnEntry) 1 else 0) }
+    val context = LocalContext.current
+
+    // Sobe a cada sync que realmente alterou o CSV, para a lista de scrobbles recarregar
+    var historyVersion by remember(user) { mutableIntStateOf(0) }
+    val syncScope = rememberCoroutineScope()
+
+    suspend fun syncHistory(u: String) {
+        val changed = withContext(Dispatchers.IO) {
+            try {
+                val before = LastFmHistoryStore.csvFile().let { it.lastModified() to it.length() }
+                LastFmHistoryStore.syncOrAwait(context, u)
+                val after = LastFmHistoryStore.csvFile().let { it.lastModified() to it.length() }
+                before != after
+            } catch (_: Exception) { false }
+        }
+        if (changed) historyVersion++
+    }
+
+    // Ao abrir o dashboard: atualiza lastfm history.csv (incremental) em segundo plano
+    LaunchedEffect(user) {
+        val u = user?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        syncHistory(u)
+    }
+
+    LaunchedEffect(user, refreshKey) {
+        if (user.isNullOrBlank()) return@LaunchedEffect
+        delay(LastFmClient.DASHBOARD_CACHE_TTL_MS)
+        LastFmClient.clearReadCache()
+        LastFmClient.touchDashboardAccess(user!!)
+        refreshKey++
+    }
 
     // Índice dos nomes originais; refeito quando a biblioteca ou as edições mudam
     val resolver by produceState<OriginalResolver?>(null, tracks, editsVersion) {
@@ -501,7 +584,13 @@ fun LastFmDashboardScreen(
                             Text("@$it", fontSize = 12.sp, color = Color.White.copy(0.6f), maxLines = 1)
                         }
                     }
-                    IconButton(onClick = { refreshKey++ }) {
+                    IconButton(onClick = {
+                        LastFmClient.clearReadCache()
+                        user?.takeIf { it.isNotBlank() }?.let(LastFmClient::touchDashboardAccess)
+                        refreshKey++
+                        // Botão de atualizar também baixa os scrobbles novos para o CSV
+                        user?.takeIf { it.isNotBlank() }?.let { u -> syncScope.launch { syncHistory(u) } }
+                    }) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Atualizar", tint = appColors.accent)
                     }
                 }
@@ -518,7 +607,7 @@ fun LastFmDashboardScreen(
                 } else {
                     Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
                         when (tab) {
-                            LfTab.SCROBBLES -> ScrobbleList(u, false, refreshKey, resolver, appColors, navPadding)
+                            LfTab.SCROBBLES -> ScrobbleList(u, false, refreshKey + historyVersion, resolver, appColors, navPadding)
                             LfTab.LOVED -> ScrobbleList(u, true, refreshKey, resolver, appColors, navPadding)
                             LfTab.DATA -> DataTab(u, refreshKey, resolver, appColors, navPadding)
                             LfTab.PROFILE -> ProfileTab(u, refreshKey, resolver, appColors, navPadding)
@@ -539,6 +628,17 @@ fun LastFmDashboardScreen(
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 10.dp)
         )
+        // Os vídeos em lote têm seu diálogo no RetrospectiveExportSheet; esta é a única
+        // instância para os geradores individuais dos info cards Last.fm.
+        if (retroVideoRunning != null && !retroVideoRunning.batch &&
+            hiddenCardVideoGeneration != retroVideoRunning.generationId
+        ) {
+            RetrospectiveVideoProgressDialog(
+                running = retroVideoRunning,
+                onCancel = { com.tolete.player.video.RetrospectiveVideoGenerator.cancel() },
+                onHide = { hiddenCardVideoGeneration = retroVideoRunning.generationId }
+            )
+        }
     }
 }
 
@@ -561,23 +661,48 @@ private fun ScrobbleList(
     var total by remember(user, loved, refreshKey) { mutableIntStateOf(0) }
     var loading by remember(user, loved, refreshKey) { mutableStateOf(false) }
     var failed by remember(user, loved, refreshKey) { mutableStateOf(false) }
+    var searchQuery by remember(user, loved, refreshKey) { mutableStateOf("") }
     val scope = rememberCoroutineScope()
-    var detail by remember { mutableStateOf<ScrobbleItem?>(null) }
+    var detail by remember { mutableStateOf<DetailTarget?>(null) }
 
     fun loadNext() {
         if (loading || page >= totalPages) return
         loading = true
         failed = false
         scope.launch {
-            val r = if (loved) LastFmClient.getLovedPage(user, page + 1)
-            else LastFmClient.getScrobblePage(user, page + 1)
-            if (r == null) {
-                failed = true
+            val localTotal = if (loved) 0 else withContext(Dispatchers.IO) { LastFmHistoryStore.scrobbleCount() }
+            if (localTotal > 0) {
+                // CSV local é a fonte principal: paginado de 200 em 200 até o fim do arquivo.
+                val pageSize = 200
+                val chunk = withContext(Dispatchers.IO) {
+                    LastFmHistoryStore.scrobblePage(page * pageSize, pageSize)
+                }
+                if (page == 0) {
+                    // Sobe o "now playing" da API no topo (se houver rede)
+                    val np = LastFmClient.getScrobblePage(user, 1)?.items?.filter { it.nowPlaying }.orEmpty()
+                    items.addAll(np)
+                }
+                items.addAll(chunk)
+                page += 1
+                totalPages = (localTotal + pageSize - 1) / pageSize
+                total = localTotal
             } else {
-                items.addAll(r.items)
-                page = r.page
-                totalPages = r.totalPages
-                total = r.total
+                val r = if (loved) LastFmClient.getLovedPage(user, page + 1)
+                else LastFmClient.getScrobblePage(user, page + 1)
+                if (r == null) {
+                    failed = true
+                } else {
+                    // Evita duplicar o que já veio antes (now playing repetido etc.)
+                    val existingKeys = items.map { "${it.artist}\u0000${it.title}\u0000${it.dateMs}" }.toHashSet()
+                    val toAdd = r.items.filter { sc ->
+                        val k = "${sc.artist}\u0000${sc.title}\u0000${sc.dateMs}"
+                        if (sc.nowPlaying) true else existingKeys.add(k)
+                    }
+                    items.addAll(toAdd)
+                    page = r.page
+                    totalPages = r.totalPages
+                    total = r.total
+                }
             }
             loading = false
         }
@@ -585,10 +710,50 @@ private fun ScrobbleList(
 
     LaunchedEffect(user, loved, refreshKey) { loadNext() }
 
+    val filtered = remember(items.toList(), searchQuery, resolver) {
+        val q = searchQuery.trim().lowercase(Locale.getDefault())
+        if (q.isEmpty()) items.toList()
+        else items.filter { sc ->
+            val (artist, title) = resolver?.track(sc.artist, sc.title) ?: (sc.artist to sc.title)
+            val album = sc.album?.let { al -> resolver?.album(sc.artist, al)?.second ?: al }.orEmpty()
+            title.lowercase(Locale.getDefault()).contains(q) ||
+                artist.lowercase(Locale.getDefault()).contains(q) ||
+                album.lowercase(Locale.getDefault()).contains(q) ||
+                sc.title.lowercase(Locale.getDefault()).contains(q) ||
+                sc.artist.lowercase(Locale.getDefault()).contains(q)
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
+        androidx.compose.foundation.text.BasicTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            singleLine = true,
+            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 15.sp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(0.08f))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (searchQuery.isEmpty()) {
+                        Text(
+                            if (loved) "Pesquisar favoritos…" else "Pesquisar scrobbles…",
+                            color = Color.White.copy(0.4f),
+                            fontSize = 15.sp
+                        )
+                    }
+                    inner()
+                }
+            }
+        )
         if (total > 0) {
             Text(
-                if (loved) "$total faixas favoritas" else "$total scrobbles",
+                if (searchQuery.isNotBlank()) {
+                    "${filtered.size} resultado(s) · $total no total"
+                } else if (loved) "$total faixas favoritas" else "$total scrobbles",
                 color = Color.White.copy(0.6f),
                 fontSize = 13.sp,
                 modifier = Modifier.padding(bottom = 6.dp, start = 4.dp)
@@ -600,21 +765,25 @@ private fun ScrobbleList(
             }
             items.isEmpty() && failed -> CenterMessage("Não foi possível carregar. Verifique a conexão e toque em atualizar.")
             items.isEmpty() -> CenterMessage(if (loved) "Nenhuma faixa favorita ainda." else "Nenhum scrobble ainda.")
+            filtered.isEmpty() -> CenterMessage("Nenhum resultado para “$searchQuery”.")
             else -> LazyColumn(
                 contentPadding = PaddingValues(bottom = bottomPadding),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(items.size) { i ->
-                    val it = items[i]
+                items(filtered.size) { i ->
+                    val it = filtered[i]
                     val (artist, title) = remember(it, resolver) {
                         resolver?.track(it.artist, it.title) ?: (it.artist to it.title)
                     }
                     val album = remember(it, resolver) {
                         it.album?.let { al -> resolver?.album(it.artist, al)?.second ?: al }
                     }
+                    val rowCtx = LocalContext.current
+                    var lovedNow by remember(it.artist, it.title) { mutableStateOf(false) }
                     ListRow(
                         title = title,
-                        subtitle = listOfNotNull(artist.takeIf { a -> a.isNotBlank() }, album).joinToString(" · "),
+                        subtitle = artist,
+                        secondarySubtitle = album,
                         trailing = when {
                             it.nowPlaying -> "ouvindo agora"
                             it.dateMs != null -> formatWhen(it.dateMs)
@@ -623,7 +792,37 @@ private fun ScrobbleList(
                         trailingColor = if (it.nowPlaying) appColors.accent else Color.White.copy(0.5f),
                         nowPlaying = it.nowPlaying,
                         art = { TrackArt(resolver, it.artist, it.title, it.album) },
-                        onClick = { detail = it.copy(artist = artist, title = title, album = album) }
+                        onClick = { detail = DetailTarget(artist, title, album) },
+                        onSubtitleClick = { detail = DetailTarget(artist, "", mode = "artist") },
+                        onSecondarySubtitleClick = {
+                            album?.let { al -> detail = DetailTarget(artist, al, al, "album") }
+                        },
+                        onEdit = if (it.nowPlaying) {
+                            {
+                                rowCtx.startActivity(
+                                    android.content.Intent(
+                                        rowCtx,
+                                        com.tolete.player.scrobble.ScrobbleEditActivity::class.java
+                                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        } else null,
+                        isLoved = lovedNow,
+                        onToggleLove = if (it.nowPlaying) {
+                            {
+                                val track = resolver?.trackRef(it.artist, it.title)
+                                    ?: LastFmScrobbler.current.value
+                                if (track != null) {
+                                    scope.launch {
+                                        val next = !lovedNow
+                                        val ok = withContext(Dispatchers.IO) {
+                                            LastFmScrobbler.setLoved(track, next)
+                                        }
+                                        if (ok) lovedNow = next
+                                    }
+                                }
+                            }
+                        } else null
                     )
                 }
                 if (page < totalPages) {
@@ -646,12 +845,14 @@ private fun ScrobbleList(
         }
     }
 
-    detail?.let { item ->
+    detail?.let { target ->
         LfEntityDetailSheet(
             user = user,
-            artist = item.artist,
-            title = item.title,
-            album = item.album,
+            artist = target.artist,
+            title = target.title,
+            album = target.album,
+            resolver = resolver,
+            initialMode = target.mode,
             appColors = appColors,
             onDismiss = { detail = null }
         )
@@ -675,6 +876,11 @@ private fun DataTab(
     var kind by remember { mutableStateOf(ChartKind.TRACKS) }
     var showPeriodSummary by remember { mutableStateOf(false) }
     var showExportRetrospective by remember { mutableStateOf(false) }
+    // Cópia dos dados no momento em que a exportação foi aberta. A cada 4 min o dashboard se atualiza
+    // e `data` fica null por instantes; sem esta cópia a janela de exportação saía da tela no meio
+    // da geração dos vídeos (e voltava zerada, cancelando tudo).
+    var exportRaw by remember { mutableStateOf<RawData?>(null) }
+    var detailTarget by remember { mutableStateOf<DetailTarget?>(null) }
     val sem = remember { Semaphore(4) }
     val cache = remember(user) { HashMap<String, RawData>() }
 
@@ -761,7 +967,7 @@ private fun DataTab(
         }
         item {
             Text(
-                "Exportar retrospectiva",
+                "Retrospectiva",
                 color = Color.Black,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 13.sp,
@@ -769,7 +975,10 @@ private fun DataTab(
                     .padding(bottom = 8.dp)
                     .clip(RoundedCornerShape(20.dp))
                     .background(appColors.accent)
-                    .clickable(enabled = data != null) { showExportRetrospective = true }
+                    .clickable(enabled = data != null) {
+                        exportRaw = data
+                        showExportRetrospective = true
+                    }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             )
         }
@@ -850,7 +1059,17 @@ private fun DataTab(
                                     ChartKind.ARTISTS -> ArtistArt(resolver, c.name)
                                     ChartKind.ALBUMS -> AlbumArt(resolver, c.artist, c.name)
                                 }
-                            }
+                            },
+                            onClick = {
+                                detailTarget = when (kind) {
+                                    ChartKind.TRACKS -> DetailTarget(c.artist, c.name)
+                                    ChartKind.ARTISTS -> DetailTarget(c.name, "", mode = "artist")
+                                    ChartKind.ALBUMS -> DetailTarget(c.artist, c.name, c.name, "album")
+                                }
+                            },
+                            onSubtitleClick = if (kind == ChartKind.TRACKS || kind == ChartKind.ALBUMS) {
+                                { detailTarget = DetailTarget(c.artist, "", mode = "artist") }
+                            } else null
                         )
                     }
                 }
@@ -873,21 +1092,22 @@ private fun DataTab(
             onDismiss = { showPeriodSummary = false }
         )
     }
-    if (showExportRetrospective && data != null) {
+    val frozenExport = exportRaw
+    if (showExportRetrospective && frozenExport != null) {
         RetrospectiveExportSheet(
-            description = "Período: ${spec.title}\nGera 10 cards a partir dos dados do Last.fm, com nomes ajustados às tags originais. Depois você pode compartilhar/salvar as fotos e exportar vídeos (3–15 s, com música).",
+            description = "Período: ${spec.title}\nGera 10 cards a partir dos dados do Last.fm, com nomes ajustados às tags originais. Depois você pode compartilhar/salvar as fotos e exportar vídeos (com música) de todos os cards ou de cada card separadamente.",
             createManifest = { ctx ->
-                val mergedTracks = mergeTracks(data.tracks, resolver)
-                val mergedArtists = mergeArtists(data.artists, resolver)
-                val mergedAlbums = mergeAlbums(data.albums, resolver)
+                val mergedTracks = mergeTracks(frozenExport.tracks, resolver)
+                val mergedArtists = mergeArtists(frozenExport.artists, resolver)
+                val mergedAlbums = mergeAlbums(frozenExport.albums, resolver)
                 com.tolete.player.data.RetrospectiveExporter.exportFromRaw(
                     context = ctx,
                     user = user,
                     rangeLabel = range.label,
                     periodTitle = spec.title,
-                    totalPlays = data.counts.sum(),
+                    totalPlays = frozenExport.counts.sum(),
                     bucketLabels = spec.buckets.map { it.label },
-                    bucketCounts = data.counts,
+                    bucketCounts = frozenExport.counts,
                     topTracks = mergedTracks.map {
                         com.tolete.player.data.RetrospectiveExporter.ChartRow(it.name, it.artist, it.plays)
                     },
@@ -902,6 +1122,18 @@ private fun DataTab(
             appColors = appColors,
             libraryTracks = emptyList(), // resolver já carrega a lib; fotos usam LibraryCache
             onDismiss = { showExportRetrospective = false }
+        )
+    }
+    detailTarget?.let { target ->
+        LfEntityDetailSheet(
+            user = user,
+            artist = target.artist,
+            title = target.title,
+            album = target.album,
+            resolver = resolver,
+            initialMode = target.mode,
+            appColors = appColors,
+            onDismiss = { detailTarget = null }
         )
     }
 }
@@ -1108,6 +1340,11 @@ internal fun RetrospectiveExportSheet(
     var exportDir by remember { mutableStateOf<java.io.File?>(null) }
     var showStories by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val genState by com.tolete.player.video.RetrospectiveVideoGenerator.state.collectAsState()
+    val runningVideo = genState as? com.tolete.player.video.RetrospectiveVideoGenerator.State.Running
+    var hiddenVideoGeneration by remember { mutableStateOf<Long?>(null) }
+    var activeBatchGeneration by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(runningVideo?.generationId) { hiddenVideoGeneration = null }
 
     val retroTheme = remember(appColors) {
         com.tolete.player.data.RetrospectiveCardRenderer.ThemeColors(
@@ -1159,9 +1396,14 @@ internal fun RetrospectiveExportSheet(
 
     var videoCards by remember { mutableStateOf<List<com.tolete.player.video.RetrospectiveVideoGenerator.CardAudioOptions>?>(null) }
     var videoOpts by remember { mutableStateOf(com.tolete.player.video.RetrospectiveVideoGenerator.VideoOptions()) }
+    /** Quando não é null, as opções e a geração valem só para este card (ex.: "005"). */
+    var singleVideoCardId by remember { mutableStateOf<String?>(null) }
 
-    /** Abre as opções (duração e música de cada card) antes de renderizar os vídeos. */
-    fun openVideoOptions() {
+    /**
+     * Abre as opções (duração e música) antes de renderizar os vídeos: de todos os cards
+     * ([onlyCardId] = null) ou só de um card.
+     */
+    fun openVideoOptions(onlyCardId: String? = null) {
         val dir = exportDir ?: return
         if (videoBusy) return
         videoBusy = true
@@ -1173,7 +1415,15 @@ internal fun RetrospectiveExportSheet(
                         com.tolete.player.data.LibraryCache(context).load().orEmpty()
                     }
                 }
-                videoCards = com.tolete.player.video.RetrospectiveVideoGenerator.audioOptions(context, dir, lib)
+                val all = com.tolete.player.video.RetrospectiveVideoGenerator.audioOptions(context, dir, lib)
+                val only = onlyCardId?.let { id -> all.filter { it.cardId == id } }.orEmpty()
+                if (only.isNotEmpty()) {
+                    singleVideoCardId = onlyCardId
+                    videoCards = only
+                } else {
+                    singleVideoCardId = null
+                    videoCards = all
+                }
                 videoMsg = null
             } catch (e: Exception) {
                 videoMsg = "Falha ao carregar as opções: ${e.message}"
@@ -1183,7 +1433,11 @@ internal fun RetrospectiveExportSheet(
         }
     }
 
-    /** Renderiza os vídeos na mesma pasta das fotos (sem refazer o manifesto nem as fotos). */
+    /**
+     * Renderiza os vídeos na mesma pasta das fotos (sem refazer o manifesto nem as fotos).
+     * A geração roda em escopo do app + serviço em primeiro plano (não depende desta tela), e o
+     * progresso/resultado chega pelo estado do gerador (efeito logo abaixo).
+     */
     fun runVideos(options: com.tolete.player.video.RetrospectiveVideoGenerator.VideoOptions) {
         val dir = exportDir ?: return
         if (videoBusy) return
@@ -1196,26 +1450,69 @@ internal fun RetrospectiveExportSheet(
                         com.tolete.player.data.LibraryCache(context).load().orEmpty()
                     }
                 }
-                val vid = com.tolete.player.video.RetrospectiveVideoGenerator.generateAll(
+                val started = com.tolete.player.video.RetrospectiveVideoGenerator.start(
                     context = context,
                     exportDir = dir,
                     libraryTracks = lib,
                     theme = retroTheme,
                     options = options
-                ) { idx, total, frac ->
-                    scope.launch { videoMsg = "Vídeo ${idx + 1}/$total · ${(frac * 100).toInt()}%" }
+                )
+                if (started) {
+                    activeBatchGeneration = when (val current =
+                        com.tolete.player.video.RetrospectiveVideoGenerator.state.value
+                    ) {
+                        is com.tolete.player.video.RetrospectiveVideoGenerator.State.Running -> current.generationId
+                        is com.tolete.player.video.RetrospectiveVideoGenerator.State.Finished -> current.generationId
+                        is com.tolete.player.video.RetrospectiveVideoGenerator.State.Failed -> current.generationId
+                        else -> null
+                    }
+                } else {
+                    videoBusy = false
+                    videoMsg = "Já existe uma geração de vídeo em andamento"
                 }
-                videoFiles = vid.videos.associateBy { it.nameWithoutExtension }
-                videoMsg = when {
-                    vid.videos.isEmpty() -> "Nenhum vídeo gerado: ${vid.failed.firstOrNull() ?: "erro desconhecido"}"
-                    vid.failed.isNotEmpty() -> "${vid.videos.size} vídeos prontos · falhou: ${vid.failed.first()}"
-                    else -> "${vid.videos.size} vídeos prontos"
-                }
-            } catch (e: Exception) {
-                videoMsg = "Falha nos vídeos: ${e.message}"
-            } finally {
+            } catch (e: Throwable) {
+                videoMsg = "Falha nos vídeos: ${e.message ?: e.javaClass.simpleName}"
                 videoBusy = false
             }
+        }
+    }
+
+    LaunchedEffect(genState, activeBatchGeneration) {
+        when (val st = genState) {
+            is com.tolete.player.video.RetrospectiveVideoGenerator.State.Running -> {
+                if (st.batch && st.generationId == activeBatchGeneration) {
+                    videoBusy = true
+                    videoMsg = "Card ${(st.index + 1).coerceAtMost(st.total)}/${st.total} · " +
+                        "progresso geral ${(st.overallFrac * 100).toInt()}%"
+                }
+            }
+            is com.tolete.player.video.RetrospectiveVideoGenerator.State.Finished -> {
+                if (st.generationId != activeBatchGeneration) return@LaunchedEffect
+                val vid = st.result
+                // Soma aos vídeos já gerados (exportar um card não apaga os outros da tela).
+                videoFiles = videoFiles + vid.videos.associateBy { it.nameWithoutExtension }
+                val cancelled = vid.failed.any { it.equals("cancelado", ignoreCase = true) }
+                val otherFailures = vid.failed.filterNot { it.equals("cancelado", ignoreCase = true) }
+                videoMsg = when {
+                    cancelled && vid.videos.isNotEmpty() -> "${vid.videos.size} vídeo(s) pronto(s) · geração cancelada"
+                    cancelled -> "Geração cancelada antes de concluir um vídeo"
+                    vid.videos.isEmpty() -> "Nenhum vídeo gerado: ${otherFailures.firstOrNull() ?: "erro desconhecido"}"
+                    otherFailures.isNotEmpty() -> "${vid.videos.size} vídeo(s) pronto(s) · falhou: ${otherFailures.first()}"
+                    vid.videos.size == 1 -> "Vídeo pronto"
+                    else -> "${vid.videos.size} vídeos prontos"
+                }
+                videoBusy = false
+                activeBatchGeneration = null
+                com.tolete.player.video.RetrospectiveVideoGenerator.consume()
+            }
+            is com.tolete.player.video.RetrospectiveVideoGenerator.State.Failed -> {
+                if (st.generationId != activeBatchGeneration) return@LaunchedEffect
+                videoMsg = if (st.message == "cancelado") "Geração cancelada" else "Falha nos vídeos: ${st.message}"
+                videoBusy = false
+                activeBatchGeneration = null
+                com.tolete.player.video.RetrospectiveVideoGenerator.consume()
+            }
+            com.tolete.player.video.RetrospectiveVideoGenerator.State.Idle -> Unit
         }
     }
 
@@ -1227,25 +1524,36 @@ internal fun RetrospectiveExportSheet(
             videoMsg = videoMsg,
             appColors = appColors,
             onClose = {
-                if (videoBusy) com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
+                // Fechar o viewer não cancela o serviço; a geração continua em segundo plano.
                 showStories = false
                 onDismiss()
             },
-            onExportVideos = { openVideoOptions() },
+            onExportVideos = { cardId -> openVideoOptions(cardId) },
             onCancelVideos = {
                 com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
                 videoMsg = "Cancelando…"
             }
         )
+        if (runningVideo != null && runningVideo.batch &&
+            hiddenVideoGeneration != runningVideo.generationId
+        ) {
+            RetrospectiveVideoProgressDialog(
+                running = runningVideo,
+                onCancel = { com.tolete.player.video.RetrospectiveVideoGenerator.cancel() },
+                onHide = { hiddenVideoGeneration = runningVideo.generationId }
+            )
+        }
         videoCards?.let { cardsOpt ->
             RetrospectiveVideoOptionsDialog(
                 cards = cardsOpt,
                 initial = videoOpts,
+                title = if (singleVideoCardId != null) "Vídeo deste card" else "Opções dos vídeos",
                 onDismiss = { videoCards = null },
                 onGenerate = { opts ->
+                    // guarda as escolhas gerais (sem o filtro de card) para a próxima vez
                     videoOpts = opts
                     videoCards = null
-                    runVideos(opts)
+                    runVideos(singleVideoCardId?.let { opts.copy(onlyCardIds = setOf(it)) } ?: opts)
                 }
             )
         }
@@ -1259,7 +1567,7 @@ internal fun RetrospectiveExportSheet(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     "$description\n" +
-                        "Os cards são gerados em fotos (stories); depois você pode compartilhar/salvar e exportar vídeos (3–15 s, com música).",
+                        "Os cards são gerados em fotos (stories); depois você pode compartilhar/salvar e exportar vídeos (com música), de todos os cards ou de cada card separadamente.",
                     color = Color.White.copy(0.75f),
                     fontSize = 13.sp
                 )
@@ -1310,7 +1618,8 @@ private fun RetrospectiveStoriesViewer(
     videoMsg: String?,
     appColors: AppColors,
     onClose: () -> Unit,
-    onExportVideos: () -> Unit,
+    /** [cardId] = id do card ("001"…) para exportar só esse vídeo; null = todos os cards. */
+    onExportVideos: (cardId: String?) -> Unit,
     onCancelVideos: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1495,10 +1804,22 @@ private fun RetrospectiveStoriesViewer(
                                         .padding(vertical = 12.dp)
                                 )
                             }
+                            Text(
+                                "Refazer o vídeo deste card…",
+                                color = fg.copy(0.85f),
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onExportVideos(photo.nameWithoutExtension) }
+                                    .padding(vertical = 6.dp)
+                            )
                         }
                         else -> {
+                            // vídeo só deste card (música e trecho próprios)
                             Text(
-                                if (videos.isEmpty()) "Exportar vídeos…" else "Este card não tem vídeo — exportar de novo…",
+                                "Exportar vídeo deste card…",
                                 color = fg,
                                 fontWeight = FontWeight.SemiBold,
                                 textAlign = TextAlign.Center,
@@ -1506,8 +1827,19 @@ private fun RetrospectiveStoriesViewer(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(14.dp))
                                     .background(fg.copy(0.16f))
-                                    .clickable(onClick = onExportVideos)
+                                    .clickable { onExportVideos(photo.nameWithoutExtension) }
                                     .padding(vertical = 12.dp)
+                            )
+                            Text(
+                                if (videos.isEmpty()) "Exportar vídeos de todos os cards…" else "Exportar vídeos de todos os cards de novo…",
+                                color = fg.copy(0.85f),
+                                fontSize = 13.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onExportVideos(null) }
+                                    .padding(vertical = 6.dp)
                             )
                         }
                     }
@@ -1639,6 +1971,7 @@ private fun ProfileTab(
     bottomPadding: Dp
 ) {
     val context = LocalContext.current
+    var detailTarget by remember(user, refreshKey) { mutableStateOf<DetailTarget?>(null) }
     var failed by remember(user, refreshKey) { mutableStateOf(false) }
     val info by produceState<LastFmClient.UserInfo?>(null, user, refreshKey) {
         val r = LastFmClient.getUserInfo(user)
@@ -1650,6 +1983,9 @@ private fun ProfileTab(
     }
     val topTracks by produceState<List<ChartItem>?>(null, user, refreshKey) {
         value = LastFmClient.getChart(user, ChartKind.TRACKS, null, null, 5)
+    }
+    val topAlbums by produceState<List<ChartItem>?>(null, user, refreshKey) {
+        value = LastFmClient.getChart(user, ChartKind.ALBUMS, null, null, 5)
     }
 
     val i = info
@@ -1719,7 +2055,8 @@ private fun ProfileTab(
             item { SectionTitle("Artistas mais ouvidos (geral)") }
             items(ta.size) { n ->
                 ListRow(rank = n + 1, title = ta[n].name, subtitle = "", trailing = "${ta[n].plays} plays", trailingColor = appColors.accent,
-                    art = { ArtistArt(resolver, ta[n].name) })
+                    art = { ArtistArt(resolver, ta[n].name) },
+                    onClick = { detailTarget = DetailTarget(ta[n].name, "", mode = "artist") })
             }
         }
         val tt = topTracks?.let { mergeTracks(it, resolver) }.orEmpty()
@@ -1727,7 +2064,25 @@ private fun ProfileTab(
             item { SectionTitle("Músicas mais ouvidas (geral)") }
             items(tt.size) { n ->
                 ListRow(rank = n + 1, title = tt[n].name, subtitle = tt[n].artist, trailing = "${tt[n].plays} plays", trailingColor = appColors.accent,
-                    art = { TrackArt(resolver, tt[n].artist, tt[n].name, null) })
+                    art = { TrackArt(resolver, tt[n].artist, tt[n].name, null) },
+                    onClick = { detailTarget = DetailTarget(tt[n].artist, tt[n].name) },
+                    onSubtitleClick = { detailTarget = DetailTarget(tt[n].artist, "", mode = "artist") })
+            }
+        }
+        val tal = topAlbums?.let { mergeAlbums(it, resolver) }.orEmpty()
+        if (tal.isNotEmpty()) {
+            item { SectionTitle("Álbuns mais ouvidos (geral)") }
+            items(tal.size) { n ->
+                ListRow(
+                    rank = n + 1,
+                    title = tal[n].name,
+                    subtitle = tal[n].artist,
+                    trailing = "${tal[n].plays} plays",
+                    trailingColor = appColors.accent,
+                    art = { AlbumArt(resolver, tal[n].artist, tal[n].name) },
+                    onClick = { detailTarget = DetailTarget(tal[n].artist, tal[n].name, tal[n].name, "album") },
+                    onSubtitleClick = { detailTarget = DetailTarget(tal[n].artist, "", mode = "artist") }
+                )
             }
         }
         i.url?.let { url ->
@@ -1749,6 +2104,18 @@ private fun ProfileTab(
                 )
             }
         }
+    }
+    detailTarget?.let { target ->
+        LfEntityDetailSheet(
+            user = user,
+            artist = target.artist,
+            title = target.title,
+            album = target.album,
+            resolver = resolver,
+            initialMode = target.mode,
+            appColors = appColors,
+            onDismiss = { detailTarget = null }
+        )
     }
 }
 
@@ -1780,23 +2147,35 @@ private fun ListRow(
     rank: Int? = null,
     art: (@Composable () -> Unit)? = null,
     nowPlaying: Boolean = false,
-    onClick: (() -> Unit)? = null
+    secondarySubtitle: String? = null,
+    onSubtitleClick: (() -> Unit)? = null,
+    onSecondarySubtitleClick: (() -> Unit)? = null,
+    onClick: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null,
+    onToggleLove: (() -> Unit)? = null,
+    isLoved: Boolean = false
 ) {
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(if (nowPlaying) 28.dp else 14.dp)
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(vertical = if (nowPlaying) 4.dp else 6.dp, horizontal = 4.dp)
+            .padding(vertical = if (nowPlaying) 6.dp else 6.dp, horizontal = 4.dp)
             .clip(shape)
             .then(
                 if (nowPlaying) {
+                    // Visual próximo do mini player: pill arredondado com fundo suave
                     Modifier
-                        .background(trailingColor.copy(alpha = 0.18f))
-                        .border(1.dp, trailingColor.copy(alpha = 0.55f), shape)
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
                 } else Modifier
             )
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(vertical = 8.dp, horizontal = if (nowPlaying) 10.dp else 4.dp),
+            .padding(
+                start = if (nowPlaying) 10.dp else 4.dp,
+                end = if (nowPlaying) 4.dp else 4.dp,
+                top = if (nowPlaying) 8.dp else 8.dp,
+                bottom = if (nowPlaying) 8.dp else 8.dp
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (rank != null) {
@@ -1804,32 +2183,69 @@ private fun ListRow(
         }
         if (art != null) {
             art()
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(if (nowPlaying) 12.dp else 12.dp))
         }
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).padding(end = 4.dp)) {
             Text(
                 title,
                 color = Color.White,
-                fontWeight = if (nowPlaying) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = if (nowPlaying) 15.sp else 14.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             if (subtitle.isNotBlank()) {
-                Text(subtitle, color = Color.White.copy(0.55f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    subtitle,
+                    color = Color.White.copy(if (nowPlaying) 0.75f else 0.55f),
+                    fontSize = if (nowPlaying) 12.sp else 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (onSubtitleClick != null) Modifier.clickable(onClick = onSubtitleClick) else Modifier
+                )
             }
-        }
-        if (trailing.isNotBlank()) {
-            Spacer(Modifier.width(8.dp))
+            if (!secondarySubtitle.isNullOrBlank() && !nowPlaying) {
+                Text(
+                    secondarySubtitle,
+                    color = Color.White.copy(0.45f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (onSecondarySubtitleClick != null) Modifier.clickable(onClick = onSecondarySubtitleClick) else Modifier
+                )
+            }
             if (nowPlaying) {
                 Text(
-                    "● $trailing",
+                    "● ouvindo agora",
                     color = trailingColor,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
-            } else {
-                Text(trailing, color = trailingColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
+        }
+        if (nowPlaying) {
+            // Mini-player style: Editar + Favoritar (sem next/previous)
+            if (onEdit != null) {
+                IconButton(onClick = onEdit) {
+                    Icon(
+                        Icons.Rounded.Edit,
+                        contentDescription = "Editar scrobble",
+                        tint = Color.White.copy(0.9f)
+                    )
+                }
+            }
+            if (onToggleLove != null) {
+                IconButton(onClick = onToggleLove) {
+                    Icon(
+                        if (isLoved) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                        contentDescription = if (isLoved) "Desfavoritar" else "Favoritar",
+                        tint = if (isLoved) trailingColor else Color.White.copy(0.9f)
+                    )
+                }
+            }
+        } else if (trailing.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Text(trailing, color = trailingColor, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -1861,8 +2277,9 @@ private fun LfArt(
     webLoader: suspend () -> String?
 ) {
     val localOk = remember(local) { !local.isNullOrBlank() && java.io.File(local).exists() }
-    val web by produceState<String?>(null, localOk, webKey) {
-        value = if (localOk || webKey == null) null else WebArt.get(webKey, webLoader)
+    val networkAllowed = ArtistImageResolver.isAutomaticLookupAllowed()
+    val web by produceState<String?>(null, localOk, webKey, networkAllowed) {
+        value = if (localOk || webKey == null || !networkAllowed) null else WebArt.get(webKey, webLoader)
     }
     ArtImage(
         path = if (localOk) local else web,
@@ -1955,35 +2372,60 @@ private fun formatWhen(ms: Long): String {
     }
 }
 
-private fun formatCount(n: Long): String = when {
-    n >= 1_000_000L -> String.format(ptBr, "%.1fM", n / 1_000_000.0)
-    n >= 1_000L -> String.format(ptBr, "%.1fk", n / 1_000.0)
-    else -> n.toString()
-}
+private fun formatCount(n: Long): String = java.text.NumberFormat
+    .getIntegerInstance(ptBr)
+    .format(n)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LfEntityDetailSheet(
+internal fun LfEntityDetailSheet(
     user: String,
     artist: String,
     title: String,
     album: String?,
+    resolver: OriginalResolver? = null,
+    initialMode: String = "track",
     appColors: AppColors,
+    firstPlayedAt: Long? = null,
+    lastPlayedAt: Long = 0L,
+    trackRef: Track? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sheetPalette = menuPalette(appColors, LocalMenuVisualStyle.current)
-    var mode by remember { mutableStateOf("track") } // track | artist | album
-    val trackStats by produceState<LastFmClient.TrackStats?>(null, artist, title, user) {
-        value = withContext(Dispatchers.IO) { LastFmClient.getTrackStats(artist, title, user) }
+    var mode by remember(initialMode) { mutableStateOf(initialMode) } // track | artist | album
+    val queryTrack = remember(resolver, artist, title) {
+        resolver?.scrobbleTrack(artist, title) ?: (artist to title)
     }
-    val artistStats by produceState<LastFmClient.EntityStats?>(null, artist, user) {
-        value = withContext(Dispatchers.IO) { LastFmClient.getArtistStats(artist, user) }
+    val queryArtist = remember(resolver, artist) { resolver?.scrobbleArtist(artist) ?: artist }
+    val queryAlbum = remember(resolver, artist, album) {
+        if (album.isNullOrBlank()) null else resolver?.scrobbleAlbum(artist, album) ?: (artist to album)
     }
-    val albumStats by produceState<LastFmClient.EntityStats?>(null, artist, album, user) {
-        value = if (album.isNullOrBlank()) null
-        else withContext(Dispatchers.IO) { LastFmClient.getAlbumStats(artist, album, user) }
+    val historyTrackRef = trackRef ?: resolver?.trackRef(artist, title)
+    val trackDateCandidates = remember(queryTrack, artist, title, historyTrackRef) {
+        buildList {
+            add(queryTrack)
+            add(artist to title)
+            historyTrackRef?.let { local ->
+                add(local.artist to local.title)
+                val sent = com.tolete.player.data.LastFmScrobbler.metaFor(local)
+                add(sent.artist to sent.track)
+            }
+        }.distinct()
+    }
+    val trackStats by produceState<LastFmClient.TrackStats?>(null, queryTrack, user) {
+        value = if (queryTrack.second.isBlank()) null else withContext(Dispatchers.IO) {
+            LastFmClient.getTrackStats(queryTrack.first, queryTrack.second, user)
+        }
+    }
+    val artistStats by produceState<LastFmClient.EntityStats?>(null, queryArtist, user) {
+        value = withContext(Dispatchers.IO) { LastFmClient.getArtistStats(queryArtist, user) }
+    }
+    val albumStats by produceState<LastFmClient.EntityStats?>(null, queryAlbum, user) {
+        value = queryAlbum?.let { (queryArtist, queryAlbumName) ->
+            withContext(Dispatchers.IO) { LastFmClient.getAlbumStats(queryArtist, queryAlbumName, user) }
+        }
     }
 
     ModalBottomSheet(
@@ -2008,11 +2450,15 @@ private fun LfEntityDetailSheet(
                 .padding(horizontal = 20.dp, vertical = 8.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            ) {
                 listOf(
                     "track" to "Música",
                     "artist" to "Artista",
-                    "album" to "Álbum"
+                    "album" to "Álbum",
+                    "history" to "Histórico"
                 ).forEach { (key, label) ->
                     if (key == "album" && album.isNullOrBlank()) return@forEach
                     Chip(label, mode == key, appColors) { mode = key }
@@ -2024,9 +2470,19 @@ private fun LfEntityDetailSheet(
                 "track" -> {
                     val s = trackStats
                     Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    Text(artist, color = Color.White.copy(0.7f), fontSize = 14.sp)
+                    Text(
+                        artist,
+                        color = Color.White.copy(0.7f),
+                        fontSize = 14.sp,
+                        modifier = Modifier.clickable { mode = "artist" }
+                    )
                     album?.let {
-                        Text(it, color = Color.White.copy(0.5f), fontSize = 13.sp)
+                        Text(
+                            it,
+                            color = Color.White.copy(0.5f),
+                            fontSize = 13.sp,
+                            modifier = Modifier.clickable { mode = "album" }
+                        )
                     }
                     Spacer(Modifier.height(16.dp))
                     if (s == null) {
@@ -2056,6 +2512,58 @@ private fun LfEntityDetailSheet(
                             )
                         }
                     }
+                    Spacer(Modifier.height(12.dp))
+                    EntityShareButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.TRACK,
+                        name = title,
+                        subtitle = artist,
+                        enabled = s != null,
+                        plays = {
+                            val local = withContext(Dispatchers.IO) {
+                                var best = 0
+                                for ((a, t) in trackDateCandidates) {
+                                    best = maxOf(best, LastFmHistoryStore.playTimes(a, t).size)
+                                }
+                                best
+                            }
+                            if (local > 0) local else (s?.userPlayCount ?: 0L).toInt()
+                        },
+                        localArt = trackRef?.artPath?.takeIf { java.io.File(it).exists() }
+                            ?: resolver?.trackArt(artist, title)
+                            ?: album?.takeIf { it.isNotBlank() }?.let { resolver?.albumArt(artist, it) },
+                        remoteArt = {
+                            if (album.isNullOrBlank()) ArtistImageResolver.resolve(artist).imageUrl
+                            else LastFmClient.getAlbumInfo(album, artist)?.imageUrl
+                        }
+                    )
+                    EntityVideoButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.TRACK,
+                        name = title,
+                        subtitle = artist,
+                        enabled = s != null,
+                        suggestedTrack = trackRef ?: resolver?.trackRef(artist, title),
+                        plays = {
+                            val local = withContext(Dispatchers.IO) {
+                                var best = 0
+                                for ((a, t) in trackDateCandidates) {
+                                    best = maxOf(best, LastFmHistoryStore.playTimes(a, t).size)
+                                }
+                                best
+                            }
+                            if (local > 0) local else (s?.userPlayCount ?: 0L).toInt()
+                        },
+                        localArt = trackRef?.artPath?.takeIf { java.io.File(it).exists() }
+                            ?: resolver?.trackArt(artist, title)
+                            ?: album?.takeIf { it.isNotBlank() }?.let { resolver?.albumArt(artist, it) },
+                        remoteArt = {
+                            if (album.isNullOrBlank()) ArtistImageResolver.resolve(artist).imageUrl
+                            else LastFmClient.getAlbumInfo(album, artist)?.imageUrl
+                        }
+                    )
                 }
                 "artist" -> {
                     val s = artistStats
@@ -2087,6 +2595,180 @@ private fun LfEntityDetailSheet(
                                     .padding(horizontal = 16.dp, vertical = 10.dp)
                             )
                         }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    EntityShareButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.ARTIST,
+                        name = artist,
+                        subtitle = null,
+                        enabled = s != null,
+                        plays = { (s?.userPlayCount ?: 0L).toInt() },
+                        localArt = resolver?.artistArt(artist),
+                        remoteArt = { ArtistImageResolver.resolve(artist).imageUrl }
+                    )
+                    EntityVideoButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.ARTIST,
+                        name = artist,
+                        subtitle = null,
+                        enabled = s != null,
+                        suggestedTrack = trackRef,
+                        plays = { (s?.userPlayCount ?: 0L).toInt() },
+                        localArt = resolver?.artistArt(artist),
+                        remoteArt = { ArtistImageResolver.resolve(artist).imageUrl }
+                    )
+                }
+                "history" -> {
+                    val dateFmt = remember {
+                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
+                    }
+                    Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(artist, color = Color.White.copy(0.7f), fontSize = 14.sp)
+                    Spacer(Modifier.height(16.dp))
+                    // Prefere o espelho local (lastfm history.csv); se vazio, cai na API.
+                    val localTimes by produceState(emptyList<Long>(), queryTrack, trackDateCandidates) {
+                        value = withContext(Dispatchers.IO) {
+                            var best: List<Long> = emptyList()
+                            for ((a, t) in trackDateCandidates) {
+                                val times = LastFmHistoryStore.playTimes(a, t)
+                                if (times.size > best.size) best = times
+                            }
+                            if (best.isEmpty()) {
+                                best = LastFmHistoryStore.playTimes(queryTrack.first, queryTrack.second)
+                            }
+                            best
+                        }
+                    }
+                    val lfDates by produceState<LastFmClient.TrackPlayDates?>(null, queryTrack, user, localTimes) {
+                        if (localTimes.isNotEmpty()) {
+                            value = LastFmClient.TrackPlayDates(
+                                firstPlayedMs = localTimes.minOrNull(),
+                                lastPlayedMs = localTimes.maxOrNull(),
+                                historyScanComplete = true
+                            )
+                            return@produceState
+                        }
+                        value = withContext(Dispatchers.IO) {
+                            LastFmClient.getUserTrackPlayDates(
+                                user,
+                                queryTrack.first,
+                                queryTrack.second,
+                                candidates = trackDateCandidates
+                            )
+                        }
+                    }
+                    val firstLabel = (localTimes.minOrNull() ?: lfDates?.firstPlayedMs)?.takeIf { it > 0L }?.let {
+                        dateFmt.format(java.util.Date(it))
+                    } ?: "—"
+                    val lastLabel = (localTimes.maxOrNull() ?: lfDates?.lastPlayedMs)?.takeIf { it > 0L }?.let {
+                        dateFmt.format(java.util.Date(it))
+                    } ?: "—"
+                    StatsGrid(
+                        appColors,
+                        "Primeira vez reproduzida" to firstLabel,
+                        "Última vez reproduzida" to lastLabel
+                    )
+                    Text(
+                        when {
+                            localTimes.isNotEmpty() ->
+                                "Fonte: lastfm history.csv · ${localTimes.size} scrobble(s) local(is)"
+                            lfDates == null ->
+                                "Sem dados locais. Sincronize o histórico em Configurações → Scrobbling, ou confira a conexão."
+                            lfDates?.firstPlayedMs == null && lfDates?.lastPlayedMs == null ->
+                                "Nenhum scrobble correspondente encontrado."
+                            else -> "Fonte: API Last.fm (sync local recomendado para lista completa)"
+                        },
+                        color = Color.White.copy(0.45f),
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    if (localTimes.isNotEmpty()) {
+                        Spacer(Modifier.height(14.dp))
+                        var playsExpanded by remember(queryTrack) { mutableStateOf(false) }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { playsExpanded = !playsExpanded }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Todas as reproduções (${localTimes.size})",
+                                color = Color.White.copy(0.85f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                if (playsExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                contentDescription = null,
+                                tint = Color.White.copy(0.7f)
+                            )
+                        }
+                        androidx.compose.animation.AnimatedVisibility(visible = playsExpanded) {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 240.dp)
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                localTimes.forEach { ts ->
+                                    Text(
+                                        dateFmt.format(java.util.Date(ts)),
+                                        color = Color.White.copy(0.75f),
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.padding(vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    val s = trackStats
+                    var loved by remember(queryTrack, s?.userLoved) {
+                        mutableStateOf(s?.userLoved == true)
+                    }
+                    var loveBusy by remember { mutableStateOf(false) }
+                    val scope = rememberCoroutineScope()
+                    Spacer(Modifier.height(16.dp))
+                    val canLove = trackRef != null && com.tolete.player.data.LastFmScrobbler.isLoggedIn()
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(appColors.accent.copy(0.15f))
+                            .clickable(enabled = canLove && !loveBusy) {
+                                val t = trackRef ?: return@clickable
+                                loveBusy = true
+                                val next = !loved
+                                scope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        com.tolete.player.data.LastFmScrobbler.setLoved(t, next)
+                                    }
+                                    if (ok) loved = next
+                                    loveBusy = false
+                                }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        if (loveBusy) {
+                            CircularProgressIndicator(color = appColors.accent, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Text(
+                            when {
+                                !canLove -> "Entre no Last.fm para favoritar"
+                                loved -> "Remover dos favoritos do Last.fm"
+                                else -> "Favoritar no Last.fm"
+                            },
+                            color = appColors.accent,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
                 else -> {
@@ -2121,6 +2803,30 @@ private fun LfEntityDetailSheet(
                             )
                         }
                     }
+                    Spacer(Modifier.height(12.dp))
+                    EntityShareButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.ALBUM,
+                        name = album.orEmpty(),
+                        subtitle = artist,
+                        enabled = s != null,
+                        plays = { (s?.userPlayCount ?: 0L).toInt() },
+                        localArt = album?.takeIf { it.isNotBlank() }?.let { resolver?.albumArt(artist, it) },
+                        remoteArt = { LastFmClient.getAlbumInfo(album.orEmpty(), artist)?.imageUrl }
+                    )
+                    EntityVideoButton(
+                        appColors = appColors,
+                        user = user,
+                        kind = EntityShareCard.Kind.ALBUM,
+                        name = album.orEmpty(),
+                        subtitle = artist,
+                        enabled = s != null,
+                        suggestedTrack = trackRef,
+                        plays = { (s?.userPlayCount ?: 0L).toInt() },
+                        localArt = album?.takeIf { it.isNotBlank() }?.let { resolver?.albumArt(artist, it) },
+                        remoteArt = { LastFmClient.getAlbumInfo(album.orEmpty(), artist)?.imageUrl }
+                    )
                 }
             }
             Spacer(Modifier.height(24.dp))
@@ -2146,4 +2852,347 @@ private fun StatsGrid(appColors: AppColors, vararg rows: Pair<String, String>) {
             }
         }
     }
+}
+
+private fun loadBitmapFromUrl(url: String): android.graphics.Bitmap? = try {
+    val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+    conn.connectTimeout = 8_000
+    conn.readTimeout = 8_000
+    conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+} catch (_: Exception) {
+    null
+}
+
+/** Constrói uma vez o mesmo info card usado tanto na foto quanto no vídeo. */
+private suspend fun buildEntityShareFile(
+    context: android.content.Context,
+    appColors: AppColors,
+    user: String,
+    kind: EntityShareCard.Kind,
+    name: String,
+    subtitle: String?,
+    playCount: Int,
+    localArt: String?,
+    remoteArt: suspend () -> String?
+): java.io.File {
+    val (userPhoto, entityPhoto) = withContext(Dispatchers.IO) {
+        val userBmp = LastFmClient.getUserInfo(user)?.imageUrl?.let { loadBitmapFromUrl(it) }
+        val entityBmp = localArt?.let { decodeSampledFile(it, 1400) }
+            ?: remoteArt()?.let { loadBitmapFromUrl(it) }
+        userBmp to entityBmp
+    }
+    var card: android.graphics.Bitmap? = null
+    try {
+        card = withContext(Dispatchers.Default) {
+            EntityShareCard.build(
+                context = context,
+                kind = kind,
+                username = user,
+                entityName = name,
+                entitySubtitle = subtitle,
+                playCount = playCount,
+                userPhoto = userPhoto,
+                entityPhoto = entityPhoto,
+                accent = appColors.accent.toArgb()
+            )
+        }
+        val file = java.io.File(context.cacheDir, "lf_share_${System.currentTimeMillis()}.jpg")
+        withContext(Dispatchers.IO) {
+            java.io.FileOutputStream(file).use { out ->
+                card!!.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+            }
+        }
+        return file
+    } finally {
+        card?.recycle()
+        userPhoto?.recycle()
+        if (entityPhoto !== userPhoto) entityPhoto?.recycle()
+    }
+}
+
+/** Botão "Compartilhar card (foto)" do info card, usado em Música, Artista e Álbum. */
+@Composable
+private fun EntityShareButton(
+    appColors: AppColors,
+    user: String,
+    kind: EntityShareCard.Kind,
+    name: String,
+    subtitle: String?,
+    enabled: Boolean,
+    plays: suspend () -> Int,
+    localArt: String?,
+    remoteArt: suspend () -> String?
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    val active = enabled && !busy
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(if (enabled) 0.08f else 0.04f))
+            .clickable(enabled = active) {
+                busy = true
+                scope.launch {
+                    try {
+                        val count = plays()
+                        val file = buildEntityShareFile(ctx, appColors, user, kind, name, subtitle, count, localArt, remoteArt)
+                        ShareImageActions.offerSaveOrShare(
+                            context = ctx,
+                            cacheFile = file,
+                            subdir = "Last.fm Cards",
+                            shareTitle = "Compartilhar info card",
+                            shareText = "Scrobbles · $name · Lyron Music Player",
+                            mime = "image/jpeg",
+                            dialogTitle = "Info card pronto"
+                        )
+                    } catch (e: Throwable) {
+                        android.widget.Toast.makeText(
+                            ctx, "Não foi possível gerar o card: ${e.message ?: e.javaClass.simpleName}",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    } finally {
+                        busy = false
+                    }
+                }
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Rounded.Share, contentDescription = null, tint = appColors.accent)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            if (busy) "Gerando…" else "Salvar/compartilhar foto",
+            color = appColors.accent,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/** Gera vídeo curto a partir do info card e do trecho escolhido da biblioteca local. */
+@Composable
+private fun EntityVideoButton(
+    appColors: AppColors,
+    user: String,
+    kind: EntityShareCard.Kind,
+    name: String,
+    subtitle: String?,
+    enabled: Boolean,
+    suggestedTrack: Track?,
+    plays: suspend () -> Int,
+    localArt: String?,
+    remoteArt: suspend () -> String?
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var showOptions by remember { mutableStateOf(false) }
+    var library by remember { mutableStateOf<List<Track>>(emptyList()) }
+    var libraryLoaded by remember { mutableStateOf(false) }
+    var libraryLoading by remember { mutableStateOf(false) }
+    var expectedVideo by remember { mutableStateOf<java.io.File?>(null) }
+    var requestActive by remember { mutableStateOf(false) }
+    var expectedGenerationId by remember { mutableStateOf<Long?>(null) }
+    val generatorState by com.tolete.player.video.RetrospectiveVideoGenerator.state.collectAsState()
+
+    LaunchedEffect(generatorState, expectedVideo, requestActive, expectedGenerationId) {
+        val expected = expectedVideo?.takeIf { requestActive } ?: return@LaunchedEffect
+        when (val st = generatorState) {
+            is com.tolete.player.video.RetrospectiveVideoGenerator.State.Finished -> {
+                if (st.generationId != expectedGenerationId) return@LaunchedEffect
+                val video = st.result.videos.firstOrNull { it.absolutePath == expected.absolutePath }
+                if (video != null) {
+                    ShareImageActions.offerSaveOrShare(
+                        context = ctx,
+                        cacheFile = video,
+                        subdir = "Last.fm Cards",
+                        shareTitle = "Compartilhar vídeo do Last.fm",
+                        shareText = "Info card de $name · Lyron Music Player",
+                        mime = "video/mp4",
+                        dialogTitle = "Vídeo do info card pronto"
+                    )
+                } else {
+                    android.widget.Toast.makeText(
+                        ctx,
+                        "O vídeo do info card não foi encontrado entre os resultados da geração.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+                if (st.generationId == expectedGenerationId) {
+                    expectedVideo = null
+                    requestActive = false
+                    expectedGenerationId = null
+                    busy = false
+                    com.tolete.player.video.RetrospectiveVideoGenerator.consume()
+                }
+            }
+            is com.tolete.player.video.RetrospectiveVideoGenerator.State.Failed -> {
+                if (st.generationId != expectedGenerationId) return@LaunchedEffect
+                android.widget.Toast.makeText(
+                    ctx,
+                    if (st.message == "cancelado") "Geração do vídeo cancelada" else "Falha ao gerar vídeo: ${st.message}",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+                expectedVideo = null
+                requestActive = false
+                expectedGenerationId = null
+                busy = false
+                com.tolete.player.video.RetrospectiveVideoGenerator.consume()
+            }
+            else -> Unit
+        }
+    }
+
+    fun openOptions() {
+        showOptions = true
+        if (libraryLoaded || libraryLoading) return
+        libraryLoading = true
+        scope.launch {
+            try {
+                library = withContext(Dispatchers.IO) {
+                    com.tolete.player.data.LibraryCache(ctx).load().orEmpty()
+                }
+                libraryLoaded = true
+            } catch (_: Exception) {
+                library = emptyList()
+                libraryLoaded = true
+            } finally {
+                libraryLoading = false
+            }
+        }
+    }
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(if (enabled) 0.08f else 0.04f))
+            .clickable(enabled = enabled) {
+                if (busy) {
+                    com.tolete.player.video.RetrospectiveVideoGenerator.cancel()
+                } else {
+                    openOptions()
+                }
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Rounded.Movie, contentDescription = null, tint = appColors.accent)
+        Spacer(Modifier.width(10.dp))
+        val progress = (generatorState as? com.tolete.player.video.RetrospectiveVideoGenerator.State.Running)?.frac
+        Text(
+            when {
+                busy && progress != null -> "Gerando vídeo ${(progress * 100).toInt()}% · toque para cancelar"
+                busy -> "Gerando vídeo… · toque para cancelar"
+                else -> "Gerar vídeo do card"
+            },
+            color = appColors.accent,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+
+    if (showOptions) {
+        EntityCardVideoOptionsDialog(
+            kind = kind,
+            entityName = name,
+            entitySubtitle = subtitle,
+            libraryTracks = library,
+            libraryLoading = libraryLoading,
+            suggestedTrack = suggestedTrack,
+            onDismiss = { showOptions = false },
+            onGenerate = { track, clip ->
+                showOptions = false
+                busy = true
+                scope.launch {
+                    var cardFile: java.io.File? = null
+                    try {
+                        val count = plays()
+                        val card = buildEntityShareFile(ctx, appColors, user, kind, name, subtitle, count, localArt, remoteArt)
+                        cardFile = card
+                        val outDir = java.io.File(ctx.cacheDir, "lastfm_card_videos").apply { mkdirs() }
+                        val out = java.io.File(outDir, "lastfm_${System.currentTimeMillis()}.mp4")
+                        expectedVideo = out
+                        val started = com.tolete.player.video.RetrospectiveVideoGenerator.startCardVideo(
+                            context = ctx,
+                            cardImage = card,
+                            audioTrack = track,
+                            clip = clip,
+                            output = out
+                        )
+                        if (!started) {
+                            expectedVideo = null
+                            requestActive = false
+                            expectedGenerationId = null
+                            card.delete()
+                            busy = false
+                            android.widget.Toast.makeText(ctx, "Já existe uma geração de vídeo em andamento", android.widget.Toast.LENGTH_SHORT).show()
+                        } else {
+                            expectedGenerationId = when (val current =
+                                com.tolete.player.video.RetrospectiveVideoGenerator.state.value
+                            ) {
+                                is com.tolete.player.video.RetrospectiveVideoGenerator.State.Running -> current.generationId
+                                is com.tolete.player.video.RetrospectiveVideoGenerator.State.Finished -> current.generationId
+                                is com.tolete.player.video.RetrospectiveVideoGenerator.State.Failed -> current.generationId
+                                else -> null
+                            }
+                            requestActive = true
+                        }
+                    } catch (e: Throwable) {
+                        cardFile?.delete()
+                        expectedVideo = null
+                        requestActive = false
+                        expectedGenerationId = null
+                        busy = false
+                        android.widget.Toast.makeText(
+                            ctx,
+                            "Não foi possível gerar o vídeo: ${e.message ?: e.javaClass.simpleName}",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        )
+    }
+}
+
+/** Decodifica uma imagem local reduzindo para no máximo [maxSide] px no lado menor (economiza memória). */
+private fun decodeSampledFile(path: String, maxSide: Int): android.graphics.Bitmap? = try {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= maxSide && bounds.outHeight / (sample * 2) >= maxSide) sample *= 2
+    android.graphics.BitmapFactory.decodeFile(
+        path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    )
+} catch (_: Exception) {
+    null
+}
+
+/** Cartão de estatísticas da faixa atual, compartilhado com o menu Now Playing. */
+@Composable
+internal fun NowPlayingLastFmInfoSheet(
+    user: String,
+    track: Track,
+    tracks: List<Track>,
+    appColors: AppColors,
+    firstPlayedAt: Long? = null,
+    lastPlayedAt: Long = 0L,
+    onDismiss: () -> Unit
+) {
+    val resolver = remember(tracks) { OriginalResolver(tracks) }
+    LfEntityDetailSheet(
+        user = user,
+        artist = track.artist,
+        title = track.title,
+        album = track.album.takeIf { it.isNotBlank() },
+        resolver = resolver,
+        appColors = appColors,
+        firstPlayedAt = firstPlayedAt,
+        lastPlayedAt = lastPlayedAt,
+        trackRef = track,
+        onDismiss = onDismiss
+    )
 }

@@ -1,17 +1,12 @@
 package com.tolete.player
 
-import android.graphics.Color as AndroidColor
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -28,7 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -41,8 +35,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,381 +44,340 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tolete.player.data.LyronStorage
 import com.tolete.player.data.StorageManager
+import com.tolete.player.ui.FloatingIconsBackground
+import com.tolete.player.ui.MusicViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.Locale
 
 /**
- * Tela "Gerenciar espaço".
- *
- * Declarada como android:manageSpaceActivity no manifesto: nas configurações do sistema
- * (Info do app > Armazenamento) o botão "Limpar dados" passa a ser "Gerenciar espaço" e abre esta tela.
- * Também é aberta por Configurações > Avançado > Gerenciar espaço.
- * Tocar em um item da lista limpa só aquele item (sempre pedindo confirmação).
+ * Gerenciar espaço — categorias detalhadas (como no app completo) + ícones flutuantes managespace.
  */
 class ManageSpaceActivity : ComponentActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
-        )
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        // Esta activity pode ser aberta pelo sistema sem a MainActivity ter rodado.
-        LyronStorage.init(this)
-
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                ManageSpaceScreen(onBack = { finish() })
+                val vm: MusicViewModel = viewModel()
+                val floating by vm.floatingIconsEnabled.collectAsState()
+                ManageSpaceScreen(
+                    floating = floating,
+                    onBack = { finish() },
+                    onAfterClearLibrary = {
+                        try { vm.refreshLibrary() } catch (_: Exception) { }
+                    }
+                )
             }
         }
     }
 }
 
+private enum class SpaceCategory {
+    CACHE, LIBRARY, PLAYLISTS, FONTS_VIZ, SETTINGS, EXPORTED_LYRICS
+}
+
+private data class CategoryStat(
+    val category: SpaceCategory,
+    val title: String,
+    val description: String,
+    val bytes: Long
+)
+
+private data class SpaceBreakdown(
+    val totalBytes: Long = 0L,
+    val items: List<CategoryStat> = emptyList()
+)
+
 @Composable
-private fun ManageSpaceScreen(onBack: () -> Unit) {
+private fun ManageSpaceScreen(
+    floating: Boolean,
+    onBack: () -> Unit,
+    onAfterClearLibrary: () -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-
-    var usage by remember { mutableStateOf<StorageManager.Usage?>(null) }
-    var refreshKey by remember { mutableIntStateOf(0) }
+    var breakdown by remember { mutableStateOf(SpaceBreakdown()) }
+    var refreshing by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
-    var confirmWipe by remember { mutableStateOf(false) }
-    var partialFailures by remember { mutableIntStateOf(0) }
-    var pendingClear by remember { mutableStateOf<StorageManager.Item?>(null) }
-    var itemFailures by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var confirm by remember { mutableStateOf<SpaceCategory?>(null) }
+    var confirmAll by remember { mutableStateOf(false) }
 
-    LaunchedEffect(refreshKey) {
-        usage = withContext(Dispatchers.IO) { StorageManager.computeUsage(context) }
+    fun refresh() {
+        scope.launch {
+            refreshing = true
+            breakdown = withContext(Dispatchers.IO) { computeBreakdown(context) }
+            refreshing = false
+        }
     }
 
-    fun wipeInternal() {
-        busy = true
-        scope.launch(Dispatchers.IO) { StorageManager.wipeAppDataAndExit(context) }
-    }
+    LaunchedEffect(Unit) { refresh() }
 
-    fun clearOne(item: StorageManager.Item) {
+    fun clearCategory(cat: SpaceCategory) {
         busy = true
         scope.launch {
-            val failed = withContext(Dispatchers.IO) { StorageManager.clearItem(context, item.kind) }
-            if (failed == 0 && item.kind.closesApp) {
-                // Fecha o app para recarregar do zero o que estava em memória.
-                withContext(Dispatchers.IO) { StorageManager.exitApp(context) }
-                return@launch
-            }
+            withContext(Dispatchers.IO) { performClear(context, cat) }
+            if (cat == SpaceCategory.LIBRARY) onAfterClearLibrary()
+            Toast.makeText(context, "Limpeza concluída", Toast.LENGTH_SHORT).show()
             busy = false
-            refreshKey++
-            if (failed > 0) {
-                itemFailures = item.label to failed
-            } else {
-                Toast.makeText(context, "${item.label}: limpo", Toast.LENGTH_SHORT).show()
-            }
+            refresh()
         }
     }
 
-    fun onItemClick(item: StorageManager.Item) {
-        if (item.bytes <= 0L) {
-            Toast.makeText(context, "Nada para limpar em \"${item.label}\"", Toast.LENGTH_SHORT).show()
-        } else {
-            pendingClear = item
-        }
-    }
-
-    fun startWipe() {
+    fun clearAll() {
         busy = true
         scope.launch {
-            val failed = withContext(Dispatchers.IO) { StorageManager.clearLyronFolderData() }
-            if (failed > 0) {
-                busy = false
-                partialFailures = failed
-            } else {
-                wipeInternal()
+            withContext(Dispatchers.IO) {
+                SpaceCategory.entries
+                    .filter { it != SpaceCategory.EXPORTED_LYRICS }
+                    .forEach { performClear(context, it) }
             }
+            onAfterClearLibrary()
+            Toast.makeText(context, "Dados do app limpos", Toast.LENGTH_SHORT).show()
+            busy = false
+            refresh()
         }
     }
+
+    val cacheBytes = breakdown.items.firstOrNull { it.category == SpaceCategory.CACHE }?.bytes ?: 0L
 
     Box(
         Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xFF1B1530), Color(0xFF0D0D12)))
-            )
+            .background(Color(0xFF0E0E14))
     ) {
+        if (floating) {
+            FloatingIconsBackground(kind = "managespace")
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.40f)))
+
         Column(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
         ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Voltar", tint = Color.White)
+                    Icon(
+                        Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Voltar",
+                        tint = Color.White
+                    )
                 }
                 Text(
                     "Gerenciar espaço",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White
-                )
-            }
-
-            Column(
-                Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 8.dp)
-            ) {
-                val u = usage
-                Text(
-                    "Dados do app",
-                    fontSize = 13.sp,
-                    color = Color.White.copy(0.55f)
-                )
-                Text(
-                    if (u == null) "Calculando…" else StorageManager.formatSize(context, u.totalBytes),
-                    fontSize = 34.sp,
-                    fontWeight = FontWeight.Bold,
                     color = Color.White,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
-
-                if (u != null) {
-                    Text(
-                        "Toque em um item para limpá-lo separadamente.",
-                        fontSize = 12.sp,
-                        color = Color.White.copy(0.45f),
-                        modifier = Modifier.padding(bottom = 10.dp)
-                    )
-                    u.items.forEach { item ->
-                        UsageRow(
-                            item.label,
-                            item.description,
-                            StorageManager.formatSize(context, item.bytes),
-                            enabled = !busy,
-                            onClick = { onItemClick(item) }
-                        )
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    UsageRow(
-                        u.exports.label,
-                        u.exports.description,
-                        StorageManager.formatSize(context, u.exports.bytes),
-                        dimmed = true,
-                        enabled = !busy,
-                        onClick = { onItemClick(u.exports) }
-                    )
-                }
-
-                Spacer(Modifier.height(20.dp))
-                OutlinedButton(
-                    onClick = {
-                        busy = true
-                        scope.launch {
-                            val ok = withContext(Dispatchers.IO) { StorageManager.clearCache(context) }
-                            busy = false
-                            refreshKey++
-                            Toast.makeText(
-                                context,
-                                if (ok) "Cache limpo" else "Alguns arquivos de cache não puderam ser removidos",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    },
-                    enabled = !busy && u != null,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        "Limpar cache" + if (u != null) " (${StorageManager.formatSize(context, u.cacheBytes)})" else "",
-                        color = Color.White
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = { confirmWipe = true },
-                    enabled = !busy && u != null,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD94B4B)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Limpar todos os dados", color = Color.White)
-                }
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Suas músicas nunca são apagadas. \"Limpar todos os dados\" também preserva as imagens e " +
-                        "vídeos de letras exportados; para removê-los, toque em \"Letras exportadas\".",
-                    fontSize = 12.sp,
-                    color = Color.White.copy(0.45f)
-                )
-                Spacer(Modifier.height(24.dp))
             }
+
+            Text(
+                "Dados do app",
+                color = Color.White.copy(0.5f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+            Text(
+                if (refreshing) "Calculando..." else formatBytes(breakdown.totalBytes),
+                color = Color.White,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+            )
+            Text(
+                "Toque em um item para limpá-lo separadamente.",
+                color = Color.White.copy(0.45f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+
+            breakdown.items.forEach { item ->
+                CategoryRow(
+                    title = item.title,
+                    description = item.description,
+                    sizeLabel = if (refreshing) "…" else formatBytes(item.bytes),
+                    enabled = !busy && !refreshing,
+                    onDelete = { confirm = item.category }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = { clearCategory(SpaceCategory.CACHE) },
+                enabled = !busy && !refreshing,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(50)
+            ) {
+                Text("Limpar cache (${formatBytes(cacheBytes)})")
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = { confirmAll = true },
+                enabled = !busy && !refreshing,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFE53935),
+                    contentColor = Color.White
+                )
+            ) {
+                Text("Limpar todos os dados", fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "Suas músicas nunca são apagadas. \"Limpar todos os dados\" também preserva as imagens e vídeos de letras exportados; para removê-los, toque em \"Letras exportadas\".",
+                color = Color.White.copy(0.45f),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 10.dp, bottom = 28.dp)
+            )
         }
     }
 
-    pendingClear?.let { item ->
-        val needsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            !Environment.isExternalStorageManager() &&
-            (item.kind == StorageManager.Kind.LYRON_DATA || item.kind == StorageManager.Kind.EXPORTS)
+    confirm?.let { cat ->
+        val title = breakdown.items.firstOrNull { it.category == cat }?.title ?: "item"
         AlertDialog(
-            onDismissRequest = { pendingClear = null },
-            title = { Text("Limpar ${item.label}?") },
+            onDismissRequest = { confirm = null },
+            title = { Text("Limpar $title?") },
             text = {
                 Text(
-                    clearWarning(item.kind) +
-                        "\n\nEspaço ocupado: ${StorageManager.formatSize(context, item.bytes)}." +
-                        if (needsAllFiles) "\n\nAviso: sem a permissão \"Acesso a todos os arquivos\", " +
-                            "alguns arquivos podem não ser apagados." else ""
+                    when (cat) {
+                        SpaceCategory.LIBRARY -> "Remove a lista de músicas e capas em cache do app. As faixas no armazenamento não são apagadas; a biblioteca será reescaneada."
+                        SpaceCategory.EXPORTED_LYRICS -> "Apaga imagens e vídeos de letras que você gerou."
+                        SpaceCategory.SETTINGS -> "Remove preferências salvas (tema, equalizador, Last.fm local, etc.)."
+                        else -> "Esta ação não pode ser desfeita."
+                    }
                 )
             },
             confirmButton = {
-                TextButton(onClick = { pendingClear = null; clearOne(item) }) {
-                    Text("Limpar", color = Color(0xFFFF6B6B))
-                }
+                TextButton(onClick = {
+                    confirm = null
+                    clearCategory(cat)
+                }) { Text("Limpar", color = Color(0xFFE53935)) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingClear = null }) { Text("Cancelar") }
+                TextButton(onClick = { confirm = null }) { Text("Cancelar") }
             }
         )
     }
 
-    itemFailures?.let { (label, count) ->
+    if (confirmAll) {
         AlertDialog(
-            onDismissRequest = { itemFailures = null },
-            title = { Text("Alguns arquivos ficaram") },
-            text = {
-                Text(
-                    "$count item(ns) de \"$label\" não puderam ser apagados " +
-                        "(talvez falte a permissão \"Acesso a todos os arquivos\")."
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { itemFailures = null }) { Text("OK") }
-            }
-        )
-    }
-
-    if (confirmWipe) {
-        // Sem MANAGE_EXTERNAL_STORAGE a pasta Lyron em /storage/emulated/0 pode não ser apagável.
-        val needsAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            !Environment.isExternalStorageManager()
-        AlertDialog(
-            onDismissRequest = { confirmWipe = false },
+            onDismissRequest = { confirmAll = false },
             title = { Text("Limpar todos os dados?") },
             text = {
                 Text(
-                    "Isso apaga playlists, favoritos, histórico de reprodução, fotos e infos de artistas, " +
-                        "biblioteca em cache, fontes importadas, presets e todas as configurações, " +
-                        "inclusive a conta do Last.fm. O app volta ao estado de recém-instalado e será fechado.\n\n" +
-                        "Suas músicas e as letras exportadas não serão apagadas. " +
-                        "Faça um Backup antes se quiser guardar seus dados." +
-                        if (needsAllFiles) "\n\nAviso: sem a permissão \"Acesso a todos os arquivos\", " +
-                            "a pasta Lyron do armazenamento pode não ser limpa." else ""
+                    "Cache, biblioteca em cache, playlists/histórico, fontes/presets e configurações serão apagados. " +
+                        "Músicas no armazenamento e letras exportadas são preservadas."
                 )
             },
             confirmButton = {
-                TextButton(onClick = { confirmWipe = false; startWipe() }) {
-                    Text("Limpar tudo", color = Color(0xFFFF6B6B))
-                }
+                TextButton(onClick = {
+                    confirmAll = false
+                    clearAll()
+                }) { Text("Limpar tudo", color = Color(0xFFE53935)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmWipe = false }) { Text("Cancelar") }
+                TextButton(onClick = { confirmAll = false }) { Text("Cancelar") }
             }
         )
     }
-
-    if (partialFailures > 0) {
-        AlertDialog(
-            onDismissRequest = { partialFailures = 0 },
-            title = { Text("Alguns arquivos ficaram") },
-            text = {
-                Text(
-                    "$partialFailures item(ns) da pasta Lyron não puderam ser apagados " +
-                        "(talvez falte a permissão \"Acesso a todos os arquivos\"). " +
-                        "Deseja limpar o restante dos dados do app mesmo assim?"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { partialFailures = 0; wipeInternal() }) {
-                    Text("Continuar", color = Color(0xFFFF6B6B))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { partialFailures = 0; refreshKey++ }) { Text("Cancelar") }
-            }
-        )
-    }
-}
-
-private fun clearWarning(kind: StorageManager.Kind): String = when (kind) {
-    StorageManager.Kind.CACHE ->
-        "Apaga arquivos temporários (atualizações baixadas, arquivos da edição de tags e vídeos em geração). " +
-            "Nada que você criou é perdido."
-    StorageManager.Kind.LIBRARY ->
-        "Apaga a lista de músicas em cache e as capas salvas pelo app. Suas músicas não são apagadas: " +
-            "a biblioteca será escaneada de novo na próxima abertura.\n\nO app será fechado em seguida."
-    StorageManager.Kind.LYRON_DATA ->
-        "Apaga playlists, favoritos, histórico de reprodução e as fotos e infos de artistas e álbuns da pasta Lyron. " +
-            "Suas músicas não são apagadas. Faça um Backup antes se quiser guardar esses dados.\n\n" +
-            "O app será fechado em seguida."
-    StorageManager.Kind.FONTS_PRESETS ->
-        "Apaga as fontes importadas e os presets .milk do visualizador. Os presets que já vêm com o app voltam sozinhos."
-    StorageManager.Kind.SETTINGS ->
-        "Apaga todas as preferências e ajustes do app, inclusive a conta do Last.fm, o equalizador e as edições " +
-            "de scrobble salvas. Faça um Backup antes se quiser guardar esses dados.\n\nO app será fechado em seguida."
-    StorageManager.Kind.EXPORTS ->
-        "Apaga de forma permanente as imagens e os vídeos de letras que você gerou. Essa ação não pode ser desfeita."
 }
 
 @Composable
-private fun UsageRow(
+private fun CategoryRow(
     title: String,
-    subtitle: String,
-    size: String,
-    dimmed: Boolean = false,
-    enabled: Boolean = true,
-    onClick: (() -> Unit)? = null
+    description: String,
+    sizeLabel: String,
+    enabled: Boolean,
+    onDelete: () -> Unit
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color.White.copy(if (dimmed) 0.03f else 0.06f))
-            .then(if (onClick != null) Modifier.clickable(enabled = enabled, onClick = onClick) else Modifier)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(0.07f))
+            .clickable(enabled = enabled, onClick = onDelete)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
             Text(
-                title,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                color = Color.White.copy(if (dimmed) 0.7f else 1f)
+                description,
+                color = Color.White.copy(0.45f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = 2.dp)
             )
-            Text(subtitle, fontSize = 12.sp, color = Color.White.copy(0.5f))
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(size, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(if (dimmed) 0.6f else 0.9f))
-            if (onClick != null) {
-                Icon(
-                    Icons.Rounded.DeleteOutline,
-                    contentDescription = "Limpar $title",
-                    tint = Color.White.copy(0.45f),
-                    modifier = Modifier.padding(start = 10.dp).size(20.dp)
-                )
-            }
-        }
+        Text(
+            sizeLabel,
+            color = Color.White.copy(0.85f),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(end = 8.dp)
+        )
+        Icon(
+            Icons.Rounded.Delete,
+            contentDescription = "Limpar",
+            tint = Color.White.copy(0.55f),
+            modifier = Modifier.size(20.dp)
+        )
     }
+}
+
+/**
+ * Usa o StorageManager (mesma conta da linha "Gerenciar espaço" em Avançado), em vez de ter
+ * um cálculo próprio: antes cada tela olhava pastas diferentes e os totais não batiam.
+ */
+private fun spaceCategoryOf(kind: StorageManager.Kind): SpaceCategory = when (kind) {
+    StorageManager.Kind.CACHE -> SpaceCategory.CACHE
+    StorageManager.Kind.LIBRARY -> SpaceCategory.LIBRARY
+    StorageManager.Kind.LYRON_DATA -> SpaceCategory.PLAYLISTS
+    StorageManager.Kind.FONTS_PRESETS -> SpaceCategory.FONTS_VIZ
+    StorageManager.Kind.SETTINGS -> SpaceCategory.SETTINGS
+    StorageManager.Kind.EXPORTS -> SpaceCategory.EXPORTED_LYRICS
+}
+
+private fun computeBreakdown(context: android.content.Context): SpaceBreakdown {
+    val usage = StorageManager.computeUsage(context)
+    val items = (usage.items + usage.exports).map {
+        CategoryStat(spaceCategoryOf(it.kind), it.label, it.description, it.bytes)
+    }
+    return SpaceBreakdown(usage.totalBytes, items)
+}
+
+private fun performClear(context: android.content.Context, cat: SpaceCategory) {
+    val kind = when (cat) {
+        SpaceCategory.CACHE -> StorageManager.Kind.CACHE
+        SpaceCategory.LIBRARY -> StorageManager.Kind.LIBRARY
+        SpaceCategory.PLAYLISTS -> StorageManager.Kind.LYRON_DATA
+        SpaceCategory.FONTS_VIZ -> StorageManager.Kind.FONTS_PRESETS
+        SpaceCategory.SETTINGS -> StorageManager.Kind.SETTINGS
+        SpaceCategory.EXPORTED_LYRICS -> StorageManager.Kind.EXPORTS
+    }
+    try { StorageManager.clearItem(context, kind) } catch (_: Exception) { }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return String.format(Locale.US, "%.1f kB", kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return String.format(Locale.US, "%.0f MB", mb)
+    return String.format(Locale.US, "%.2f GB", mb / 1024.0)
 }

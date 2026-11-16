@@ -6,10 +6,9 @@ data class LibrarySettings(
     /** Separadores de artistas, separados por espaço. Ex.: "; / feat." */
     val artistSeparators: String = "; /",
     /**
-     * Nomes de artistas (um por linha ou separados por vírgula/ponto-e-vírgula)
-     * que NÃO devem ser divididos mesmo com "separar artistas" ativo.
-     * Comparação case-insensitive; se o valor bruto da tag bater com algum,
-     * a tag inteira é mantida como um único artista.
+     * Nomes de artistas que NÃO devem ser divididos (um por linha somente).
+     * Não use vírgula como separador — artistas como "Tyler, the Creator" precisam
+     * da vírgula no nome. Comparação case-insensitive por segmento da tag.
      */
     val artistExceptions: String = "",
     val splitGenres: Boolean = false,
@@ -25,42 +24,75 @@ data class LibrarySettings(
      * e letras acentuadas valem pela letra base. Desligado, vale o texto como está.
      * @see com.tolete.player.data.AlphaSort
      */
-    val firstLetterOrder: Boolean = false
+    val firstLetterOrder: Boolean = false,
+    /** ON, WIFI_ONLY ou OFF; Ligado preserva o comportamento atual. */
+    val artistAutoFetchMode: String = "ON"
 )
 
 /**
- * Divide um valor de tag ("Artista A; Artista B") em vários nomes.
- * [separators] é uma lista de separadores separados por espaço (ex.: "; / feat.").
- * Sem separadores, ou se nada casar, devolve o valor original como único item.
- * [exceptions] lista de nomes brutos que não devem ser divididos (case-insensitive).
+ * Divide um valor de tag (por exemplo, "Artista A; Artista B") em vários nomes.
+ * Separadores são tokens separados por espaço (ex.: "; / feat."). Exceções, uma por linha,
+ * são preservadas quando ocupam um segmento, mesmo que a tag também tenha outros artistas.
  */
 class TagSplitter(
     separators: String,
     exceptions: String = ""
 ) {
-
-    private val exceptionSet: Set<String> = exceptions
-        .split(Regex("\\n+"))  // um artista por linha
-        .map { it.trim() }
-        .filter { it.isNotEmpty() }
-        .map { it.lowercase() }
-        .toSet()
-
-    private val regex: Regex? = separators
+    private val separatorTokens = separators
         .split(Regex("\\s+"))
         .filter { it.isNotEmpty() }
-        .sortedByDescending { it.length } // "&amp;" antes de "&"
-        .takeIf { it.isNotEmpty() }
-        ?.joinToString("|") { Regex.escape(it) }
-        ?.let { Regex(it, RegexOption.IGNORE_CASE) }
+        .distinct()
+        .sortedByDescending { it.length }
+
+    private val exceptionNames = exceptions
+        .split(Regex("\\r?\\n+"))
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinctBy { it.lowercase() }
+        .sortedByDescending { it.length }
 
     fun split(raw: String): List<String> {
-        if (raw.trim().lowercase() in exceptionSet) return listOf(raw.trim())
-        val r = regex ?: return listOf(raw)
-        val parts = raw.split(r)
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinctBy { it.lowercase() }
-        return if (parts.isEmpty()) listOf(raw) else parts
+        if (raw.isBlank() || separatorTokens.isEmpty()) return listOf(raw)
+        val result = mutableListOf<String>()
+        val segment = StringBuilder()
+
+        fun flushSegment() {
+            val value = segment.toString().trim()
+            if (value.isNotEmpty()) result += value
+            segment.setLength(0)
+        }
+
+        var index = 0
+        while (index < raw.length) {
+            val exception = exceptionNames.firstOrNull { candidate ->
+                raw.regionMatches(index, candidate, 0, candidate.length, ignoreCase = true) &&
+                    segment.toString().isBlank() &&
+                    isSegmentEnd(raw, index + candidate.length)
+            }
+            if (exception != null) {
+                val end = index + exception.length
+                result += raw.substring(index, end).trim()
+                index = end
+                continue
+            }
+
+            val separator = separatorTokens.firstOrNull { raw.startsWith(it, index, ignoreCase = true) }
+            if (separator != null) {
+                flushSegment()
+                index += separator.length
+            } else {
+                segment.append(raw[index])
+                index++
+            }
+        }
+        flushSegment()
+        return result.distinctBy { it.lowercase() }.ifEmpty { listOf(raw) }
+    }
+
+    /** Uma exceção só protege um segmento inteiro, não parte de um nome maior. */
+    private fun isSegmentEnd(raw: String, from: Int): Boolean {
+        var index = from
+        while (index < raw.length && raw[index].isWhitespace()) index++
+        return index >= raw.length || separatorTokens.any { raw.startsWith(it, index, ignoreCase = true) }
     }
 }

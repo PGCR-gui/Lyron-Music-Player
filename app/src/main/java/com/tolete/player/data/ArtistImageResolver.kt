@@ -1,5 +1,8 @@
 package com.tolete.player.data
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -17,6 +20,31 @@ import java.net.URLEncoder
  * Se [FANART_API_KEY] estiver em branco, esse passo é ignorado.
  */
 object ArtistImageResolver {
+
+    @Volatile private var appContext: Context? = null
+
+    fun initialize(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /** Consulta a preferência em tempo real para respeitar alterações feitas enquanto o app está aberto. */
+    fun isAutomaticLookupAllowed(): Boolean {
+        val context = appContext ?: return true
+        val mode = context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+            .getString("artist_auto_fetch_mode", "ON") ?: "ON"
+        return when (mode) {
+            "OFF" -> false
+            "WIFI_ONLY" -> {
+                val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                    ?: return false
+                val caps = manager.getNetworkCapabilities(manager.activeNetwork)
+                caps != null &&
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            }
+            else -> true
+        }
+    }
 
     private const val USER_AGENT = "LyronMusicPlayer/0.50 (https://linktr.ee/pgcrgui)"
     /** Chave gratuita do Fanart.tv — substitua pela sua se quiser priorizar Fanart. */
@@ -86,17 +114,20 @@ object ArtistImageResolver {
         out
     }
 
-    suspend fun resolve(artistName: String): Result = withContext(Dispatchers.IO) {
+    suspend fun resolve(artistName: String, force: Boolean = false): Result = withContext(Dispatchers.IO) {
         if (artistName.isBlank()) return@withContext Result(null)
+        if (!force && !isAutomaticLookupAllowed()) {
+            return@withContext Result(null, source = "automatic lookup disabled")
+        }
 
-        val mbid = musicBrainzArtistId(artistName)
+        val mbid = if (force || isAutomaticLookupAllowed()) musicBrainzArtistId(artistName) else null
 
         // --- Informações (bio): Wikidata primeiro ---
         var bio: String? = null
         var bioSource = "unknown"
         var wikiImage: String? = null
         try {
-            val wiki = WikidataClient.searchArtist(artistName)
+            val wiki = if (force || isAutomaticLookupAllowed()) WikidataClient.searchArtist(artistName) else null
             if (wiki != null) {
                 bio = wiki.extract?.takeIf { it.isNotBlank() } ?: wiki.description?.takeIf { it.isNotBlank() }
                 if (!bio.isNullOrBlank()) bioSource = "wikidata"
@@ -109,7 +140,7 @@ object ArtistImageResolver {
         var imageSource = "unknown"
 
         // 1) Fanart.tv via MBID
-        if (!mbid.isNullOrBlank() && FANART_API_KEY.isNotBlank()) {
+        if ((force || isAutomaticLookupAllowed()) && !mbid.isNullOrBlank() && FANART_API_KEY.isNotBlank()) {
             fanartImage(mbid)?.let {
                 imageUrl = it
                 imageSource = "fanart.tv"
@@ -117,7 +148,7 @@ object ArtistImageResolver {
         }
 
         // 2) TheAudioDB
-        if (imageUrl == null) {
+        if ((force || isAutomaticLookupAllowed()) && imageUrl == null) {
             audioDbArtist(artistName)?.let { (img, adbBio) ->
                 if (!img.isNullOrBlank()) {
                     imageUrl = img
@@ -132,7 +163,7 @@ object ArtistImageResolver {
         }
 
         // 3) Deezer
-        if (imageUrl == null) {
+        if ((force || isAutomaticLookupAllowed()) && imageUrl == null) {
             deezerArtistImage(artistName)?.let {
                 imageUrl = it
                 imageSource = "deezer"
@@ -140,7 +171,7 @@ object ArtistImageResolver {
         }
 
         // 4) Last.fm
-        if (imageUrl == null || bio.isNullOrBlank()) {
+        if ((force || isAutomaticLookupAllowed()) && (imageUrl == null || bio.isNullOrBlank())) {
             try {
                 val lfm = LastFmClient.getArtistInfo(artistName)
                 if (imageUrl == null && !lfm?.imageUrl.isNullOrBlank()) {

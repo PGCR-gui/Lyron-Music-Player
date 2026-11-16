@@ -66,6 +66,7 @@ private val helpPageTitles = listOf(
     "Organizar biblioteca",
     "Scrobbling (Last.fm)",
     "Vídeo de letras",
+    "Funções avançadas",
     "Nota final",
     "Conclusão"
 )
@@ -76,7 +77,7 @@ fun HelpScreen(
     onFinishedFirstRun: (() -> Unit)? = null
 ) {
     var page by remember { mutableIntStateOf(0) }
-    val totalPages = 16
+    val totalPages = 17
     var showIndex by remember { mutableStateOf(false) }
 
     fun skipTutorial() {
@@ -136,10 +137,11 @@ fun HelpScreen(
                 11 -> HelpPageOrganize(onNext = { page = 12 }, onBack = { page = 10 }, hideBottomButtons = true)
                 12 -> HelpPageScrobbler(onNext = { page = 13 }, onBack = { page = 11 }, hideBottomButtons = true)
                 13 -> HelpPageLyricsVideo(onNext = { page = 14 }, onBack = { page = 12 }, hideBottomButtons = true)
-                14 -> HelpPageClosingNote(onNext = { page = 15 }, onBack = { page = 13 }, hideBottomButtons = true)
-                15 -> HelpPageFinal(
+                14 -> HelpPageAdvanced(onNext = { page = 15 }, onBack = { page = 13 }, hideBottomButtons = true)
+                15 -> HelpPageClosingNote(onNext = { page = 16 }, onBack = { page = 14 }, hideBottomButtons = true)
+                16 -> HelpPageFinal(
                     onDone = { skipTutorial() },
-                    onBack = { page = 14 },
+                    onBack = { page = 15 },
                     hideBottomButtons = true
                 )
             }
@@ -887,7 +889,7 @@ private fun HelpPageLibrarySettings(onNext: () -> Unit, onBack: () -> Unit, hide
             Column {
                 Text("Configurações de biblioteca", fontFamily = julia, fontSize = 26.sp, color = Color.White, modifier = Modifier.padding(bottom = 8.dp))
                 Text(
-                    "Aqui você pode encontrar funções úteis como o separador de tags, em que o Player pode diferenciar quando músicas tiverem vários artistas ou gêneros nas tags, a opção de Blacklist para não adicionar as músicas de pastas determinadas pelo usuário, Duração Mínima para ignorar arquivos de áudio pequenos e usuário Last.fm para importar favoritos.",
+                    "Na configuração inicial ou em Configurações → Biblioteca, escolha como ler a biblioteca: Músicas e áudio usa a permissão do Android e o índice MediaStore; pode não encontrar alguns arquivos não indexados (como certos DSF) e não libera gerenciamento geral de arquivos. Acesso a todos os arquivos faz uma busca mais ampla, mas requer a permissão especial do Android.\n\nVocê também encontra o separador de tags, a blacklist de pastas, a duração mínima e as opções Last.fm.",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
                 OptionalHelpDrawable("help_foto_05")
@@ -964,6 +966,51 @@ private fun HelpPageScrobbler(onNext: () -> Unit, onBack: () -> Unit, hideBottom
                         "Edições manuais ficam em Lyron/scrobble_edits.json. Use \"Editar tags\" na notificação ou importe um arquivo no mesmo formato.",
                     color = Color.White.copy(0.88f), fontSize = 15.sp, lineHeight = 22.sp
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HelpPageAdvanced(onNext: () -> Unit, onBack: () -> Unit, hideBottomButtons: Boolean = false) {
+    var show by remember { mutableStateOf(false) }
+    var nav by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(150); show = true; delay(500); nav = true }
+    val better = helpFont(R.font.better_vcr)
+    HelpScrollPage(
+        showNav = nav,
+        onBack = onBack,
+        onNext = onNext,
+        nextLabel = "Próximo",
+        hideBottomButtons = hideBottomButtons
+    ) {
+        AnimatedVisibility(show, enter = fadeIn(tween(500)) + slideInVertically(tween(500)) { 30 }) {
+            Column {
+                Text(
+                    "Funções avançadas",
+                    fontFamily = better,
+                    fontSize = 26.sp,
+                    color = Color.White,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                OptionalHelpDrawable("help_foto_avancado_tema")
+                Text(
+                    "Tema por foto (Aparência)\n" +
+                        "Escolha uma imagem de fundo com blur ajustável. Enquanto uma faixa toca, as cores da capa dominam o gradiente e as cores flutuantes. Ative \"Usar capa enquanto toca\" para trocar a foto pela capa automaticamente.\n\n" +
+                        "Índice alfabético\n" +
+                        "Em Aparência você escolhe entre o índice em vidro (com língua e prefixos DA/DB…) ou o clássico: uma barrinha colorida com letras, arrastável.\n\n" +
+                        "Sincronização de letras (karaokê)\n" +
+                        "No editor de letras você sincroniza palavra a palavra. Há botão para marcar o fim (endMs) só da última palavra de cada linha. A linha só herda o tempo da primeira palavra se o timestamp da linha estiver maior que o dela — evita puxar linhas já corretas para trás.\n\n" +
+                        "Retrospectivas\n" +
+                        "O app pode avisar no sábado (semana), no último dia do mês e no último dia do ano, a partir das 20h, para exportar a retrospectiva (Last.fm ou histórico local).\n\n" +
+                        "Gerenciar espaço\n" +
+                        "Em Configurações → Armazenamento você vê o total e limpa por categoria: cache, biblioteca/capas, playlists e histórico, fontes/presets .milk, configurações e letras exportadas.",
+                    color = Color.White.copy(0.88f),
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp
+                )
+                OptionalHelpDrawable("help_foto_avancado_espaco")
+                OptionalHelpDrawable("help_foto_avancado_karaoke")
             }
         }
     }

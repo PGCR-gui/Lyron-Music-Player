@@ -135,6 +135,10 @@ public final class FfmpegAudioRenderer extends DecoderAudioRenderer<FfmpegAudioD
     String mimeType = checkNotNull(format.sampleMimeType);
     if (!FfmpegLibrary.isAvailable() || !MimeTypes.isAudio(mimeType)) {
       return C.FORMAT_UNSUPPORTED_TYPE;
+    } else if (MimeTypes.AUDIO_AAC.equals(mimeType)) {
+      // AAC (m4a/mp4): o decoder FFmpeg falhava com ERROR_CODE_DECODING_FAILED e a faixa era
+      // pulada. Todo aparelho decodifica AAC via MediaCodec, então deixamos para ele.
+      return C.FORMAT_UNSUPPORTED_SUBTYPE;
     } else if (!FfmpegLibrary.supportsFormat(mimeType)
         || (!sinkSupportsFormat(format, C.ENCODING_PCM_16BIT)
             && !sinkSupportsFormat(format, C.ENCODING_PCM_FLOAT))) {

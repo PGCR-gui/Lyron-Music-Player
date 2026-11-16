@@ -31,12 +31,17 @@ internal object NeteaseLyricsClient {
         val durationSec: Int
     )
 
-    suspend fun search(title: String, artist: String, limit: Int): List<LyricsSearchResult> = coroutineScope {
+    suspend fun search(
+        title: String,
+        artist: String,
+        limit: Int,
+        preferRomanization: Boolean = false
+    ): List<LyricsSearchResult> = coroutineScope {
         val keyword = if (artist.isBlank()) title else "$title $artist"
         searchSongs(keyword, limit)
-            .map { song -> async(Dispatchers.IO) { fetch(song) } }
+            .map { song -> async(Dispatchers.IO) { fetch(song, preferRomanization) } }
             .awaitAll()
-            .filterNotNull()
+            .flatten()
     }
 
     // ---------- Busca ----------
@@ -89,25 +94,42 @@ internal object NeteaseLyricsClient {
 
     // ---------- Letra ----------
 
-    private fun fetch(song: Song): LyricsSearchResult? {
-        val json = eapiLyric(song.id) ?: classicLyric(song.id) ?: return null
+    private fun fetch(song: Song, preferRomanization: Boolean): List<LyricsSearchResult> {
+        val json = eapiLyric(song.id) ?: classicLyric(song.id) ?: return emptyList()
         val yrc = json.optJSONObject("yrc")?.optString("lyric").orEmpty()
         val lrc = json.optJSONObject("lrc")?.optString("lyric").orEmpty()
+        // romalrc = romanização. tlyric = TRADUÇÃO (ex. ocidental→japonês) — nunca misturar.
+        val romalrc = json.optJSONObject("romalrc")?.optString("lyric").orEmpty()
 
-        var lines: List<LyricLine> = emptyList()
-        if (yrc.isNotBlank()) lines = parseYrc(yrc)
-        if (lines.isEmpty() && lrc.isNotBlank()) lines = LyricsExtractor.parseLyricsContent(lrc)
-        if (lines.isEmpty()) return null
-
-        return LyricsFormat.build(
+        var originalLines: List<LyricLine> = emptyList()
+        if (yrc.isNotBlank()) originalLines = parseYrc(yrc)
+        if (originalLines.isEmpty() && lrc.isNotBlank()) originalLines = LyricsExtractor.parseLyricsContent(lrc)
+        if (originalLines.isEmpty()) return emptyList()
+        val romanLines = if (romalrc.isNotBlank()) LyricsExtractor.parseLyricsContent(romalrc) else emptyList()
+        val originalText = originalLines.joinToString(" ") { it.text }.trim()
+        val romanText = romanLines.joinToString(" ") { it.text }.trim()
+        val includeRoman = romanLines.isNotEmpty() && !romanText.equals(originalText, ignoreCase = true)
+        val original = LyricsFormat.build(
             source = LyricsSource.NETEASE,
-            id = song.id.toString(),
+            id = "${song.id}:original",
             trackName = song.name,
             artistName = song.artist,
             albumName = song.album,
             durationSec = song.durationSec,
-            rawLines = lines
+            rawLines = originalLines,
+            variant = LyricsVariant.ORIGINAL
         )
+        val romanized = if (includeRoman) LyricsFormat.build(
+            source = LyricsSource.NETEASE,
+            id = "${song.id}:romanized",
+            trackName = song.name,
+            artistName = song.artist,
+            albumName = song.album,
+            durationSec = song.durationSec,
+            rawLines = romanLines,
+            variant = LyricsVariant.ROMANIZED
+        ) else null
+        return if (preferRomanization) listOfNotNull(romanized, original) else listOfNotNull(original, romanized)
     }
 
     /** Endpoint usado pelo cliente oficial; é o que entrega o "yrc" (palavra por palavra). */

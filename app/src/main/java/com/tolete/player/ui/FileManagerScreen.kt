@@ -590,30 +590,39 @@ fun FileManagerScreen(
     }
 
     if (showTagRename && tagRenameFiles.isNotEmpty()) {
-        val previewTracks = remember(tagRenameFiles) {
-            tagRenameFiles.map { f ->
-                val tags = try {
-                    com.tolete.player.data.TagReader.read(f)
-                } catch (_: Exception) { null }
-                com.tolete.player.data.Track(
-                    id = f.absolutePath,
-                    title = tags?.title ?: f.nameWithoutExtension,
-                    artist = tags?.artist.orEmpty(),
-                    album = tags?.album.orEmpty(),
-                    albumArtist = tags?.albumArtist.orEmpty(),
-                    genre = tags?.genre.orEmpty(),
-                    duration = tags?.durationMs ?: 0L,
-                    uri = android.net.Uri.fromFile(f),
-                    path = f.absolutePath,
-                    folder = f.parent ?: "",
-                    year = tags?.year?.toIntOrNull(),
-                    trackNumber = tags?.track?.filter { it.isDigit() }?.toIntOrNull(),
-                    composer = tags?.composer.orEmpty()
-                )
+        var previewTracks by remember(tagRenameFiles) { mutableStateOf<List<Track>>(emptyList()) }
+        var previewLoading by remember(tagRenameFiles) { mutableStateOf(true) }
+        LaunchedEffect(tagRenameFiles) {
+            val files = tagRenameFiles
+            previewLoading = true
+            previewTracks = withContext(Dispatchers.IO) {
+                files.map { f ->
+                    val tags = try {
+                        com.tolete.player.data.TagReader.read(f)
+                    } catch (_: Exception) { null }
+                    com.tolete.player.data.Track(
+                        id = f.absolutePath,
+                        title = tags?.title ?: f.nameWithoutExtension,
+                        artist = tags?.artist.orEmpty(),
+                        album = tags?.album.orEmpty(),
+                        albumArtist = tags?.albumArtist.orEmpty(),
+                        genre = tags?.genre.orEmpty(),
+                        duration = tags?.durationMs ?: 0L,
+                        uri = android.net.Uri.fromFile(f),
+                        path = f.absolutePath,
+                        folder = f.parent ?: "",
+                        year = tags?.year?.toIntOrNull(),
+                        trackNumber = tags?.track?.filter { it.isDigit() }?.toIntOrNull(),
+                        composer = tags?.composer.orEmpty()
+                    )
+                }
             }
+            previewLoading = false
         }
         BatchRenameDialog(
             tracks = previewTracks,
+            totalCount = tagRenameFiles.size,
+            isLoading = previewLoading,
             onDismiss = {
                 showTagRename = false
                 tagRenameFiles = emptyList()

@@ -98,7 +98,9 @@ data class TagEdits(
     /** Nova capa (JPEG já reduzido) escolhida no editor; null = manter a atual. */
     val cover: ByteArray? = null,
     /** true só se o usuário esvaziou de propósito uma letra que existia. */
-    val clearLyrics: Boolean = false
+    val clearLyrics: Boolean = false,
+    /** false quando a letra do formulário é igual à lida do arquivo (ex.: só trocou a capa). */
+    val lyricsChanged: Boolean = true
 )
 
 fun TagEdits.toWriterFields() = TagWriter.Fields(
@@ -117,6 +119,7 @@ fun TagEdits.toWriterFields() = TagWriter.Fields(
     comment = comment,
     lyrics = lyrics,
     clearLyrics = clearLyrics,
+    lyricsChanged = lyricsChanged,
     bpm = bpm,
     isrc = isrc,
     copyright = copyright,
@@ -242,7 +245,8 @@ fun TagEditorScreen(
         bpm, isrc, copyright, encoder, publisher,
         originalArtist, originalYear,
         pendingCover,
-        clearLyrics = originalLyrics.isNotBlank() && lyrics.isBlank()
+        clearLyrics = originalLyrics.isNotBlank() && lyrics.isBlank(),
+        lyricsChanged = lyrics != originalLyrics
     )
 
     fun applyTags(t: TagReader.Tags) {

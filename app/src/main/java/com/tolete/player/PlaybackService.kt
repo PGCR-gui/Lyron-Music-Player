@@ -2,6 +2,7 @@ package com.tolete.player
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.provider.Settings
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
@@ -37,6 +38,8 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -48,6 +51,8 @@ import com.tolete.player.data.FavoritesFile
 import com.tolete.player.data.HighRatePcmDownsampler
 import com.tolete.player.data.LastFmScrobbler
 import com.tolete.player.data.LibraryCache
+import com.tolete.player.data.LyricsExtractor
+import com.tolete.player.data.LyricLine
 import com.tolete.player.data.Track
 import com.tolete.player.data.ScrobbleEdits
 import com.tolete.player.scrobble.ScrobbleNotifier
@@ -122,6 +127,8 @@ class PlaybackService : MediaSessionService() {
             if (hz % 1000 == 0) "${hz / 1000} kHz" else String.format(java.util.Locale.ROOT, "%.1f kHz", hz / 1000.0)
         /** 7 minutos pausado → remove notificação e encerra o serviço. */
         private const val IDLE_STOP_MS = 7 * 60 * 1000L
+        /** Oculta somente a notificação do scrobbler após uma pausa longa. */
+        private const val SCROBBLE_PAUSE_HIDE_MS = 3 * 60 * 1000L
         const val ACTION_TOGGLE_FAVORITE = "com.tolete.player.TOGGLE_FAVORITE"
         const val ACTION_CLOSE_APP = "com.tolete.player.CLOSE_APP"
         const val ACTION_SET_SPEED = "com.tolete.player.SET_SPEED"
@@ -146,6 +153,9 @@ class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     /** Cancela notificação/serviço após 7 min seguidos sem reprodução. */
     private var idleStopJob: Job? = null
+    private var scrobblePauseHideJob: Job? = null
+    @Volatile private var scrobbleNotificationHidden = false
+    private var lyricsPopupMonitorJob: Job? = null
     /** Incrementado quando o estado do player muda, para redesenhar a notificação do scrobbler. */
     private val scrobbleTick = MutableStateFlow(0)
     /** Índice id -> Track (do cache da biblioteca) para o serviço saber qual faixa está tocando sem depender da UI. */
@@ -275,6 +285,18 @@ class PlaybackService : MediaSessionService() {
         crossfadeMixJob?.cancel()
         crossfadeMixJob = scope.launch {
             while (isActive && crossfadeActive) {
+                // Se o decoder/saída do preview parar durante a sobreposição, mantenha
+                // a faixa principal audível em vez de reduzi-la até zero.
+                if (!preview.isPlaying || preview.playbackState != Player.STATE_READY) {
+                    crossfadeFailedKey = nextKey
+                    android.util.Log.w(
+                        "PlaybackService",
+                        "Crossfade cancelado: preview parou (state=${preview.playbackState}, " +
+                            "position=${preview.currentPosition}ms)"
+                    )
+                    cancelCrossfade(player, restoreMainVolume = true)
+                    return@launch
+                }
                 val fraction = ((System.currentTimeMillis() - startedAt).toFloat() / durationMs)
                     .coerceIn(0f, 1f)
                 val angle = fraction * (Math.PI.toFloat() / 2f)
@@ -291,6 +313,18 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /** STATE_READY, sozinho, não garante que o player auxiliar começou a produzir áudio. */
+    private suspend fun previewHasAudioProgress(preview: ExoPlayer): Boolean {
+        val startPosition = preview.currentPosition
+        repeat(8) {
+            if (preview.playbackState == Player.STATE_READY && preview.isPlaying &&
+                preview.currentPosition >= startPosition + 35L
+            ) return true
+            delay(35)
+        }
+        return false
+    }
+
     /** Inicia uma sobreposição real apenas quando existe próxima faixa e a saída permite mixagem. */
     private fun startCrossfadeMonitor(
         player: ExoPlayer,
@@ -301,7 +335,15 @@ class PlaybackService : MediaSessionService() {
     ) {
         crossfadeMonitorJob?.cancel()
         crossfadeMonitorJob = scope.launch {
+            var usbConnected = allowed &&
+                com.tolete.player.data.UsbAudioRouter.findUsbOutput(this@PlaybackService) != null
+            var lastUsbCheckMs = 0L
             while (isActive) {
+                val nowMs = System.currentTimeMillis()
+                if (allowed && nowMs - lastUsbCheckMs >= 250L) {
+                    usbConnected = com.tolete.player.data.UsbAudioRouter.findUsbOutput(this@PlaybackService) != null
+                    lastUsbCheckMs = nowMs
+                }
                 if (crossfadeHandoffInProgress) {
                     delay(16)
                     continue
@@ -315,7 +357,9 @@ class PlaybackService : MediaSessionService() {
                 val duration = player.duration
                 val remaining = if (duration > 0L) duration - player.currentPosition else Long.MAX_VALUE
                 val speedIsNormal = kotlin.math.abs(player.playbackParameters.speed - 1f) < 0.001f
-                val canPrepare = allowed && crossfadeDuration > 0L && player.isPlaying &&
+                // Alguns DACs/drivers não mixam duas AudioTracks; não sobreponha áudio USB.
+                // O preview é verificado novamente quando a faixa/timer progride.
+                val canPrepare = allowed && !usbConnected && crossfadeDuration > 0L && player.isPlaying &&
                     speedIsNormal && currentItem != null && nextItem != null &&
                     !isDsfMediaItem(currentItem) && !isDsfMediaItem(nextItem)
 
@@ -356,9 +400,27 @@ class PlaybackService : MediaSessionService() {
                 if (!crossfadeActive && remaining in 1..crossfadeDuration) {
                     val preview = crossfadePreviewPlayer
                     if (preview?.playbackState == Player.STATE_READY &&
-                        crossfadePreviewKey == nextKey && preview.duration > crossfadeDuration
+                        crossfadePreviewKey == nextKey &&
+                        preview.duration > crossfadeDuration
                     ) {
-                        beginCrossfade(player, preview, nextKey, minOf(crossfadeDuration, remaining))
+                        // Começa a prévia com volume zero; somente após comprovar avanço
+                        // reduziremos o volume da faixa atual.
+                        preview.play()
+                        val previewAdvanced = previewHasAudioProgress(preview)
+                        val stillSameTrack = mediaItemKey(player.currentMediaItem) == mediaItemKey(activeItem)
+                        val remainingNow = player.duration - player.currentPosition
+                        if (previewAdvanced && stillSameTrack && player.isPlaying && remainingNow > 0L) {
+                            beginCrossfade(player, preview, nextKey, minOf(crossfadeDuration, remainingNow))
+                        } else if (!previewAdvanced) {
+                            crossfadeFailedKey = nextKey
+                            android.util.Log.w(
+                                "PlaybackService",
+                                "Crossfade omitido: preview sem progresso; mantendo volume da faixa atual"
+                            )
+                            releaseCrossfadePreview()
+                        } else {
+                            releaseCrossfadePreview()
+                        }
                     } else if (preview?.playbackState == Player.STATE_READY &&
                         preview.duration in 1..crossfadeDuration
                     ) {
@@ -715,20 +777,25 @@ class PlaybackService : MediaSessionService() {
         currentAudioSessionId = player.audioSessionId
         exoPlayerRef = player
 
-        // Fidelidade roteia ao DAC USB (ou ao fone com fio) e reage a conectar/desconectar
+        // Fidelidade roteia ao DAC USB (ou ao fone com fio) e reage a conectar/desconectar.
+        // Também escuta troca fone↔alto-falante no modo normal para evitar pitch/velocidade errados.
         dedicatedOutputActive = dedicatedOutput
         if (dedicatedOutput) {
             applyOutputRouting(player)
-            val cb = object : android.media.AudioDeviceCallback() {
-                override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) =
-                    applyOutputRouting(player)
-                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) =
-                    applyOutputRouting(player)
-            }
-            deviceCallback = cb
-            (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
-                .registerAudioDeviceCallback(cb, android.os.Handler(android.os.Looper.getMainLooper()))
         }
+        val cb = object : android.media.AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                if (dedicatedOutputActive) applyOutputRouting(player)
+                onAudioRouteChanged(player)
+            }
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                if (dedicatedOutputActive) applyOutputRouting(player)
+                onAudioRouteChanged(player)
+            }
+        }
+        deviceCallback = cb
+        (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager)
+            .registerAudioDeviceCallback(cb, android.os.Handler(android.os.Looper.getMainLooper()))
 
         // Bit-perfect: evita processamento extra (skip silence, etc.)
         // Nota: velocidade do sincronizador ainda pode alterar playbackParameters sob demanda.
@@ -736,6 +803,10 @@ class PlaybackService : MediaSessionService() {
         if (bitPerfect) {
             player.playbackParameters = androidx.media3.common.PlaybackParameters.DEFAULT
         }
+
+        // Watchdog: alguns FLAC reportam duração maior que o áudio real e o player
+        // fica “tocando” silêncio nos últimos segundos sem emitir STATE_ENDED.
+        startEndOfTrackWatchdog(player)
 
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -746,6 +817,7 @@ class PlaybackService : MediaSessionService() {
                     currentAudioSessionId = sid
                 }
                 scheduleIdleStopIfNeeded(isPlaying)
+                scheduleScrobbleNotificationVisibility(effectivelyPlaying(player))
                 // Trocou de faixa durante a pausa? Garante que a notificação mostre a faixa certa ao voltar.
                 syncScrobbleCurrent(newPlay = false)
                 scrobbleTick.value++
@@ -754,10 +826,16 @@ class PlaybackService : MediaSessionService() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 val playing = player.isPlaying
                 scheduleIdleStopIfNeeded(playing)
+                scheduleScrobbleNotificationVisibility(effectivelyPlaying(player))
                 scrobbleTick.value++
+                // Fim real da faixa: avança (ou repete) em vez de ficar em silêncio no final
+                if (playbackState == Player.STATE_ENDED) {
+                    handleTrackEnded(player)
+                }
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                scheduleScrobbleNotificationVisibility(effectivelyPlaying(player))
                 scrobbleTick.value++
             }
 
@@ -821,6 +899,8 @@ class PlaybackService : MediaSessionService() {
                 handlePlayerError(player, error)
             }
         })
+        startLyricsPopupMonitor(player)
+        scheduleScrobbleNotificationVisibility(effectivelyPlaying(player))
 
         // Intent que abre o app ao tocar na notificação (fora dos botões de ação)
         val sessionActivity = PendingIntent.getActivity(
@@ -916,6 +996,10 @@ class PlaybackService : MediaSessionService() {
                 .combine(LastFmScrobbler.scrobbledId) { _, _ -> }
                 .combine(scrobbleTick) { _, _ -> }
                 .collectLatest {
+                    if (scrobbleNotificationHidden) {
+                        ScrobbleNotifier.cancel(applicationContext)
+                        return@collectLatest
+                    }
                     val before = LastFmScrobbler.current.value
                     val fav = if (before != null) withContext(Dispatchers.IO) { isFavorite(before.id) } else false
                     // Tudo abaixo é lido DEPOIS do acesso ao disco, para nunca mostrar estado velho.
@@ -968,6 +1052,254 @@ class PlaybackService : MediaSessionService() {
     /** "Tocando" de verdade: inclui o buffering logo após play/troca (isPlaying fica false nesse instante). */
     private fun effectivelyPlaying(p: ExoPlayer): Boolean =
         p.isPlaying || (p.playWhenReady && p.playbackState == Player.STATE_BUFFERING)
+
+    /** Esconde/reexibe o aviso sem interromper o scrobbling nem encerrar o serviço de mídia. */
+    private fun scheduleScrobbleNotificationVisibility(isPlaying: Boolean) {
+        if (isPlaying) {
+            scrobblePauseHideJob?.cancel()
+            scrobblePauseHideJob = null
+            if (scrobbleNotificationHidden) {
+                scrobbleNotificationHidden = false
+                scrobbleTick.value++
+            }
+            return
+        }
+        if (scrobbleNotificationHidden || scrobblePauseHideJob?.isActive == true) return
+        scrobblePauseHideJob = scope.launch {
+            delay(SCROBBLE_PAUSE_HIDE_MS)
+            val player = exoPlayerRef ?: return@launch
+            if (!effectivelyPlaying(player)) {
+                scrobbleNotificationHidden = true
+                ScrobbleNotifier.cancel(applicationContext)
+            }
+        }
+    }
+
+    /** A leitura das tags ocorre uma vez por faixa, em IO; o overlay só é exibido enquanto toca. */
+    private fun startLyricsPopupMonitor(player: ExoPlayer) {
+        lyricsPopupMonitorJob?.cancel()
+        lyricsPopupMonitorJob = scope.launch {
+            var cachedId: String? = null
+            var cachedLines: List<LyricLine> = emptyList()
+            var lastNotifShown = false
+            var lastLocalReloadMs = 0L
+            var lastNetworkFetchMs = 0L
+            var networkFetchForId: String? = null
+            // Gravar tags em um m4a que o ExoPlayer está lendo desloca o áudio no arquivo e causa
+            // ERROR_CODE_DECODING_FAILED (a faixa é pulada). Por isso a gravação nas tags da faixa
+            // em reprodução fica pendente até a faixa mudar (ou o player parar).
+            var pendingEmbedTrack: Track? = null
+            var pendingEmbedLines: List<LyricLine> = emptyList()
+            try {
+                while (isActive) {
+                    val prefs = getSharedPreferences("tolete", Context.MODE_PRIVATE)
+                    pendingEmbedTrack?.let { pending ->
+                        if (player.currentMediaItem?.mediaId != pending.id) {
+                            val lines = pendingEmbedLines
+                            pendingEmbedTrack = null
+                            pendingEmbedLines = emptyList()
+                            withContext(Dispatchers.IO) {
+                                try {
+                                    com.tolete.player.data.LyricsEmbedder.save(
+                                        applicationContext, pending, lines,
+                                        com.tolete.player.data.LyricsEmbedder.Target.EMBEDDED
+                                    )
+                                } catch (_: Exception) { }
+                            }
+                        }
+                    }
+                    val enabled = prefs.getBoolean("lyrics_popup_enabled", false)
+                    val appIsVisible = ProcessLifecycleOwner.get().lifecycle.currentState
+                        .isAtLeast(Lifecycle.State.STARTED)
+                    val permitted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M ||
+                        Settings.canDrawOverlays(this@PlaybackService)
+                    val id = player.currentMediaItem?.mediaId
+                    if (!enabled || !permitted || appIsVisible) {
+                        LyricsPopupOverlay.hide()
+                        if (lastNotifShown) {
+                            LyricsPopupNotifier.cancel(applicationContext)
+                            lastNotifShown = false
+                        }
+                        if (id == null) {
+                            cachedId = null
+                            cachedLines = emptyList()
+                        }
+                    } else if (!effectivelyPlaying(player) || id == null) {
+                        LyricsPopupOverlay.hide()
+                        // Mantém a notificação de controle enquanto o popup estiver habilitado
+                        if (!lastNotifShown) {
+                            LyricsPopupNotifier.show(applicationContext)
+                            lastNotifShown = true
+                        }
+                        if (id == null) {
+                            cachedId = null
+                            cachedLines = emptyList()
+                        }
+                    } else {
+                        val now = System.currentTimeMillis()
+                        val trackChanged = id != cachedId
+                        if (trackChanged) {
+                            cachedId = id
+                            cachedLines = emptyList()
+                            lastLocalReloadMs = 0L
+                            networkFetchForId = null
+                        }
+                        // Recarrega do disco a cada ~1,5s (pega inserção manual / auto-fetch do NP)
+                        // e tenta rede se ainda vazio e auto-fetch ligado.
+                        val shouldReloadLocal = trackChanged || now - lastLocalReloadMs >= 1_500L
+                        if (shouldReloadLocal) {
+                            lastLocalReloadMs = now
+                            val track = try { resolveTrack(id) } catch (_: Exception) { null }
+                            if (track != null) {
+                                val local = withContext(Dispatchers.IO) {
+                                    LyricsExtractor.load(applicationContext, track)
+                                }
+                                if (local.isNotEmpty()) {
+                                    cachedLines = local
+                                } else if (
+                                    prefs.getBoolean("auto_fetch_lyrics", false) &&
+                                    pendingEmbedTrack?.id != id &&
+                                    (networkFetchForId != id || now - lastNetworkFetchMs >= 12_000L)
+                                ) {
+                                    networkFetchForId = id
+                                    lastNetworkFetchMs = now
+                                    val fetched = withContext(Dispatchers.IO) {
+                                        try {
+                                            val results = com.tolete.player.data.LyricsSearch.search(
+                                                track.title,
+                                                track.artist,
+                                                prefs.getBoolean("prefer_netease_romanization", false)
+                                            )
+                                            fun norm(s: String) = java.text.Normalizer
+                                                .normalize(s.trim().replace(Regex("\\s+"), " "), java.text.Normalizer.Form.NFC)
+                                                .lowercase(java.util.Locale.ROOT)
+                                                .filter { it.isLetterOrDigit() || it.isWhitespace() }
+                                                .replace(Regex("\\s+"), " ")
+                                                .trim()
+                                            val wt = norm(track.title)
+                                            val wa = norm(track.artist)
+                                            val exact = results.filter {
+                                                norm(it.trackName) == wt && norm(it.artistName) == wa
+                                            }
+                                            val typeOrder = prefs.getString("lyrics_type_order", null)
+                                                ?.split('|')?.filter { it.isNotBlank() }
+                                                ?: listOf("WORD", "SYNCED", "PLAIN")
+                                            val sourceOrder = prefs.getString("lyrics_source_order", null)
+                                                ?.split('|')?.filter { it.isNotBlank() }
+                                                ?: listOf("LYRON_REPOSITORY", "LRCLIB", "QQ_MUSIC", "NETEASE", "KUGOU")
+                                            val preferRoman = prefs.getBoolean("prefer_netease_romanization", false)
+                                            val best = exact.minWithOrNull(
+                                                compareBy<com.tolete.player.data.LyricsSearchResult> {
+                                                    if (it.source != com.tolete.player.data.LyricsSource.NETEASE || it.variant == null) 0
+                                                    else if ((it.variant == com.tolete.player.data.LyricsVariant.ROMANIZED) == preferRoman) 0 else 1
+                                                }.thenBy {
+                                                    typeOrder.indexOf(it.type.name).let { rank -> if (rank < 0) 99 else rank }
+                                                }.thenBy {
+                                                    sourceOrder.indexOf(it.source.name).let { rank -> if (rank < 0) 99 else rank }
+                                                }
+                                            )
+                                            if (best != null && best.lines.isNotEmpty()) {
+                                                val stored = com.tolete.player.data.LyricsEmbedder.hasExternalLrc(track) ||
+                                                    com.tolete.player.data.LyricsExtractor.loadEmbedded(applicationContext, track).isNotEmpty()
+                                                if (stored) return@withContext com.tolete.player.data.LyricsExtractor.load(applicationContext, track)
+                                                val rawTarget = prefs.getString("auto_fetch_lyrics_target", "LRC_FILE")
+                                                val target = runCatching {
+                                                    com.tolete.player.data.LyricsEmbedder.Target.valueOf(rawTarget ?: "LRC_FILE")
+                                                }.getOrDefault(com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE)
+                                                val saved = target == com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE &&
+                                                    com.tolete.player.data.LyricsEmbedder.save(
+                                                        applicationContext, track, best.lines, target
+                                                    )
+                                                if (!saved) {
+                                                    // Destino = tags (ou .lrc sem permissão): adia a gravação
+                                                    // para depois que esta faixa deixar de tocar.
+                                                    pendingEmbedTrack = track
+                                                    pendingEmbedLines = best.lines
+                                                }
+                                                best.lines
+                                            } else emptyList()
+                                        } catch (_: Exception) {
+                                            emptyList()
+                                        }
+                                    }
+                                    if (fetched.isNotEmpty()) cachedLines = fetched
+                                }
+                            }
+                        }
+                        if (cachedLines.isEmpty()) {
+                            LyricsPopupOverlay.hide()
+                        } else {
+                            val position = player.currentPosition.coerceAtLeast(0L)
+                            val mainIdx = cachedLines.indexOfLast {
+                                !it.isTranslation && !it.isBackground && it.timeMs >= 0L && it.timeMs <= position
+                            }.takeIf { it >= 0 }
+                                ?: cachedLines.indexOfFirst { !it.isTranslation && !it.isBackground }
+                                    .takeIf { it >= 0 }
+                            val mainLine = mainIdx?.let { cachedLines[it] }
+                            if (mainLine == null || mainLine.text.isBlank()) {
+                                LyricsPopupOverlay.hide()
+                            } else {
+                                val themeId = prefs.getString(LyricsPopupOverlay.KEY_THEME, LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
+                                ?: LyricsPopupOverlay.PopupTheme.DYNAMIC.id
+                            val themeColors = LyricsPopupOverlay.themeTextColors(themeId, prefs)
+                            val primary = if (themeId == LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
+                                prefs.getInt("lyrics_primary_color", 0xFFFFFFFF.toInt()) else themeColors.first
+                            val secondary = if (themeId == LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
+                                prefs.getInt("lyrics_secondary_color", 0x66FFFFFF) else themeColors.second
+                            val trColor = if (themeId == LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
+                                prefs.getInt("lyrics_translation_color", 0xFFB0BEC5.toInt()) else themeColors.third
+                            val bgColor = prefs.getInt("lyrics_backing_color", 0xFFCE93D8.toInt())
+                            val fontSize = prefs.getFloat(
+                                LyricsPopupOverlay.KEY_FONT_SIZE,
+                                prefs.getFloat("lyrics_font_size", 22f)
+                            ).coerceIn(12f, 40f)
+                            val mainTf = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_font_path", null))
+                            val trTf = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_translation_font_path", null))
+                                ?: mainTf
+                            val bgTf = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_backing_font_path", null))
+                                ?: mainTf
+
+                            LyricsPopupOverlay.show(applicationContext)
+                            LyricsPopupOverlay.applyChrome(applicationContext)
+                            LyricsPopupOverlay.updateFrame(
+                                LyricsPopupOverlay.PopupFrame(
+                                    main = mainLine,
+                                    translation = run {
+                                        if (mainIdx == null) return@run null
+                                        var j = mainIdx + 1
+                                        while (j < cachedLines.size && cachedLines[j].isBackground && !cachedLines[j].isTranslation) j++
+                                        if (j < cachedLines.size && cachedLines[j].isTranslation) cachedLines[j] else null
+                                    },
+                                    backing = cachedLines.lastOrNull {
+                                        it.isBackground && !it.isTranslation && it.timeMs >= 0L && it.timeMs <= position &&
+                                            (it.endMs < 0L || position <= it.endMs + 800L)
+                                    },
+                                    positionMs = position,
+                                    primaryColor = primary,
+                                    secondaryColor = secondary,
+                                    translationColor = trColor,
+                                    backingColor = bgColor,
+                                    fontSizeSp = fontSize.coerceAtMost(32f),
+                                    mainTypeface = mainTf,
+                                    translationTypeface = trTf,
+                                    backingTypeface = bgTf
+                                )
+                            )
+                            if (!lastNotifShown) {
+                                    LyricsPopupNotifier.show(applicationContext)
+                                    lastNotifShown = true
+                                }
+                            }
+                        }
+                    }
+                    delay(50)
+                }
+            } finally {
+                LyricsPopupOverlay.hide()
+                LyricsPopupNotifier.cancel(applicationContext)
+            }
+        }
+    }
 
     // ---------- Botões personalizados na notificação (estilo sistema) ----------
     // Ordem visual típica: [♡] [⏮] [⏯] [⏭] [✕]  — secundários nas pontas
@@ -1050,6 +1382,116 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /** Avança/repete quando a faixa chega ao fim oficial (STATE_ENDED). */
+    private fun handleTrackEnded(player: ExoPlayer) {
+        cancelEndFade()
+        cancelCrossfade(player, restoreMainVolume = true)
+        try { player.volume = 1f } catch (_: Throwable) { }
+        when (player.repeatMode) {
+            Player.REPEAT_MODE_ONE -> {
+                player.seekTo(0L)
+                player.prepare()
+                player.play()
+            }
+            else -> {
+                if (player.hasNextMediaItem()) {
+                    player.seekToNextMediaItem()
+                    player.prepare()
+                    player.play()
+                } else if (player.repeatMode == Player.REPEAT_MODE_ALL && player.mediaItemCount > 0) {
+                    player.seekTo(0, 0L)
+                    player.prepare()
+                    player.play()
+                } else {
+                    player.pause()
+                    player.seekTo(0L)
+                }
+            }
+        }
+    }
+
+    /**
+     * Detecta “silêncio no final”: posição presa perto do fim com playWhenReady=true
+     * sem STATE_ENDED (comum em alguns FLAC com duração de cabeçalho maior que o PCM).
+     */
+    private var endWatchdogJob: Job? = null
+    private fun startEndOfTrackWatchdog(player: ExoPlayer) {
+        endWatchdogJob?.cancel()
+        endWatchdogJob = scope.launch {
+            var stuckNearEndMs = 0L
+            var lastPos = -1L
+            var lastMediaId: String? = null
+            while (isActive) {
+                delay(250)
+                try {
+                    if (!player.playWhenReady) {
+                        stuckNearEndMs = 0L
+                        continue
+                    }
+                    val dur = player.duration
+                    val pos = player.currentPosition
+                    val id = player.currentMediaItem?.mediaId
+                    if (id != lastMediaId) {
+                        lastMediaId = id
+                        stuckNearEndMs = 0L
+                        lastPos = -1L
+                    }
+                    if (dur <= 0L || pos < 0L) {
+                        stuckNearEndMs = 0L
+                        continue
+                    }
+                    val remaining = dur - pos
+                    // Perto do fim e posição não avança de forma relevante
+                    if (remaining in 0L..1_200L) {
+                        if (lastPos >= 0L && kotlin.math.abs(pos - lastPos) < 40L) {
+                            stuckNearEndMs += 250L
+                        } else {
+                            stuckNearEndMs = 0L
+                        }
+                        lastPos = pos
+                        // ~900 ms parado no final → força o fim
+                        if (stuckNearEndMs >= 900L) {
+                            android.util.Log.w(
+                                "PlaybackService",
+                                "Watchdog fim de faixa: pos=$pos dur=$dur id=$id — avançando"
+                            )
+                            stuckNearEndMs = 0L
+                            handleTrackEnded(player)
+                        }
+                    } else {
+                        stuckNearEndMs = 0L
+                        lastPos = pos
+                    }
+                } catch (_: Throwable) { }
+            }
+        }
+    }
+
+    /**
+     * Troca de rota (fone → alto-falante etc.): reseta velocidade e re-sincroniza a posição
+     * para o AudioTrack ser reconstruído sem pitch/lento residual.
+     */
+    private fun onAudioRouteChanged(player: ExoPlayer) {
+        try {
+            val wasPlaying = player.playWhenReady
+            val pos = player.currentPosition.coerceAtLeast(0L)
+            val index = player.currentMediaItemIndex
+            if (!player.playbackParameters.equals(androidx.media3.common.PlaybackParameters.DEFAULT)) {
+                player.playbackParameters = androidx.media3.common.PlaybackParameters.DEFAULT
+            }
+            // Re-seek força o sink a alinhar com o novo device
+            if (index >= 0 && player.mediaItemCount > 0) {
+                player.seekTo(index, pos)
+            }
+            if (wasPlaying && !player.isPlaying) {
+                player.play()
+            }
+            android.util.Log.i("PlaybackService", "Rota de áudio alterada — resync pos=$pos")
+        } catch (e: Throwable) {
+            android.util.Log.w("PlaybackService", "onAudioRouteChanged: ${e.message}")
+        }
+    }
+
     /**
      * Se uma faixa falhar (formato/taxa não aceitos pela saída de áudio, arquivo corrompido...),
      * avisa e pula para a próxima em vez de deixar o player travado em erro.
@@ -1099,6 +1541,12 @@ class PlaybackService : MediaSessionService() {
         com.tolete.player.data.UsbMixer.invalidate()
         try {
             player.setPreferredAudioDevice(device)
+            // Evita velocidade/pitch "preso" após troca de rota (fone → alto-falante etc.)
+            try {
+                if (!player.playbackParameters.equals(androidx.media3.common.PlaybackParameters.DEFAULT)) {
+                    player.playbackParameters = androidx.media3.common.PlaybackParameters.DEFAULT
+                }
+            } catch (_: Throwable) { }
             android.util.Log.i("PlaybackService", "setPreferredAudioDevice → ${appliedDeviceLabel.ifBlank { "automático" }}")
         } catch (e: Throwable) {
             android.util.Log.w("PlaybackService", "Falha ao rotear a saída: ${e.message}")
@@ -1153,6 +1601,13 @@ class PlaybackService : MediaSessionService() {
         releaseCrossfadePreview()
         idleStopJob?.cancel()
         idleStopJob = null
+        scrobblePauseHideJob?.cancel()
+        scrobblePauseHideJob = null
+        scrobbleNotificationHidden = false
+        lyricsPopupMonitorJob?.cancel()
+        lyricsPopupMonitorJob = null
+        LyricsPopupOverlay.hide()
+        LyricsPopupNotifier.cancel(applicationContext)
         scope.cancel()
         deviceCallback?.let {
             try {

@@ -1,6 +1,7 @@
 package com.tolete.player.ui
 
 import android.content.Intent
+import android.content.Context
 import android.net.Uri
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.rounded.Style
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
@@ -80,6 +82,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tolete.player.data.LibrarySettings
+import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.SourceFolder
 import com.tolete.player.ui.MusicViewModel
 import com.tolete.player.ui.MusicViewModel.AppThemeId
@@ -88,7 +91,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED, SCROBBLE }
+enum class SettingsPage { NONE, MENU, LIBRARY, FOLDERS, ORGANIZE, APPEARANCE, LYRICS_VIEWER, ABOUT, FONT_CREDITS, CHANGELOG, LICENSES, PLAYER, BACKUP, VISUALIZER, ADVANCED, SCROBBLE, LYRICS_CONTRIBUTIONS }
 
 internal data class SettingsEntry(
     val icon: ImageVector,
@@ -142,6 +145,7 @@ fun SettingsScreen(
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
     onFirstLetterOrderChange: (Boolean) -> Unit = {},
+    onArtistAutoFetchModeChange: (String) -> Unit = {},
     lastFmUsername: String? = null,
     onLastFmUsernameChange: (String?) -> Unit = {},
     lastFmSyncMessage: String? = null,
@@ -156,8 +160,23 @@ fun SettingsScreen(
     allFilesMode: Boolean = false,
     onAllFilesModeChange: (Boolean) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
+    mediaStoreMode: Boolean = false,
+    onMediaStoreModeChange: (Boolean) -> Unit = {},
+    onRequestMediaStorePermission: () -> Unit = {},
     autoFetchLyrics: Boolean = false,
     onAutoFetchLyricsChange: (Boolean) -> Unit = {},
+    autoLyricsSaveTarget: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE,
+    onAutoLyricsSaveTargetChange: (LyricsEmbedder.Target) -> Unit = {},
+    preferNeteaseRomanization: Boolean = false,
+    onPreferNeteaseRomanizationChange: (Boolean) -> Unit = {},
+    lyricsPopupEnabled: Boolean = false,
+    onLyricsPopupEnabledChange: (Boolean) -> Unit = {},
+    searchStaggerMs: Int = 50,
+    onSearchStaggerMsChange: (Int) -> Unit = {},
+    lyricsTypeOrder: List<String> = listOf("WORD", "SYNCED", "PLAIN"),
+    onMoveLyricsType: (Int, Int) -> Unit = { _, _ -> },
+    lyricsSourceOrder: List<String> = listOf("LYRON_REPOSITORY", "LRCLIB", "QQ_MUSIC", "NETEASE", "KUGOU"),
+    onMoveLyricsSource: (Int, Int) -> Unit = { _, _ -> },
     shuffleType: ShuffleType = ShuffleType.ABSOLUTE,
     onShuffleTypeChange: (ShuffleType) -> Unit = {},
     lyricsFontSize: Float = 22f,
@@ -204,6 +223,8 @@ fun SettingsScreen(
     onCrossfadeMsChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
+    seekBarWaveformTheme: WaveformTheme = WaveformTheme.BARS,
+    onSeekBarWaveformThemeChange: (WaveformTheme) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
     onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
     audioOutput: MusicViewModel.AudioOutputBackend = MusicViewModel.AudioOutputBackend.DEFAULT,
@@ -231,7 +252,18 @@ fun SettingsScreen(
     lyricsEmphasisFontPath: String? = null,
     onSelectLyricsEmphasisFont: (String?) -> Unit = {},
     menuVisualStyle: MenuVisualStyle = MenuVisualStyle.COLORFUL,
-    onMenuVisualStyleChange: (MenuVisualStyle) -> Unit = {}
+    onMenuVisualStyleChange: (MenuVisualStyle) -> Unit = {},
+    photoThemePath: String? = null,
+    onPickPhotoTheme: () -> Unit = {},
+    onClearPhotoTheme: () -> Unit = {},
+    photoThemeBlur: Float = 0.55f,
+    onPhotoThemeBlurChange: (Float) -> Unit = {},
+    dynamicAlbumBlur: Boolean = false,
+    onDynamicAlbumBlurChange: (Boolean) -> Unit = {},
+    alphabetScrollerStyle: MusicViewModel.AlphabetScrollerStyle = MusicViewModel.AlphabetScrollerStyle.GLASS,
+    onAlphabetScrollerStyleChange: (MusicViewModel.AlphabetScrollerStyle) -> Unit = {},
+    waveformTheme: WaveformTheme = WaveformTheme.BARS,
+    onWaveformThemeChange: (WaveformTheme) -> Unit = {}
 ) {
     val title = when (page) {
         SettingsPage.LIBRARY -> "Biblioteca"
@@ -247,6 +279,7 @@ fun SettingsScreen(
         SettingsPage.BACKUP -> "Backup"
         SettingsPage.VISUALIZER -> "Visualizador (.milk)"
         SettingsPage.ADVANCED -> "Avançado"
+        SettingsPage.LYRICS_CONTRIBUTIONS -> "Contribuições de letras"
         SettingsPage.SCROBBLE -> "Scrobbling (Last.fm)"
         else -> "Configurações"
     }
@@ -300,6 +333,7 @@ fun SettingsScreen(
                 totalTracks = totalTracks,
                 settings = librarySettings,
                 allFilesMode = allFilesMode,
+                mediaStoreMode = mediaStoreMode,
                 onOpenFolders = { onNavigate(SettingsPage.ORGANIZE) },
                 onSplitArtistsChange = onSplitArtistsChange,
                 onArtistSeparatorsChange = onArtistSeparatorsChange,
@@ -310,8 +344,11 @@ fun SettingsScreen(
                 onPickIgnoredFolder = onPickIgnoredFolder,
                 onMinDurationSecChange = onMinDurationSecChange,
                 onFirstLetterOrderChange = onFirstLetterOrderChange,
+                onArtistAutoFetchModeChange = onArtistAutoFetchModeChange,
                 onAllFilesModeChange = onAllFilesModeChange,
                 onRequestAllFilesPermission = onRequestAllFilesPermission,
+                onMediaStoreModeChange = onMediaStoreModeChange,
+                onRequestMediaStorePermission = onRequestMediaStorePermission,
                 lastFmUsername = lastFmUsername,
                 onLastFmUsernameChange = onLastFmUsernameChange,
                 lastFmSyncMessage = lastFmSyncMessage,
@@ -322,6 +359,18 @@ fun SettingsScreen(
             SettingsPage.PLAYER -> PlayerPage(
                 autoFetchLyrics = autoFetchLyrics,
                 onAutoFetchLyricsChange = onAutoFetchLyricsChange,
+                autoLyricsSaveTarget = autoLyricsSaveTarget,
+                onAutoLyricsSaveTargetChange = onAutoLyricsSaveTargetChange,
+                preferNeteaseRomanization = preferNeteaseRomanization,
+                onPreferNeteaseRomanizationChange = onPreferNeteaseRomanizationChange,
+                lyricsPopupEnabled = lyricsPopupEnabled,
+                onLyricsPopupEnabledChange = onLyricsPopupEnabledChange,
+                searchStaggerMs = searchStaggerMs,
+                onSearchStaggerMsChange = onSearchStaggerMsChange,
+                lyricsTypeOrder = lyricsTypeOrder,
+                onMoveLyricsType = onMoveLyricsType,
+                lyricsSourceOrder = lyricsSourceOrder,
+                onMoveLyricsSource = onMoveLyricsSource,
                 shuffleType = shuffleType,
                 onShuffleTypeChange = onShuffleTypeChange,
                 fadeMs = fadeMs,
@@ -334,6 +383,8 @@ fun SettingsScreen(
                 onPlayCountMinutesChange = onPlayCountMinutesChange,
                 seekBarStyle = seekBarStyle,
                 onSeekBarStyleChange = onSeekBarStyleChange,
+                seekBarWaveformTheme = seekBarWaveformTheme,
+                onSeekBarWaveformThemeChange = onSeekBarWaveformThemeChange,
                 immersiveNowPlaying = immersiveNowPlaying,
                 onImmersiveNowPlayingChange = onImmersiveNowPlayingChange,
                 audioOutput = audioOutput,
@@ -384,7 +435,18 @@ fun SettingsScreen(
                 shareBrandColor = shareBrandColor,
                 onShareBrandColorChange = onShareBrandColorChange,
                 menuVisualStyle = menuVisualStyle,
-                onMenuVisualStyleChange = onMenuVisualStyleChange
+                onMenuVisualStyleChange = onMenuVisualStyleChange,
+                photoThemePath = photoThemePath,
+                onPickPhotoTheme = onPickPhotoTheme,
+                onClearPhotoTheme = onClearPhotoTheme,
+                photoThemeBlur = photoThemeBlur,
+                onPhotoThemeBlurChange = onPhotoThemeBlurChange,
+                dynamicAlbumBlur = dynamicAlbumBlur,
+                onDynamicAlbumBlurChange = onDynamicAlbumBlurChange,
+                alphabetScrollerStyle = alphabetScrollerStyle,
+                onAlphabetScrollerStyleChange = onAlphabetScrollerStyleChange,
+                waveformTheme = waveformTheme,
+                onWaveformThemeChange = onWaveformThemeChange
             )
             SettingsPage.LYRICS_VIEWER -> LyricsViewerPage(
                 lyricsFontPath = lyricsFontPath,
@@ -442,6 +504,7 @@ fun SettingsScreen(
                 glassQuality = glassQuality,
                 onGlassQualityChange = onGlassQualityChange
             )
+            SettingsPage.LYRICS_CONTRIBUTIONS -> LyricsContributionsPage(appColors)
             SettingsPage.SCROBBLE -> ScrobblePage()
             SettingsPage.ABOUT -> AboutPage(
                 onOpenChangelog = { onNavigate(SettingsPage.CHANGELOG) },
@@ -457,12 +520,12 @@ fun SettingsScreen(
                     SettingsEntry(
                         Icons.Rounded.LibraryMusic,
                         "Biblioteca",
-                        "Pastas, todos os arquivos, tags"
+                        "Pastas, Músicas e áudio, acesso amplo e tags"
                     ) { onNavigate(SettingsPage.LIBRARY) },
                     SettingsEntry(
                         Icons.Rounded.PlayArrow,
                         "Player",
-                        "Letras lidas apenas das tags do arquivo"
+                        "Letras automáticas, seekbar, Letras Pop-Up"
                     ) { onNavigate(SettingsPage.PLAYER) },
                     SettingsEntry(
                         Icons.Rounded.Sync,
@@ -485,9 +548,14 @@ fun SettingsScreen(
                         "Exportar ou importar dados"
                     ) { onNavigate(SettingsPage.BACKUP) },
                     SettingsEntry(
+                        Icons.Rounded.Share,
+                        "Contribuições de letras",
+                        "Reenviar arquivos LRC e instruções para o index.json do GitHub"
+                    ) { onNavigate(SettingsPage.LYRICS_CONTRIBUTIONS) },
+                    SettingsEntry(
                         Icons.Rounded.Settings,
                         "Avançado",
-                        "Pasta de dados e opções avançadas"
+                        "Pasta de dados, qualidade dos efeitos e gerenciador de espaço"
                     ) { onNavigate(SettingsPage.ADVANCED) },
                     SettingsEntry(
                         Icons.Rounded.Info,
@@ -597,7 +665,7 @@ private fun AdvancedPage(
         DataFolderOption(
             selected = mode == com.tolete.player.data.LyronStorage.Mode.INTERNAL,
             title = "Interno",
-            subtitle = "Salva internamente no app. Trechos de letra exportados continuam sendo salvos em Lyron/Lyrics Cards e vídeos em Lyron/Lyrics Videos.",
+            subtitle = "Salva internamente no app. Trechos de letra exportados continuam sendo salvos em Lyron/Lyrics Cards e vídeos em Lyron/Lyrics Videos; Cards de retrospectivas e do Last.fm também continuam em suas próprias pastas.",
             onClick = { applyMode(com.tolete.player.data.LyronStorage.Mode.INTERNAL) }
         )
         DataFolderOption(
@@ -614,6 +682,40 @@ private fun AdvancedPage(
             "Ao mudar a pasta, dados existentes na pasta anterior não são movidos automaticamente. Use Backup se precisar transferir.",
             fontSize = 12.sp,
             color = Color.White.copy(0.45f)
+        )
+
+        Spacer(Modifier.height(28.dp))
+        Text(
+            "Contribuição de letras",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Este nome será usado em sync_by no trecho de index.json. Se deixar vazio, o Lyron perguntará antes de gerar os arquivos para compartilhar.",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.6f),
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        val prefs = remember(context) {
+            context.getSharedPreferences("tolete", Context.MODE_PRIVATE)
+        }
+        var lyricsSyncBy by remember {
+            mutableStateOf(
+                prefs.getString(LyricsContributionShareHelper.SYNC_BY_PREFERENCE_KEY, "").orEmpty()
+            )
+        }
+        OutlinedTextField(
+            value = lyricsSyncBy,
+            onValueChange = { value ->
+                lyricsSyncBy = value
+                prefs.edit().putString(LyricsContributionShareHelper.SYNC_BY_PREFERENCE_KEY, value).apply()
+            },
+            label = { Text("Nome para sync_by") },
+            placeholder = { Text("Usuário do GitHub") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(Modifier.height(32.dp))

@@ -20,7 +20,8 @@ internal object LyronLyricsRepository {
         val path: String,
         val artist: String,
         val title: String,
-        val matchScore: Int
+        val matchScore: Int,
+        val syncedBy: String? = null
     )
 
     /** Chamado na thread de IO por [LyricsSearch]. */
@@ -58,18 +59,45 @@ internal object LyronLyricsRepository {
                 type = type,
                 lines = lines,
                 // Preserva os marcadores ELRC+ exatamente como foram publicados.
-                lrcText = rawLyrics
+                lrcText = rawLyrics,
+                syncedBy = item.syncedBy
             )
         }
     }
 
-    private fun parseFiles(rawIndex: String): List<String> {
+    private data class IndexEntry(val path: String, val syncedBy: String?)
+
+    private fun parseFiles(rawIndex: String): List<IndexEntry> {
         return try {
             // Tolera vírgulas finais para que um erro comum de edição manual não derrube a busca.
             val validJson = Regex(",\\s*([}\\]])").replace(rawIndex) { it.groupValues[1] }
-            val files = JSONObject(validJson).optJSONArray("files") ?: return emptyList()
+            val root = JSONObject(validJson)
+            val files = root.optJSONArray("files") ?: return emptyList()
             (0 until files.length()).mapNotNull { i ->
-                files.optString(i).trim().takeIf(::isSafeLrcPath)
+                val item = files.opt(i) ?: return@mapNotNull null
+                when (item) {
+                    is String -> {
+                        val path = item.trim()
+                        if (isSafeLrcPath(path)) IndexEntry(path, null) else null
+                    }
+                    is JSONObject -> {
+                        val path = item.optString("path").ifBlank {
+                            item.optString("file")
+                        }.trim()
+                        if (!isSafeLrcPath(path)) return@mapNotNull null
+                        val synced = sequenceOf(
+                            item.optString("syncedBy"),
+                            item.optString("synced_by"),
+                            item.optString("syncBy"),
+                            item.optString("sync_by"),
+                            item.optString("uploadedBy"),
+                            item.optString("uploaded_by"),
+                            item.optString("by")
+                        ).map { it.trim() }.firstOrNull { it.isNotBlank() }
+                        IndexEntry(path, synced)
+                    }
+                    else -> null
+                }
             }
         } catch (_: Exception) {
             emptyList()
@@ -84,7 +112,8 @@ internal object LyronLyricsRepository {
             !path.contains("://") &&
             path.endsWith(".lrc", ignoreCase = true)
 
-    private fun parseCandidate(path: String, titleQuery: String, artistQuery: String): IndexedLyric? {
+    private fun parseCandidate(entry: IndexEntry, titleQuery: String, artistQuery: String): IndexedLyric? {
+        val path = entry.path
         val fileName = path.substringAfterLast('/')
         val stem = fileName.substringBeforeLast('.', missingDelimiterValue = "")
         val separator = stem.indexOf(" - ")
@@ -94,7 +123,7 @@ internal object LyronLyricsRepository {
         val title = stem.substring(separator + 3).trim()
         val titleScore = matchScore(titleQuery, title) ?: return null
         val artistScore = if (artistQuery.isBlank()) 0 else matchScore(artistQuery, artist) ?: return null
-        return IndexedLyric(path, artist, title, titleScore + artistScore)
+        return IndexedLyric(path, artist, title, titleScore + artistScore, entry.syncedBy)
     }
 
     /** Igualdade normalizada é preferida; contém permite nomes com transliteração entre parênteses. */

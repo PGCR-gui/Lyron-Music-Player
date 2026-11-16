@@ -105,6 +105,7 @@ object LastFmScrobbler {
         appCtx = ctx
         val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         LyronStorage.init(ctx)
+        LastFmClient.initialize(ctx)
         ScrobbleEdits.init(ctx)
         apiSecret = p.getString(KEY_SECRET, "")?.trim().orEmpty()
         LastFmClient.API_KEY = p.getString(KEY_APIKEY, null)?.trim()?.takeIf { it.isNotBlank() }
@@ -289,6 +290,18 @@ object LastFmScrobbler {
                 while (q.size > QUEUE_MAX) q.removeAt(0)
                 saveQueue(q)
             }
+            // Espelho local para o info card (independe do envio ter sido confirmado ainda)
+            try {
+                appCtx?.let { ctx ->
+                    LastFmHistoryStore.appendScrobble(
+                        ctx,
+                        meta.artist,
+                        meta.track,
+                        meta.album.takeIf { it.isNotBlank() },
+                        startedAtMs
+                    )
+                }
+            } catch (_: Exception) { }
             flush()
         }
     }

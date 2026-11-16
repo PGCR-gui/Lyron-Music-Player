@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -18,6 +19,8 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -30,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,6 +43,7 @@ import com.tolete.player.data.Track
 import com.tolete.player.video.LyricsVideoGenerator
 import com.tolete.player.video.LyricsVideoGenerator.Aspect
 import com.tolete.player.visualizer.ProjectMNative
+import com.tolete.player.video.RetrospectiveVideoGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -100,6 +105,8 @@ internal fun LyricsVideoDialog(
 
     var clipMode by remember { mutableStateOf(ClipMode.WHOLE) }
     var range by remember { mutableStateOf(0f..durF) }
+    var manualClipInitialized by remember { mutableStateOf(false) }
+    var showClipEditor by remember { mutableStateOf(false) }
     var aspect by remember { mutableStateOf(Aspect.V_9_16) }
     var fps by remember { mutableIntStateOf(30) }
     var chosenSide by remember { mutableIntStateOf(1080) }
@@ -177,15 +184,20 @@ internal fun LyricsVideoDialog(
             .coerceAtMost(duration)
     }
     val (vw, vh) = LyricsVideoGenerator.dimsFor(side, aspect)
+    val maxDialogHeight = (LocalConfiguration.current.screenHeightDp * 0.88f).dp
+    val maxContentHeight = (maxDialogHeight - 200.dp).coerceIn(80.dp, 440.dp)
 
-    fun setStart(ms: Long) {
-        val maxStart = (range.endInclusive - MIN_CLIP_MS).coerceAtLeast(0f)
-        range = ms.toFloat().coerceIn(0f, maxStart)..range.endInclusive
-    }
-
-    fun setEnd(ms: Long) {
-        val minEnd = (range.start + MIN_CLIP_MS).coerceAtMost(durF)
-        range = range.start..ms.toFloat().coerceIn(minEnd, durF)
+    fun chooseManualClip() {
+        if (!manualClipInitialized) {
+            val clipLength = minOf(RetrospectiveVideoGenerator.DEFAULT_DURATION_SEC * 1000L, duration)
+                .coerceAtLeast(1000L)
+            val start = (currentPositionMs - clipLength / 2L)
+                .coerceIn(0L, (duration - clipLength).coerceAtLeast(0L))
+            range = start.toFloat()..(start + clipLength).coerceAtMost(duration).toFloat()
+            manualClipInitialized = true
+        }
+        clipMode = ClipMode.MANUAL
+        showClipEditor = true
     }
 
     val chipColors = FilterChipDefaults.filterChipColors(
@@ -197,9 +209,15 @@ internal fun LyricsVideoDialog(
 
     AppAlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.heightIn(max = maxDialogHeight),
         title = { Text("Gerar vídeo", color = MaterialTheme.colorScheme.onSurface) },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxContentHeight)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text("Fonte da letra", color = MaterialTheme.colorScheme.onSurface.copy(0.6f), fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -209,24 +227,39 @@ internal fun LyricsVideoDialog(
                             noLyrics = false
                             lyricsSource = LyricsEmbedder.Target.LRC_FILE
                         },
-                        enabled = hasExternalLrc,
+                        enabled = hasExternalLrc && !noLyrics,
                         label = { Text("Arquivo .lrc") },
                         colors = chipColors
                     )
                     FilterChip(
                         selected = !noLyrics && lyricsSource == LyricsEmbedder.Target.EMBEDDED,
-                        onClick = {
-                            noLyrics = false
-                            lyricsSource = LyricsEmbedder.Target.EMBEDDED
-                        },
+                        onClick = { lyricsSource = LyricsEmbedder.Target.EMBEDDED },
+                        enabled = !noLyrics,
                         label = { Text("Tags embutidas") },
                         colors = chipColors
                     )
-                    FilterChip(
-                        selected = noLyrics,
-                        onClick = { noLyrics = true },
-                        label = { Text("Sem letra") },
-                        colors = chipColors
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Gerar sem letra", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                        Text(
+                            "Mostra a capa ou o preset com título, artista e progresso.",
+                            color = MaterialTheme.colorScheme.onSurface.copy(0.5f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = noLyrics,
+                        onCheckedChange = { noLyrics = it },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Accent,
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onSurface.copy(0.75f),
+                            uncheckedTrackColor = MaterialTheme.colorScheme.onSurface.copy(0.18f)
+                        )
                     )
                 }
                 if (noLyrics) {
@@ -239,12 +272,12 @@ internal fun LyricsVideoDialog(
                 } else if (!loadingLines && !linesAvailable) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Nenhuma letra sincronizada nesta fonte — o vídeo será gerado sem letra.",
+                        "Nenhuma letra sincronizada nesta fonte. Ative “Gerar sem letra” para continuar.",
                         color = MaterialTheme.colorScheme.onSurface.copy(0.45f),
                         fontSize = 12.sp
                     )
                 }
-                if (!hasExternalLrc) {
+                if (!hasExternalLrc && !noLyrics) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "Não há .lrc ao lado desta música — usando tags embutidas.",
@@ -268,7 +301,7 @@ internal fun LyricsVideoDialog(
                     )
                     FilterChip(
                         selected = mode == ClipMode.MANUAL,
-                        onClick = { clipMode = ClipMode.MANUAL },
+                        onClick = ::chooseManualClip,
                         label = { Text("Escolher trecho") },
                         colors = chipColors
                     )
@@ -314,36 +347,14 @@ internal fun LyricsVideoDialog(
 
                 if (mode == ClipMode.MANUAL) {
                     Spacer(Modifier.height(8.dp))
-                    RangeSlider(
-                        value = range,
-                        onValueChange = { r ->
-                            val s = r.start
-                            val e = r.endInclusive
-                            range = when {
-                                e - s >= MIN_CLIP_MS -> s..e
-                                s != range.start -> (e - MIN_CLIP_MS).coerceAtLeast(0f)..e
-                                else -> s..(s + MIN_CLIP_MS).coerceAtMost(durF)
-                            }
-                        },
-                        valueRange = 0f..durF,
-                        colors = SliderDefaults.colors(
-                            thumbColor = Accent,
-                            activeTrackColor = Accent,
-                            inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
-                        )
+                    Text(
+                        "Trecho: ${fmtTime(startMs)} – ${fmtTime(endMs)} · ${fmtTime(endMs - startMs)}",
+                        color = MaterialTheme.colorScheme.onSurface.copy(0.75f),
+                        fontSize = 13.sp
                     )
-                    TimeAdjustRow(
-                        label = "Início",
-                        valueMs = range.start.toLong(),
-                        onChange = ::setStart,
-                        onNow = { setStart(currentPositionMs) }
-                    )
-                    TimeAdjustRow(
-                        label = "Fim",
-                        valueMs = range.endInclusive.toLong(),
-                        onChange = ::setEnd,
-                        onNow = { setEnd(currentPositionMs) }
-                    )
+                    TextButton(onClick = { showClipEditor = true }) {
+                        Text("Abrir cortador de trecho", color = Accent)
+                    }
                 }
 
                 Spacer(Modifier.height(14.dp))
@@ -450,11 +461,10 @@ internal fun LyricsVideoDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                onGenerate(startMs, endMs, side, aspect, fps, milkPath, lyricsSource, !noLyrics)
-            }) {
-                Text("Gerar", color = Accent)
-            }
+            TextButton(
+                enabled = noLyrics || linesAvailable,
+                onClick = { onGenerate(startMs, endMs, side, aspect, fps, milkPath, lyricsSource, !noLyrics) }
+            ) { Text("Gerar vídeo", color = Accent) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
@@ -471,6 +481,26 @@ internal fun LyricsVideoDialog(
             onSelect = { path ->
                 milkPreset = path
                 showPicker = false
+            }
+        )
+    }
+
+    if (showClipEditor) {
+        RetrospectiveClipEditorDialog(
+            track = track,
+            initialStartMs = range.start.toLong().coerceIn(0L, duration),
+            initialEndMs = range.endInclusive.toLong().coerceIn(
+                (range.start.toLong() + 1000L).coerceAtMost(duration), duration
+            ),
+            hasExternalLrc = hasExternalLrc,
+            loadLyrics = loadLyrics,
+            onLyricsSourceChange = { lyricsSource = it },
+            onDismiss = { showClipEditor = false },
+            onConfirm = { start, end ->
+                range = start.toFloat()..end.toFloat()
+                manualClipInitialized = true
+                clipMode = ClipMode.MANUAL
+                showClipEditor = false
             }
         )
     }
@@ -494,27 +524,6 @@ private fun LineInfoRow(label: String, line: LyricLine, number: Int) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-    }
-}
-
-@Composable
-private fun TimeAdjustRow(
-    label: String,
-    valueMs: Long,
-    onChange: (Long) -> Unit,
-    onNow: () -> Unit
-) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, color = Color.White.copy(0.85f), fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
-        Text(fmtTime(valueMs), color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
-        TextButton(onClick = { onChange(valueMs - 1000L) }) { Text("−1s", color = Accent) }
-        TextButton(onClick = { onChange(valueMs + 1000L) }) { Text("+1s", color = Accent) }
-        TextButton(onClick = onNow) { Text("Agora", color = Accent) }
     }
 }
 

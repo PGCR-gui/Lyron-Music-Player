@@ -48,6 +48,7 @@ internal fun LibraryPage(
     totalTracks: Int,
     settings: LibrarySettings,
     allFilesMode: Boolean,
+    mediaStoreMode: Boolean,
     onOpenFolders: () -> Unit,
     onSplitArtistsChange: (Boolean) -> Unit,
     onArtistSeparatorsChange: (String) -> Unit,
@@ -56,10 +57,13 @@ internal fun LibraryPage(
     onGenreSeparatorsChange: (String) -> Unit,
     onAllFilesModeChange: (Boolean) -> Unit,
     onRequestAllFilesPermission: () -> Unit,
+    onMediaStoreModeChange: (Boolean) -> Unit,
+    onRequestMediaStorePermission: () -> Unit,
     onIgnoredFoldersChange: (String) -> Unit = {},
     onPickIgnoredFolder: () -> Unit = {},
     onMinDurationSecChange: (Int) -> Unit = {},
     onFirstLetterOrderChange: (Boolean) -> Unit = {},
+    onArtistAutoFetchModeChange: (String) -> Unit = {},
     lastFmUsername: String? = null,
     onLastFmUsernameChange: (String?) -> Unit = {},
     lastFmSyncMessage: String? = null,
@@ -73,13 +77,58 @@ internal fun LibraryPage(
             .imePadding()
             .verticalScroll(rememberScrollState())
     ) {
-        // Acesso a todos os arquivos (método principal — sem SAF)
+        Text(
+            "Acesso à biblioteca",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 4.dp)
+        )
+
+        // Alternativas de leitura da biblioteca; habilitar uma desativa a outra.
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Músicas e áudio (índice do sistema, somente leitura)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Lê os áudios que o Android encontra no MediaStore. Requer a permissão \"Músicas e áudio\", sem acesso amplo ao armazenamento.",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.55f)
+                    )
+                }
+                Switch(
+                    checked = mediaStoreMode,
+                    onCheckedChange = { enabled ->
+                        if (enabled) onRequestMediaStorePermission()
+                        else onMediaStoreModeChange(false)
+                    }
+                )
+            }
+            if (mediaStoreMode) {
+                Text(
+                    "Modo ativo · leitura pelo índice do Android",
+                    fontSize = 12.sp,
+                    color = Color(0xFF81C784),
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                TextButton(onClick = onRequestMediaStorePermission) {
+                    Text("Verificar ou conceder permissão novamente")
+                }
+            }
+            Text(
+                "Limitações: arquivos fora do índice (incluindo alguns DSF) podem não aparecer. Edição de tags/capas e leitura de letras .lrc/.ttml laterais não são garantidas; excluir pode pedir confirmação do Android. Mover, renomear e explorar arquivos gerais requer acesso mais amplo.",
+                fontSize = 12.sp,
+                color = Color(0xFFFFB74D),
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text("Gerenciar todos os arquivos", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(
-                        "Modo principal: lê e apaga músicas em todo o armazenamento (requer permissão \"Acesso a todos os arquivos\")",
+                        "Varre o armazenamento diretamente, inclusive arquivos que o índice não encontrou. Requer a permissão especial \"Acesso a todos os arquivos\".",
                         fontSize = 13.sp,
                         color = Color.White.copy(0.55f)
                     )
@@ -94,16 +143,17 @@ internal fun LibraryPage(
             }
             if (allFilesMode) {
                 Text(
-                    "Modo ativo · acesso total ao armazenamento",
+                    "Modo ativo · acesso amplo ao armazenamento",
                     fontSize = 12.sp,
                     color = Color(0xFF81C784),
                     modifier = Modifier.padding(top = 6.dp)
                 )
-            } else {
+            }
+            if (!allFilesMode && !mediaStoreMode) {
                 Text(
-                    "Devido a funções avançadas do app, ele precisa dessa permissão para funcionar",
+                    "Escolha um dos modos acima para carregar a biblioteca; também é possível adicionar pastas específicas em Organizar biblioteca.",
                     fontSize = 12.sp,
-                    color = Color(0xFFFFB74D),
+                    color = Color.White.copy(0.55f),
                     modifier = Modifier.padding(top = 6.dp)
                 )
             }
@@ -124,7 +174,7 @@ internal fun LibraryPage(
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text("Ordem alfabética pela primeira letra", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(
-                        "Ignora símbolos no começo de músicas, artistas e álbuns (&, (, ', ♪…) e acentos: \"É\" conta como E. Números continuam no lugar.",
+                        "Ignora símbolos no começo de músicas, artistas e álbuns (&, (, ', ♪…) e acentos: \"É\" conta como E. Também ignora caracteres asiáticos.",
                         fontSize = 13.sp,
                         color = Color.White.copy(0.55f)
                     )
@@ -143,6 +193,25 @@ internal fun LibraryPage(
             color = Color.White.copy(0.55f),
             modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 4.dp)
         )
+
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+            Text("Busca automática de artistas", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Controla a busca de biografias e fotos de artistas. Conteúdo já salvo continua disponível; buscas manuais permanecem acessíveis.",
+                fontSize = 13.sp,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("ON" to "Ligado", "WIFI_ONLY" to "Somente no Wi-Fi", "OFF" to "Desligado").forEach { (value, label) ->
+                    FilterChip(
+                        selected = settings.artistAutoFetchMode == value,
+                        onClick = { onArtistAutoFetchModeChange(value) },
+                        label = { Text(label, fontSize = 12.sp) }
+                    )
+                }
+            }
+        }
 
         SeparatorOption(
             title = "Separar artistas",
@@ -362,7 +431,7 @@ internal fun ArtistExceptionsField(
             fontWeight = FontWeight.Medium
         )
         Text(
-            "Nomes que não serão separados (um por linha). Ex.: AC/DC",
+            "Um artista por linha. Assim nomes como \"Tyler, the Creator\" não são quebrados.",
             fontSize = 12.sp,
             color = Color.White.copy(0.5f),
             modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -373,7 +442,7 @@ internal fun ArtistExceptionsField(
                 text = it
                 onValueChange(it)
             },
-            placeholder = { Text("AC/DC\nJoão Mineiro & Marciano", color = Color.White.copy(0.35f)) },
+            placeholder = { Text("AC/DC\nTyler, the Creator\nJoão Mineiro & Marciano", color = Color.White.copy(0.35f)) },
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 5,

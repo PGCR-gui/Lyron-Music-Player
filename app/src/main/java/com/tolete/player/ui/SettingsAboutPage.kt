@@ -20,7 +20,6 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FontDownload
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -270,6 +269,58 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 
 internal val changelogEntries = listOf(
+    ChangelogEntry(
+        code = "357",
+        version = "1.0",
+        changes = listOf(
+            "Refinamentos no scrobbler do app",
+            "Dashboard do Last.fm com gráficos e outras informações",
+            "Função nova de exportar vídeos e fotos de Retrospectiva (baseado em Last.fm e arquivos locais)",
+            "Novos info cards do Last.fm, com exportação de fotos e vídeos",
+            "Efeitos de vidro refinados",
+            "Novo slider de A-Z com slider dedicado por letra ao deslizar para a esquerda",
+            "Novo Slider Simplificado (isso aqui foi regresso, slk)",
+            "Efeitos de vidro configuráveis nas configurações avançadas",
+            "Novo ícone de Notificação",
+            "Player externo corrigido",
+            "Cores de fundo baseadas em capas de álbum agora animadas",
+            "Mais presets adicionados",
+            "Correção no desempenho da aba de artistas",
+            "Cores flutuantes corrigidas",
+            "Novo modo de tema por foto",
+            "Suporte à DSF",
+            "Modo de fidelidade de som: reproduz o som na maior qualidade possível (limitada pelo dispositivo e/ou DAC)",
+            "Card de saída de som no Now Playing",
+            "Controle de velocidade no Now Playing",
+            "Nova opção para busca de letras personalizadas para o Lyron",
+            "Novas configurações avançadas: escolha de pasta padrão de dados, intensidade de efeitos de vidro e Gerenciador de Espaço",
+            "Novo modo de Gerenciar Espaço substituindo o Limpar dados tradicional",
+            "Redesign do menu de presets",
+            "Redesign de menus do app",
+            "Correções no player do editor de letras",
+            "Player do editor de letras separado do player principal",
+            "Melhorado o modo em que presets são trocados: por tempo (padrão) ou por música, de forma aleatória ou sequencial; e também modo de filtrar por favoritos",
+            "Telas de escolha de fontes melhoradas",
+            "Melhoria de desempenho",
+            "Correção nas exceções do separador de artistas",
+            "Resultados de pesquisa aparecem com uma animação de slide",
+            "Notificação do Last.fm agora some depois de 3 minutos de inatividade",
+            "Novo modo de exibição de letras em pop-up",
+            "Redesign do Now Playing (de noooooooooooovooo kkkkkkkkkk): o menu de presets agora fica em cima e aparece ao deslizar o botão de informações técnicas",
+            "Volta da pesquisa automática, agora com mais fontes",
+            "Suporte a baixar letras romanizadas no NetEase",
+            "Função nova de contribuir com letras para o repositório do app (com histórico das contribuições enviadas)",
+            "Estilo Wavy + Liquid adicionado à seekbar",
+            "Waveform na seekbar, com escolha do desenho nas configurações do player",
+            "Waveform ao cortar música, com 6 novos estilos: Pulso, Linha, Estúdio, Colinas, Espelho e Listras",
+            "No cortador de trecho, tocar no meio do trecho adianta o player para aquela posição",
+            "Edições automáticas de scrobble (só o primeiro artista, remover texto entre parênteses) e gerenciador de edições",
+            "Histórico do Last.fm espelhado localmente: primeira/última reprodução sem consultar a API",
+            "Lembretes para gerar a Retrospectiva semanal, mensal e anual",
+            "Roteamento para DAC/fone USB com taxa de amostragem real (Android 14+)",
+            "Otimização ao abrir o app"
+        )
+    ),
     ChangelogEntry(
         code = "230",
         version = "0.70",

@@ -168,6 +168,11 @@ fun MilkVisualizer(
     modifier: Modifier = Modifier,
     locked: Boolean = false,
     isPlaying: Boolean = true,
+    /**
+     * Quando false (ex.: menu Compose aberto), pausa o GLSurfaceView e esconde a superfície.
+     * GLSurfaceView desenha numa janela separada e “fura” overlays/menus de vidro.
+     */
+    surfaceActive: Boolean = true,
     forcePresetPath: String? = null,
     onFailure: () -> Unit = {},
     onCurrentPreset: (String?) -> Unit = {}
@@ -181,6 +186,9 @@ fun MilkVisualizer(
             setEGLContextClientVersion(3)
             setEGLConfigChooser(8, 8, 8, 8, 16, 0)
             preserveEGLContextOnPause = false
+            // Mantém o GL abaixo dos overlays Compose (ainda assim menus exigem pause)
+            setZOrderOnTop(false)
+            setZOrderMediaOverlay(false)
             setRenderer(renderer)
             renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY // quem dá o ritmo é o laço abaixo
             // cantos arredondados iguais aos da capa
@@ -206,14 +214,27 @@ fun MilkVisualizer(
     }
 
     // Só captura PCM enquanto a música está tocando (ao pausar o preset continua animando sem áudio novo)
-    DisposableEffect(isPlaying) {
+    DisposableEffect(isPlaying, surfaceActive) {
         AudioTap.resetReader()
-        AudioTap.active = isPlaying
+        AudioTap.active = isPlaying && surfaceActive
         onDispose { AudioTap.active = false }
     }
 
-    // ~60 quadros/s sempre que o visualizador estiver visível (anima mesmo pausado)
-    LaunchedEffect(glView) {
+    // Pausa/esconde a superfície enquanto um menu Compose está por cima
+    DisposableEffect(surfaceActive, glView) {
+        if (surfaceActive) {
+            glView.visibility = android.view.View.VISIBLE
+            try { glView.onResume() } catch (_: Throwable) { }
+        } else {
+            glView.visibility = android.view.View.INVISIBLE
+            try { glView.onPause() } catch (_: Throwable) { }
+        }
+        onDispose { }
+    }
+
+    // ~60 quadros/s só com a superfície ativa
+    LaunchedEffect(glView, surfaceActive) {
+        if (!surfaceActive) return@LaunchedEffect
         while (true) {
             glView.requestRender()
             delay(16)
@@ -226,7 +247,9 @@ fun MilkVisualizer(
         val obs = LifecycleEventObserver { _, e ->
             when (e) {
                 Lifecycle.Event.ON_PAUSE -> glView.onPause()
-                Lifecycle.Event.ON_RESUME -> glView.onResume()
+                Lifecycle.Event.ON_RESUME -> {
+                    if (surfaceActive) glView.onResume()
+                }
                 else -> {}
             }
         }

@@ -1,5 +1,6 @@
 package com.tolete.player.data
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -89,24 +90,35 @@ object LrcLibClient {
         withContext(Dispatchers.IO) { searchInternal(trackName, artistName) }
 
     private fun searchInternal(trackName: String, artistName: String = ""): List<SearchResult> {
+        val structured = buildString {
+            append("track_name=").append(enc(trackName))
+            if (artistName.isNotBlank()) append("&artist_name=").append(enc(artistName))
+        }
+        val primary = runSearch(structured)
+        // null = o servidor falhou (502/503, sem rede…): uma segunda consulta não ajudaria.
+        if (primary == null) return emptyList()
+        if (primary.isNotEmpty()) return primary
+        // Sem resultado na busca estruturada: tenta busca livre (título + artista).
+        val free = "$trackName $artistName".trim()
+        return runSearch("q=" + enc(free)).orEmpty()
+    }
+
+    /** null quando a requisição falhou; lista (possivelmente vazia) quando o servidor respondeu. */
+    private fun runSearch(query: String): List<SearchResult>? {
         return try {
-            val q = buildString {
-                append("track_name=").append(enc(trackName))
-                if (artistName.isNotBlank()) append("&artist_name=").append(enc(artistName))
-            }
-            val body = httpGet("$BASE/api/search?$q") ?: return emptyList()
+            val body = httpGet("$BASE/api/search?$query") ?: return null
             val arr = JSONArray(body)
             val out = mutableListOf<SearchResult>()
             for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val synced = o.optString("syncedLyrics").takeIf { it.isNotBlank() }
-                val plain = o.optString("plainLyrics").takeIf { it.isNotBlank() }
+                val o = arr.optJSONObject(i) ?: continue
+                val synced = o.strOrNull("syncedLyrics")
+                val plain = o.strOrNull("plainLyrics")
                 if (synced == null && plain == null) continue
                 out += SearchResult(
                     id = o.optInt("id", i),
-                    trackName = o.optString("trackName", trackName),
-                    artistName = o.optString("artistName", artistName),
-                    albumName = o.optString("albumName", ""),
+                    trackName = o.strOrNull("trackName").orEmpty(),
+                    artistName = o.strOrNull("artistName").orEmpty(),
+                    albumName = o.strOrNull("albumName").orEmpty(),
                     durationSec = o.optInt("duration", 0),
                     hasSynced = synced != null,
                     hasPlain = plain != null,
@@ -115,9 +127,21 @@ object LrcLibClient {
                 )
             }
             out
-        } catch (_: Exception) {
-            emptyList()
+        } catch (e: Exception) {
+            Log.w("LrcLibClient", "Resposta inválida do LRCLIB", e)
+            LyricsDiagnostics.error("LRCLIB", "resposta inválida")
+            null
         }
+    }
+
+    /**
+     * No Android, JSONObject.optString devolve o texto "null" quando o campo é JSON null
+     * (o LRCLIB manda syncedLyrics/plainLyrics nulos para faixas sem letra), o que criava
+     * "letras" com a palavra null. Esta função trata o null de verdade.
+     */
+    private fun JSONObject.strOrNull(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        return optString(key, "").takeIf { it.isNotBlank() }
     }
 
     private fun getBySignature(track: Track): List<LyricLine>? {
@@ -136,8 +160,8 @@ object LrcLibClient {
         val body = httpGet("$BASE/api/get?$q") ?: return null
         if (body.isBlank() || body.startsWith("[")) return null
         val o = JSONObject(body)
-        val synced = o.optString("syncedLyrics").takeIf { it.isNotBlank() }
-        val plain = o.optString("plainLyrics").takeIf { it.isNotBlank() }
+        val synced = o.strOrNull("syncedLyrics")
+        val plain = o.strOrNull("plainLyrics")
         val lines = parseRecord(o)
         if (lines.isEmpty()) return null
         val raw = synced ?: plain?.let { text ->
@@ -168,13 +192,13 @@ object LrcLibClient {
     }
 
     private fun parseRecord(o: JSONObject): List<LyricLine> {
-        val synced = o.optString("syncedLyrics", "")
-        if (synced.isNotBlank()) {
+        val synced = o.strOrNull("syncedLyrics")
+        if (synced != null) {
             val lines = LyricsExtractor.parseLyricsContent(synced)
             if (lines.isNotEmpty()) return lines
         }
-        val plain = o.optString("plainLyrics", "")
-        if (plain.isNotBlank()) {
+        val plain = o.strOrNull("plainLyrics")
+        if (plain != null) {
             return LyricsExtractor.parseLyricsContent(plain)
         }
         return emptyList()
@@ -183,22 +207,44 @@ object LrcLibClient {
     private fun enc(s: String): String =
         URLEncoder.encode(s.trim(), Charsets.UTF_8.name())
 
+    /**
+     * GET com até 2 tentativas em falhas transitórias (5xx, timeout, queda de rede).
+     * 404 é resposta válida ("não existe") e não é repetido.
+     */
     private fun httpGet(urlStr: String): String? {
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 12_000
-            readTimeout = 12_000
-            setRequestProperty("User-Agent", USER_AGENT)
-            setRequestProperty("Accept", "application/json")
+        var attempt = 0
+        while (attempt < 2) {
+            attempt++
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 12_000
+                readTimeout = 12_000
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept", "application/json")
+            }
+            var retry = false
+            try {
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    return conn.inputStream.bufferedReader().use { it.readText() }
+                }
+                Log.w("LrcLibClient", "HTTP $code em $urlStr (tentativa $attempt)")
+                if (code != 404) {
+                    LyricsDiagnostics.error("LRCLIB", if (code >= 500) "fora do ar (HTTP $code)" else "HTTP $code")
+                }
+                retry = code >= 500
+            } catch (e: Exception) {
+                Log.w("LrcLibClient", "Falha em $urlStr (tentativa $attempt)", e)
+                LyricsDiagnostics.error("LRCLIB", LyricsDiagnostics.describe(e))
+                retry = true
+            } finally {
+                conn.disconnect()
+            }
+            if (!retry) return null
+            if (attempt < 2) {
+                try { Thread.sleep(600) } catch (_: InterruptedException) { return null }
+            }
         }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) return null
-            conn.inputStream.bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
-            null
-        } finally {
-            conn.disconnect()
-        }
+        return null
     }
 }

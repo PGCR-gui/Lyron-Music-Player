@@ -2,6 +2,7 @@
 <paths>
     <cache-path name="updates" path="updates/" />
     <cache-path name="share" path="share/" />
+    <files-path name="lyric_contributions" path="lyric_contributions/" />
     <cache-path name="cache_root" path="." />
     <external-path name="shared_storage" path="." />
 </paths>

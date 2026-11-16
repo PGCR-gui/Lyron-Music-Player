@@ -220,6 +220,69 @@ internal fun ScrobblePage() {
                 color = Color.White.copy(0.45f),
                 modifier = Modifier.padding(top = 8.dp)
             )
+
+            Spacer(Modifier.height(24.dp))
+            Text("Histórico local (lastfm history.csv)", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Baixa os scrobbles da conta para /Lyron/lastfm history.csv e usa no info card " +
+                    "(primeira/última vez e lista completa). Atualiza sozinho a cada novo scrobble.",
+                fontSize = 13.sp,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
+            val histProgress by com.tolete.player.data.LastFmHistoryStore.progress.collectAsState()
+            val (lastSync, totalLocal) = remember(histProgress) {
+                com.tolete.player.data.LastFmHistoryStore.stats(context)
+            }
+            Text(
+                when {
+                    histProgress.running -> histProgress.message.ifBlank { "Sincronizando…" }
+                    totalLocal > 0 -> "$totalLocal scrobbles no arquivo" +
+                        if (lastSync > 0L) " · último sync ${java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault()).format(java.util.Date(lastSync))}" else ""
+                    else -> "Nenhum histórico baixado ainda"
+                },
+                fontSize = 13.sp,
+                color = Color.White.copy(0.7f)
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        val u = username
+                        if (u.isNullOrBlank()) {
+                            Toast.makeText(context, "Entre na conta primeiro", Toast.LENGTH_SHORT).show()
+                        } else {
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) {
+                                    com.tolete.player.data.LastFmHistoryStore.sync(context, u, full = totalLocal == 0)
+                                }
+                                Toast.makeText(
+                                    context,
+                                    if (ok) "Histórico atualizado" else "Falha ou sync já em andamento",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    },
+                    enabled = !histProgress.running
+                ) {
+                    Text(if (totalLocal == 0) "Baixar histórico completo" else "Atualizar (incremental)")
+                }
+                if (totalLocal > 0) {
+                    OutlinedButton(
+                        onClick = {
+                            val u = username
+                            if (u.isNullOrBlank()) return@OutlinedButton
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    com.tolete.player.data.LastFmHistoryStore.sync(context, u, full = true)
+                                }
+                            }
+                        },
+                        enabled = !histProgress.running
+                    ) { Text("Rebaixar tudo") }
+                }
+            }
         }
 
         if (!status.isNullOrBlank()) {

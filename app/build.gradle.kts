@@ -17,8 +17,8 @@ android {
         applicationId = "gui.pgcr.music"
         minSdk = 26
         targetSdk = 36
-        versionCode = 230
-        versionName = "0.70"
+        versionCode = 357
+        versionName = "1.0"
 
         if (hasProjectM) {
             ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
@@ -59,6 +59,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.6.2")
+    implementation("androidx.lifecycle:lifecycle-process:2.6.2")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("io.coil-kt:coil-compose:2.7.0")

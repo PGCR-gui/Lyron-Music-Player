@@ -86,6 +86,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     /** Biblioteca sem duplicatas: é o que o resto do app enxerga. */
     val tracks: StateFlow<List<Track>> = _library
         .map { list -> list.distinctBy { it.id } }
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _isScanning = MutableStateFlow(false)
@@ -101,7 +102,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val counts = lib.groupingBy { it.sourceTree }.eachCount()
         uris.map { describeTree(it, counts[it] ?: 0) }
             .sortedBy { it.path.lowercase() }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _currentTab = MutableStateFlow(Tab.HOME)
     val currentTab: StateFlow<Tab> = _currentTab.asStateFlow()
@@ -112,25 +114,84 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // ---------- Busca ----------
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    private val _activeSearchQuery = MutableStateFlow("")
+    private var searchDebounceJob: Job? = null
+    private val _searchPending = MutableStateFlow(false)
+    val searchPending: StateFlow<Boolean> = _searchPending.asStateFlow()
+    private val _searchHistory = MutableStateFlow(
+        runCatching {
+            val arr = JSONArray(prefs.getString(KEY_SEARCH_HISTORY, "[]"))
+            List(arr.length()) { arr.optString(it) }.filter { it.isNotBlank() }.take(20)
+        }.getOrDefault(emptyList())
+    )
+    val searchHistory: StateFlow<List<String>> = _searchHistory.asStateFlow()
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
     fun setSearchQuery(q: String) {
         _searchQuery.value = q
+        searchDebounceJob?.cancel()
+        val term = q.trim()
+        if (term.isBlank()) {
+            _activeSearchQuery.value = ""
+            _searchPending.value = false
+            return
+        }
+        _activeSearchQuery.value = ""
+        _searchPending.value = true
+        searchDebounceJob = viewModelScope.launch {
+            delay(1_000)
+            if (_searchQuery.value.trim() == term && _isSearching.value) {
+                _activeSearchQuery.value = term
+                addSearchHistory(term)
+            }
+            _searchPending.value = false
+        }
+    }
+
+    private fun addSearchHistory(term: String) {
+        val updated = (listOf(term) + _searchHistory.value.filterNot { it.equals(term, ignoreCase = true) })
+            .take(20)
+        _searchHistory.value = updated
+        val json = JSONArray().apply { updated.forEach { put(it) } }.toString()
+        prefs.edit().putString(KEY_SEARCH_HISTORY, json).apply()
+    }
+
+    fun clearSearchHistory() {
+        _searchHistory.value = emptyList()
+        prefs.edit().remove(KEY_SEARCH_HISTORY).apply()
+    }
+
+    fun removeSearchHistoryItem(term: String) {
+        val updated = _searchHistory.value.filterNot { it.equals(term, ignoreCase = true) }
+        if (updated.size == _searchHistory.value.size) return
+        _searchHistory.value = updated
+        if (updated.isEmpty()) {
+            prefs.edit().remove(KEY_SEARCH_HISTORY).apply()
+        } else {
+            val json = JSONArray().apply { updated.forEach { put(it) } }.toString()
+            prefs.edit().putString(KEY_SEARCH_HISTORY, json).apply()
+        }
     }
 
     fun openSearch() {
+        searchDebounceJob?.cancel()
         _isSearching.value = true
         _searchQuery.value = ""
+        _activeSearchQuery.value = ""
+        _searchPending.value = false
     }
 
     fun closeSearch() {
+        searchDebounceJob?.cancel()
         _isSearching.value = false
         _searchQuery.value = ""
+        _activeSearchQuery.value = ""
+        _searchPending.value = false
     }
 
-    val searchResults: StateFlow<List<Track>> = combine(tracks, _searchQuery) { list, q ->
+    val searchResults: StateFlow<List<Track>> = combine(tracks, _activeSearchQuery) { list, q ->
         if (q.isBlank()) emptyList()
         else {
             val lower = q.lowercase()
@@ -140,7 +201,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     it.album.lowercase().contains(lower)
             }.sortedBy { it.title.lowercase() }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     fun setTab(tab: Tab) {
         _currentTab.value = tab
@@ -401,87 +463,94 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
      *  3) mesmo nome de arquivo ignorando a extensão (ex.: .flac na lista, .m4a na biblioteca)
      *  4) "Artista - Título" da linha #EXTINF contra as tags da faixa
      */
-    fun importPlaylistM3u(name: String, content: String): M3uImportResult {
+    suspend fun importPlaylistM3u(name: String, content: String): M3uImportResult {
         val lib = tracks.value
-        val entries = parseM3u(content)
-        if (entries.isEmpty()) return M3uImportResult(null, 0, 0)
-        if (lib.isEmpty()) return M3uImportResult(null, 0, entries.size)
+        val match = withContext(Dispatchers.Default) {
+            val entries = parseM3u(content)
+            if (entries.isEmpty()) return@withContext M3uMatchResult(emptyList(), 0, 0)
+            if (lib.isEmpty()) return@withContext M3uMatchResult(emptyList(), 0, entries.size)
 
-        class Key(val t: Track, val locs: List<String>, val base: String, val baseNoExt: String)
+            class Key(val t: Track, val locs: List<String>, val base: String, val baseNoExt: String)
 
-        fun locationsOf(t: Track): List<String> {
-            val out = ArrayList<String>(3)
-            if (t.path.isNotBlank()) out += normM3uPath(t.path)
-            // URIs SAF/MediaStore guardam o caminho relativo codificado: ".../document/primary%3AMúsicas%2FX.m4a"
-            val u = try { Uri.decode(t.uri.toString()) } catch (_: Exception) { t.uri.toString() }
-            out += normM3uPath(u.substringAfter("/document/", u).substringAfter("primary:"))
-            out += normM3uPath(u)
-            return out.filter { it.isNotEmpty() }.distinct()
-        }
-
-        val keys = lib.map { t ->
-            val locs = locationsOf(t)
-            val base = locs.firstOrNull { it.contains('/') }?.substringAfterLast('/')
-                ?: locs.firstOrNull()?.substringAfterLast('/') ?: ""
-            val fileBase = normM3uPath(t.path).substringAfterLast('/').ifBlank { base }
-            Key(t, locs, fileBase, fileBase.substringBeforeLast('.', fileBase))
-        }
-        val byBase = keys.groupBy { it.base }
-        val byBaseNoExt = keys.groupBy { it.baseNoExt }
-        val byArtistTitle = keys.groupBy { normM3uText(it.t.artist) + "|" + normM3uText(it.t.title) }
-        val byTitleOnly = keys.groupBy { normM3uText(it.t.title) }
-
-        fun commonSuffixSegments(a: String, b: String): Int {
-            val x = a.split('/').filter { it.isNotEmpty() }.asReversed()
-            val y = b.split('/').filter { it.isNotEmpty() }.asReversed()
-            var n = 0
-            while (n < x.size && n < y.size && x[n] == y[n]) n++
-            return n
-        }
-
-        fun best(cands: List<Key>, wanted: String): Key? {
-            if (cands.isEmpty()) return null
-            if (cands.size == 1) return cands[0]
-            return cands.maxByOrNull { k -> k.locs.maxOf { commonSuffixSegments(it, wanted) } }
-        }
-
-        val ids = LinkedHashSet<String>()
-        var matched = 0
-        for (e in entries) {
-            val wanted = normM3uPath(e.path)
-            val wantedBase = wanted.substringAfterLast('/')
-            val wantedNoExt = wantedBase.substringBeforeLast('.', wantedBase)
-
-            var hit: Key? = null
-            // 1) caminho completo/sufixo
-            if (wanted.contains('/')) {
-                hit = keys.filter { k -> k.locs.any { it == wanted || it.endsWith("/$wanted") || wanted.endsWith("/$it") } }
-                    .let { best(it, wanted) }
+            fun locationsOf(t: Track): List<String> {
+                val out = ArrayList<String>(3)
+                if (t.path.isNotBlank()) out += normM3uPath(t.path)
+                // URIs SAF/MediaStore guardam o caminho relativo codificado: ".../document/primary%3AMúsicas%2FX.m4a"
+                val u = try { Uri.decode(t.uri.toString()) } catch (_: Exception) { t.uri.toString() }
+                out += normM3uPath(u.substringAfter("/document/", u).substringAfter("primary:"))
+                out += normM3uPath(u)
+                return out.filter { it.isNotEmpty() }.distinct()
             }
-            // 2) nome do arquivo
-            if (hit == null) hit = best(byBase[wantedBase].orEmpty(), wanted)
-            // 3) nome sem extensão
-            if (hit == null) hit = best(byBaseNoExt[wantedNoExt].orEmpty(), wanted)
-            // 4) Artista - Título do #EXTINF (ou do nome do arquivo "Artista - Título.ext")
-            if (hit == null) {
-                val label = e.label.ifBlank { wantedNoExt }
-                val parts = label.split(" - ", limit = 2)
-                if (parts.size == 2) {
-                    hit = byArtistTitle[normM3uText(parts[0]) + "|" + normM3uText(parts[1])]?.firstOrNull()
-                        ?: byTitleOnly[normM3uText(parts[1])]?.takeIf { it.size == 1 }?.firstOrNull()
-                } else {
-                    hit = byTitleOnly[normM3uText(label)]?.takeIf { it.size == 1 }?.firstOrNull()
+
+            val keys = lib.map { t ->
+                val locs = locationsOf(t)
+                val base = locs.firstOrNull { it.contains('/') }?.substringAfterLast('/')
+                    ?: locs.firstOrNull()?.substringAfterLast('/') ?: ""
+                val fileBase = normM3uPath(t.path).substringAfterLast('/').ifBlank { base }
+                Key(t, locs, fileBase, fileBase.substringBeforeLast('.', fileBase))
+            }
+            val byBase = keys.groupBy { it.base }
+            val byBaseNoExt = keys.groupBy { it.baseNoExt }
+            val byArtistTitle = keys.groupBy { normM3uText(it.t.artist) + "|" + normM3uText(it.t.title) }
+            val byTitleOnly = keys.groupBy { normM3uText(it.t.title) }
+
+            fun commonSuffixSegments(a: String, b: String): Int {
+                val x = a.split('/').filter { it.isNotEmpty() }.asReversed()
+                val y = b.split('/').filter { it.isNotEmpty() }.asReversed()
+                var n = 0
+                while (n < x.size && n < y.size && x[n] == y[n]) n++
+                return n
+            }
+
+            fun best(cands: List<Key>, wanted: String): Key? {
+                if (cands.isEmpty()) return null
+                if (cands.size == 1) return cands[0]
+                return cands.maxByOrNull { k -> k.locs.maxOf { commonSuffixSegments(it, wanted) } }
+            }
+
+            val ids = LinkedHashSet<String>()
+            var matched = 0
+            for (e in entries) {
+                val wanted = normM3uPath(e.path)
+                val wantedBase = wanted.substringAfterLast('/')
+                val wantedNoExt = wantedBase.substringBeforeLast('.', wantedBase)
+
+                var hit: Key? = null
+                // 1) caminho completo/sufixo
+                if (wanted.contains('/')) {
+                    hit = keys.filter { k -> k.locs.any { it == wanted || it.endsWith("/$wanted") || wanted.endsWith("/$it") } }
+                        .let { best(it, wanted) }
+                }
+                // 2) nome do arquivo
+                if (hit == null) hit = best(byBase[wantedBase].orEmpty(), wanted)
+                // 3) nome sem extensão
+                if (hit == null) hit = best(byBaseNoExt[wantedNoExt].orEmpty(), wanted)
+                // 4) Artista - Título do #EXTINF (ou do nome do arquivo "Artista - Título.ext")
+                if (hit == null) {
+                    val label = e.label.ifBlank { wantedNoExt }
+                    val parts = label.split(" - ", limit = 2)
+                    if (parts.size == 2) {
+                        hit = byArtistTitle[normM3uText(parts[0]) + "|" + normM3uText(parts[1])]?.firstOrNull()
+                            ?: byTitleOnly[normM3uText(parts[1])]?.takeIf { it.size == 1 }?.firstOrNull()
+                    } else {
+                        hit = byTitleOnly[normM3uText(label)]?.takeIf { it.size == 1 }?.firstOrNull()
+                    }
+                }
+                if (hit != null) {
+                    matched++
+                    ids.add(hit.t.id)
                 }
             }
-            if (hit != null) {
-                matched++
-                ids.add(hit.t.id)
-            }
+            M3uMatchResult(ids.toList(), matched, entries.size)
         }
-        if (ids.isEmpty()) return M3uImportResult(null, 0, entries.size)
-        val id = createPlaylist(name.ifBlank { "Importada" }, ids.toList())
-        return M3uImportResult(id, matched, entries.size)
+        if (match.total == 0 || match.ids.isEmpty()) {
+            return M3uImportResult(null, 0, match.total)
+        }
+        val id = createPlaylist(name.ifBlank { "Importada" }, match.ids)
+        return M3uImportResult(id, match.matched, match.total)
     }
+
+    private data class M3uMatchResult(val ids: List<String>, val matched: Int, val total: Int)
 
     private data class M3uEntry(val path: String, val label: String)
 
@@ -623,7 +692,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             genreSeparators = prefs.getString(KEY_GENRE_SEPARATORS, null) ?: "; /",
             ignoredFolders = prefs.getString(KEY_IGNORED_FOLDERS, null) ?: "",
             minDurationSec = prefs.getInt(KEY_MIN_DURATION_SEC, 0).coerceIn(0, 50),
-            firstLetterOrder = prefs.getBoolean(KEY_FIRST_LETTER_ORDER, false)
+            firstLetterOrder = prefs.getBoolean(KEY_FIRST_LETTER_ORDER, false),
+            artistAutoFetchMode = prefs.getString(KEY_ARTIST_AUTO_FETCH_MODE, "ON")
+                ?.takeIf { it in setOf("ON", "WIFI_ONLY", "OFF") } ?: "ON"
         )
     )
     val librarySettings: StateFlow<LibrarySettings> = _librarySettings.asStateFlow()
@@ -672,6 +743,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putBoolean(KEY_FIRST_LETTER_ORDER, enabled).apply()
     }
 
+    fun setArtistAutoFetchMode(mode: String) {
+        val safeMode = mode.takeIf { it in setOf("ON", "WIFI_ONLY", "OFF") } ?: "ON"
+        _librarySettings.update { it.copy(artistAutoFetchMode = safeMode) }
+        prefs.edit().putString(KEY_ARTIST_AUTO_FETCH_MODE, safeMode).apply()
+    }
+
     /** Aplica blacklist de pastas e duração mínima sobre a lista escaneada. */
     private fun filterLibrary(tracks: List<Track>): List<Track> {
         val st = _librarySettings.value
@@ -695,35 +772,177 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // ---------- Acesso a todos os arquivos (MediaStore) ----------
     private val _allFilesMode = MutableStateFlow(prefs.getBoolean(KEY_ALL_FILES, false))
     val allFilesMode: StateFlow<Boolean> = _allFilesMode.asStateFlow()
+    private val _mediaStoreMode = MutableStateFlow(prefs.getBoolean(KEY_MEDIA_STORE_MODE, false))
+    val mediaStoreMode: StateFlow<Boolean> = _mediaStoreMode.asStateFlow()
 
     fun setAllFilesMode(enabled: Boolean) {
         _allFilesMode.value = enabled
         prefs.edit().putBoolean(KEY_ALL_FILES, enabled).apply()
         if (enabled) {
+            _mediaStoreMode.value = false
+            prefs.edit().putBoolean(KEY_MEDIA_STORE_MODE, false).apply()
+            _library.value = _library.value.filter { it.sourceTree != "media_store" }
             refreshAllFiles()
         } else {
             _library.value = _library.value.filter { it.sourceTree != "all_files" }
+            viewModelScope.launch { scanMutex.withLock { cache.save(_library.value) } }
+            if (_mediaStoreMode.value || _treeUris.value.isNotEmpty()) refreshLibrary()
+        }
+    }
+
+    /** Usa READ_MEDIA_AUDIO/READ_EXTERNAL_STORAGE e o índice do sistema, sem acesso amplo ao disco. */
+    fun setMediaStoreMode(enabled: Boolean) {
+        if (enabled && !hasAudioReadPermission()) return
+        _mediaStoreMode.value = enabled
+        prefs.edit().putBoolean(KEY_MEDIA_STORE_MODE, enabled).apply()
+        if (enabled) {
+            _allFilesMode.value = false
+            prefs.edit().putBoolean(KEY_ALL_FILES, false).apply()
+            _library.value = _library.value.filter { it.sourceTree != "all_files" }
+            refreshLibrary()
+        } else {
+            _library.value = _library.value.filter { it.sourceTree != "media_store" }
             viewModelScope.launch { scanMutex.withLock { cache.save(_library.value) } }
             if (_treeUris.value.isNotEmpty()) refreshLibrary()
         }
     }
 
+    private fun hasAudioReadPermission(): Boolean {
+        val permission = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            android.Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(getApplication<Application>(), permission) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
     fun refreshAllFiles() {
+        if (!_allFilesMode.value) return
         launchScan { onTrack ->
             val existing = _library.value.associateBy { it.id }
-            val found = scanner.scanAllMedia(onTrack, existing)
+            val found = scanner.scanAllMedia(
+                onTrack = onTrack,
+                existingById = existing,
+                sourceTree = "all_files",
+                scanUnindexedDsf = true
+            )
             val fromFolders = _library.value.filter { it.sourceTree != "all_files" }
             _library.value = fromFolders + found
         }
     }
 
-    // ---------- Player: busca automática de letras (lrclib.net) ----------
+    // ---------- Player: busca automática de letras ----------
     private val _autoFetchLyrics = MutableStateFlow(prefs.getBoolean(KEY_AUTO_LYRICS, false))
     val autoFetchLyrics: StateFlow<Boolean> = _autoFetchLyrics.asStateFlow()
 
     fun setAutoFetchLyrics(enabled: Boolean) {
         _autoFetchLyrics.value = enabled
         prefs.edit().putBoolean(KEY_AUTO_LYRICS, enabled).apply()
+    }
+
+    private val _autoLyricsSaveTarget = MutableStateFlow(
+        runCatching { LyricsEmbedder.Target.valueOf(prefs.getString(KEY_AUTO_LYRICS_TARGET, null).orEmpty()) }
+            .getOrDefault(LyricsEmbedder.Target.LRC_FILE)
+    )
+    val autoLyricsSaveTarget: StateFlow<LyricsEmbedder.Target> = _autoLyricsSaveTarget.asStateFlow()
+    fun setAutoLyricsSaveTarget(target: LyricsEmbedder.Target) {
+        _autoLyricsSaveTarget.value = target
+        prefs.edit().putString(KEY_AUTO_LYRICS_TARGET, target.name).apply()
+    }
+
+    private val _preferNeteaseRomanization = MutableStateFlow(
+        prefs.getBoolean(KEY_PREFER_NETEASE_ROMANIZATION, false)
+    )
+    val preferNeteaseRomanization: StateFlow<Boolean> = _preferNeteaseRomanization.asStateFlow()
+    fun setPreferNeteaseRomanization(enabled: Boolean) {
+        _preferNeteaseRomanization.value = enabled
+        prefs.edit().putBoolean(KEY_PREFER_NETEASE_ROMANIZATION, enabled).apply()
+    }
+
+    /** Ordem de prioridade de tipo de letra para auto-fetch (ids de LyricsType). */
+    private val defaultLyricsTypeOrder = listOf("WORD", "SYNCED", "PLAIN")
+    private val _lyricsTypeOrder = MutableStateFlow(
+        prefs.getString(KEY_LYRICS_TYPE_ORDER, null)
+            ?.split('|')
+            ?.filter { it.isNotBlank() }
+            ?.ifEmpty { null }
+            ?: defaultLyricsTypeOrder
+    )
+    val lyricsTypeOrder: StateFlow<List<String>> = _lyricsTypeOrder.asStateFlow()
+    fun setLyricsTypeOrder(order: List<String>) {
+        val cleaned = order.filter { it in defaultLyricsTypeOrder }.ifEmpty { defaultLyricsTypeOrder }
+        _lyricsTypeOrder.value = cleaned
+        prefs.edit().putString(KEY_LYRICS_TYPE_ORDER, cleaned.joinToString("|")).apply()
+    }
+    fun moveLyricsType(from: Int, to: Int) {
+        val list = _lyricsTypeOrder.value.toMutableList()
+        if (from !in list.indices || to !in list.indices) return
+        val item = list.removeAt(from)
+        list.add(to, item)
+        setLyricsTypeOrder(list)
+    }
+
+    /** Ordem de servidores/fontes para auto-fetch (ids de LyricsSource). */
+    private val defaultLyricsSourceOrder = listOf(
+        "LYRON_REPOSITORY", "LRCLIB", "QQ_MUSIC", "NETEASE", "KUGOU"
+    )
+    private val _lyricsSourceOrder = MutableStateFlow(
+        prefs.getString(KEY_LYRICS_SOURCE_ORDER, null)
+            ?.split('|')
+            ?.filter { it.isNotBlank() }
+            ?.ifEmpty { null }
+            ?: defaultLyricsSourceOrder
+    )
+    val lyricsSourceOrder: StateFlow<List<String>> = _lyricsSourceOrder.asStateFlow()
+    fun setLyricsSourceOrder(order: List<String>) {
+        val cleaned = order.filter { it in defaultLyricsSourceOrder }.ifEmpty { defaultLyricsSourceOrder }
+        _lyricsSourceOrder.value = cleaned
+        prefs.edit().putString(KEY_LYRICS_SOURCE_ORDER, cleaned.joinToString("|")).apply()
+    }
+    fun moveLyricsSource(from: Int, to: Int) {
+        val list = _lyricsSourceOrder.value.toMutableList()
+        if (from !in list.indices || to !in list.indices) return
+        val item = list.removeAt(from)
+        list.add(to, item)
+        setLyricsSourceOrder(list)
+    }
+
+    /** Atraso (ms) entre aparições dos itens nos resultados da pesquisa. */
+    private val _searchStaggerMs = MutableStateFlow(
+        prefs.getInt(KEY_SEARCH_STAGGER_MS, 50).coerceIn(0, 200)
+    )
+    val searchStaggerMs: StateFlow<Int> = _searchStaggerMs.asStateFlow()
+    fun setSearchStaggerMs(ms: Int) {
+        val v = ms.coerceIn(0, 200)
+        _searchStaggerMs.value = v
+        prefs.edit().putInt(KEY_SEARCH_STAGGER_MS, v).apply()
+    }
+
+    private val _lyricsPopupEnabled = MutableStateFlow(prefs.getBoolean(KEY_LYRICS_POPUP, false))
+    val lyricsPopupEnabled: StateFlow<Boolean> = _lyricsPopupEnabled.asStateFlow()
+
+    private val popupPrefsListener =
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_LYRICS_POPUP) {
+                val enabled = prefs.getBoolean(KEY_LYRICS_POPUP, false)
+                if (_lyricsPopupEnabled.value != enabled) {
+                    _lyricsPopupEnabled.value = enabled
+                }
+            }
+        }
+
+    fun setLyricsPopupEnabled(enabled: Boolean) {
+        _lyricsPopupEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_LYRICS_POPUP, enabled).apply()
+        // A notificação de controle é mantida pelo PlaybackService enquanto o popup estiver ativo.
+        // Aqui só garantimos limpeza imediata ao desligar pela UI.
+        if (!enabled) {
+            try {
+                com.tolete.player.LyricsPopupOverlay.hide()
+                com.tolete.player.LyricsPopupNotifier.cancel(getApplication())
+            } catch (_: Throwable) { }
+        }
     }
 
     /** Modo de aleatório: ABSOLUTE (shuffle do player) ou QUEUE (fila embaralhada fixa). */
@@ -1045,15 +1264,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .sortedBy { AlphaSort.key(it.name, st.firstLetterOrder) }
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val searchArtists: StateFlow<List<Artist>> = combine(artists, _searchQuery) { list, q ->
+    val searchArtists: StateFlow<List<Artist>> = combine(artists, _activeSearchQuery) { list, q ->
         if (q.isBlank()) emptyList()
         else {
             val lower = q.lowercase()
             list.filter { it.name.lowercase().contains(lower) }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val searchAlbums: StateFlow<List<Album>> = combine(albums, _searchQuery) { list, q ->
+    val searchAlbums: StateFlow<List<Album>> = combine(albums, _activeSearchQuery) { list, q ->
         if (q.isBlank()) emptyList()
         else {
             val lower = q.lowercase()
@@ -1062,15 +1282,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     it.artist.lowercase().contains(lower)
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val searchGenres: StateFlow<List<Genre>> = combine(genres, _searchQuery) { list, q ->
+    val searchGenres: StateFlow<List<Genre>> = combine(genres, _activeSearchQuery) { list, q ->
         if (q.isBlank()) emptyList()
         else {
             val lower = q.lowercase()
             list.filter { it.name.lowercase().contains(lower) }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** Faixas do grupo aberto, ordenadas por álbum > nº da faixa > título. */
     val visibleTracks: StateFlow<List<Track>> = combine(tracks, filter, _playlists, _librarySettings) { list, f, pls, st ->
@@ -1118,7 +1340,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // ---------- Scan ----------
     private val scanMutex = Mutex()
@@ -1229,13 +1452,31 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshLibrary() {
         val folders = _treeUris.value
         val allFiles = _allFilesMode.value
-        if (folders.isEmpty() && !allFiles) return
+        val mediaStore = _mediaStoreMode.value
+        if (folders.isEmpty() && !allFiles && !mediaStore) return
+        if (mediaStore && !hasAudioReadPermission() && folders.isEmpty()) return
         launchScan { onTrack ->
             val existing = _library.value.associateBy { it.id }
             val result = mutableListOf<Track>()
             if (allFiles) {
                 try {
-                    result += scanner.scanAllMedia(onTrack, existing)
+                    result += scanner.scanAllMedia(
+                        onTrack = onTrack,
+                        existingById = existing,
+                        sourceTree = "all_files",
+                        scanUnindexedDsf = true
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) { }
+            } else if (mediaStore && hasAudioReadPermission()) {
+                try {
+                    result += scanner.scanAllMedia(
+                        onTrack = onTrack,
+                        existingById = existing,
+                        sourceTree = "media_store",
+                        scanUnindexedDsf = false
+                    )
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) { }
@@ -1260,7 +1501,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun quickRescanInBackground() {
         val folders = _treeUris.value
         val allFiles = _allFilesMode.value
-        if (folders.isEmpty() && !allFiles) return
+        val mediaStore = _mediaStoreMode.value
+        if (folders.isEmpty() && !allFiles && !mediaStore) return
+        if (mediaStore && !hasAudioReadPermission() && folders.isEmpty()) return
         if (_library.value.isEmpty()) {
             refreshLibrary()
             return
@@ -1270,7 +1513,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val result = mutableListOf<Track>()
             if (allFiles) {
                 try {
-                    result += scanner.scanAllMedia(onTrack, existing)
+                    result += scanner.scanAllMedia(
+                        onTrack = onTrack,
+                        existingById = existing,
+                        sourceTree = "all_files",
+                        scanUnindexedDsf = true
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) { }
+            } else if (mediaStore && hasAudioReadPermission()) {
+                try {
+                    result += scanner.scanAllMedia(
+                        onTrack = onTrack,
+                        existingById = existing,
+                        sourceTree = "media_store",
+                        scanUnindexedDsf = false
+                    )
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) { }
@@ -1402,24 +1661,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun connectController() {
         val app = getApplication<Application>()
-        LastFmScrobbler.init(app)
-        val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
-        val future = MediaController.Builder(app, token).buildAsync()
-        controllerFuture = future
-        future.addListener({
-            try {
-                controller = future.get().also { it.addListener(playerListener) }
-                syncFromController()
-                if (_library.value.isNotEmpty()) restorePlaybackState()
-                // Anexa o equalizador nativo à sessão de áudio atual
-                val sessionId = com.tolete.player.PlaybackService.currentAudioSessionId
-                if (sessionId != 0) {
-                    com.tolete.player.data.EqualizerManager.attach(sessionId, app)
-                }
-            } catch (e: Exception) {
-                controller = null
+        viewModelScope.launch(Dispatchers.IO) {
+            // A leitura da fila e das edições do scrobble pode envolver JSON/arquivos.
+            LastFmScrobbler.init(app)
+            withContext(Dispatchers.Main.immediate) {
+                val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
+                val future = MediaController.Builder(app, token).buildAsync()
+                controllerFuture = future
+                future.addListener({
+                    try {
+                        controller = future.get().also { it.addListener(playerListener) }
+                        syncFromController()
+                        if (_library.value.isNotEmpty()) restorePlaybackState()
+                        val sessionId = com.tolete.player.PlaybackService.currentAudioSessionId
+                        if (sessionId != 0) {
+                            com.tolete.player.data.EqualizerManager.attach(sessionId, app)
+                        }
+                    } catch (_: Exception) {
+                        controller = null
+                    }
+                }, ContextCompat.getMainExecutor(app))
             }
-        }, ContextCompat.getMainExecutor(app))
+        }
     }
 
     fun playTracks(list: List<Track>, startIndex: Int) {
@@ -1934,16 +2197,55 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ---------- Letras (.lrc + tags embutidas, sem cache) ----------
-    suspend fun loadLyrics(track: Track): List<LyricLine> = withContext(Dispatchers.IO) {
+    suspend fun loadLyrics(
+        track: Track,
+        allowNetwork: Boolean = true
+    ): List<LyricLine> = withContext(Dispatchers.IO) {
         val local = LyricsExtractor.load(getApplication(), track)
         if (local.isNotEmpty()) return@withContext local
-        if (_autoFetchLyrics.value) {
+        // Só baixa da rede se a opção estiver ligada e o chamador permitir
+        // (Now Playing / letras popup). Nunca em scans de biblioteca.
+        if (_autoFetchLyrics.value && allowNetwork) {
             try {
-                val (lines, raw) = LrcLibClient.fetchLyricsWithRaw(track)
-                if (lines.isNotEmpty() && !raw.isNullOrBlank()) {
-                    // Preferência de auto-fetch: tenta .lrc; se falhar, tags
-                    if (!LyricsEmbedder.embedLrc(getApplication(), track, raw)) {
-                        LyricsEmbedder.embedInTags(getApplication(), track, raw)
+                val results = LyricsSearch.search(track.title, track.artist, _preferNeteaseRomanization.value)
+                if (results.isEmpty()) return@withContext emptyList()
+                // Busca automática rígida: título e artista normalizados devem ser iguais
+                fun norm(s: String) = java.text.Normalizer
+                    .normalize(s.trim().replace(Regex("\\s+"), " "), java.text.Normalizer.Form.NFC)
+                    .lowercase(java.util.Locale.ROOT)
+                    .filter { it.isLetterOrDigit() || it.isWhitespace() }
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                val wantTitle = norm(track.title)
+                val wantArtist = norm(track.artist)
+                val exact = results.filter {
+                    norm(it.trackName) == wantTitle && norm(it.artistName) == wantArtist
+                }
+                if (exact.isEmpty()) return@withContext emptyList()
+                val typeRank = _lyricsTypeOrder.value.withIndex().associate { it.value to it.index }
+                val sourceRank = _lyricsSourceOrder.value.withIndex().associate { it.value to it.index }
+                val preferRoman = _preferNeteaseRomanization.value
+                val best = exact.minWithOrNull(
+                    compareBy<com.tolete.player.data.LyricsSearchResult> {
+                        if (it.source != com.tolete.player.data.LyricsSource.NETEASE || it.variant == null) 0
+                        else if ((it.variant == com.tolete.player.data.LyricsVariant.ROMANIZED) == preferRoman) 0 else 1
+                    }.thenBy {
+                        typeRank[it.type.name] ?: 99
+                    }.thenBy {
+                        sourceRank[it.source.name] ?: 99
+                    }
+                ) ?: return@withContext emptyList()
+                val lines = best.lines
+                if (lines.isNotEmpty()) {
+                    // Outra rotina pode ter gravado enquanto a rede respondia; não sobrescrever.
+                    val stored = LyricsEmbedder.hasExternalLrc(track) ||
+                        LyricsExtractor.loadEmbedded(getApplication(), track).isNotEmpty()
+                    if (stored) return@withContext LyricsExtractor.load(getApplication(), track)
+                    val target = _autoLyricsSaveTarget.value
+                    val saved = LyricsEmbedder.save(getApplication(), track, lines, target)
+                    // Mantém o fallback histórico para .lrc quando a pasta não permite escrita.
+                    if (!saved && target == LyricsEmbedder.Target.LRC_FILE) {
+                        LyricsEmbedder.save(getApplication(), track, lines, LyricsEmbedder.Target.EMBEDDED)
                     }
                 }
                 lines
@@ -1965,7 +2267,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Busca manual: LRCLIB + QQ Music + NetEase + KuGou, todas ao mesmo tempo. */
     suspend fun searchLyrics(trackName: String, artistName: String): List<LyricsSearchResult> =
-        LyricsSearch.search(trackName, artistName)
+        LyricsSearch.search(trackName, artistName, _preferNeteaseRomanization.value)
 
     suspend fun embedLyricsResult(
         track: Track,
@@ -1974,18 +2276,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     ): List<LyricLine> =
         withContext(Dispatchers.IO) {
             val lines = result.lines
-            val raw = result.lrcText
-            if (lines.isNotEmpty() && !raw.isNullOrBlank()) {
-                when (target) {
-                    LyricsEmbedder.Target.LRC_FILE -> LyricsEmbedder.embedLrc(getApplication(), track, raw)
-                    LyricsEmbedder.Target.EMBEDDED -> LyricsEmbedder.embedInTags(getApplication(), track, raw)
-                }
-            }
-            lines
+            if (lines.isNotEmpty() && LyricsEmbedder.save(getApplication(), track, lines, target)) lines else emptyList()
         }
 
     // ---------- Aparência ----------
-    enum class AppThemeId { DYNAMIC, DEFAULT, AQUA, SUNSET, FOREST, MIDNIGHT, ROSE, EMBER, AMOLED, TWILIGHT }
+    enum class AppThemeId { DYNAMIC, DEFAULT, AQUA, SUNSET, FOREST, MIDNIGHT, ROSE, EMBER, AMOLED, TWILIGHT, PHOTO }
+
+    /** Estilo do índice alfabético: glass (atual), classic (faixa de letras) ou slim (barra fina com balão). */
+    enum class AlphabetScrollerStyle { GLASS, CLASSIC, SLIM }
 
     private val _themeId = MutableStateFlow(
         try {
@@ -1999,6 +2297,57 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setThemeId(id: AppThemeId) {
         _themeId.value = id
         prefs.edit().putString(KEY_THEME, id.name).apply()
+    }
+
+    /** Caminho da foto de fundo do tema PHOTO (arquivo local). */
+    private val _photoThemePath = MutableStateFlow(prefs.getString(KEY_PHOTO_THEME_PATH, null))
+    val photoThemePath: StateFlow<String?> = _photoThemePath.asStateFlow()
+    fun setPhotoThemePath(path: String?) {
+        _photoThemePath.value = path
+        prefs.edit().putString(KEY_PHOTO_THEME_PATH, path).apply()
+    }
+
+    /** Intensidade do blur do fundo por foto (0f…1f). */
+    private val _photoThemeBlur = MutableStateFlow(prefs.getFloat(KEY_PHOTO_THEME_BLUR, 0.55f).coerceIn(0f, 1f))
+    val photoThemeBlur: StateFlow<Float> = _photoThemeBlur.asStateFlow()
+    fun setPhotoThemeBlur(v: Float) {
+        val c = v.coerceIn(0f, 1f)
+        _photoThemeBlur.value = c
+        prefs.edit().putFloat(KEY_PHOTO_THEME_BLUR, c).apply()
+    }
+
+    /**
+     * Quando true e tema = DYNAMIC, usa a capa do álbum como fundo borrado
+     * (além das cores extraídas). Opcional.
+     */
+    private val _dynamicAlbumBlur = MutableStateFlow(prefs.getBoolean(KEY_DYNAMIC_ALBUM_BLUR, false))
+    val dynamicAlbumBlur: StateFlow<Boolean> = _dynamicAlbumBlur.asStateFlow()
+    fun setDynamicAlbumBlur(enabled: Boolean) {
+        _dynamicAlbumBlur.value = enabled
+        prefs.edit().putBoolean(KEY_DYNAMIC_ALBUM_BLUR, enabled).apply()
+    }
+
+    private val _alphabetScrollerStyle = MutableStateFlow(
+        try {
+            AlphabetScrollerStyle.valueOf(
+                prefs.getString(KEY_ALPHA_SCROLLER_STYLE, AlphabetScrollerStyle.GLASS.name)!!
+            )
+        } catch (_: Exception) { AlphabetScrollerStyle.GLASS }
+    )
+    val alphabetScrollerStyle: StateFlow<AlphabetScrollerStyle> = _alphabetScrollerStyle.asStateFlow()
+    fun setAlphabetScrollerStyle(style: AlphabetScrollerStyle) {
+        _alphabetScrollerStyle.value = style
+        prefs.edit().putString(KEY_ALPHA_SCROLLER_STYLE, style.name).apply()
+    }
+
+    /** Estilo da forma de onda dos cortadores de áudio (editor de trecho dos vídeos). */
+    private val _waveformTheme = MutableStateFlow(
+        WaveformTheme.fromName(prefs.getString(KEY_WAVEFORM_THEME, null))
+    )
+    val waveformTheme: StateFlow<WaveformTheme> = _waveformTheme.asStateFlow()
+    fun setWaveformTheme(theme: WaveformTheme) {
+        _waveformTheme.value = theme
+        prefs.edit().putString(KEY_WAVEFORM_THEME, theme.name).apply()
     }
 
     private val _menuVisualStyle = MutableStateFlow(
@@ -3264,6 +3613,16 @@ private val _firstPlayedAt = MutableStateFlow(
         prefs.edit().putString(KEY_SEEK_BAR_STYLE, style.name).apply()
     }
 
+    /** Waveform usada quando a seekbar está no estilo Waveform (independente da do editor de trecho). */
+    private val _seekBarWaveformTheme = MutableStateFlow(
+        WaveformTheme.fromName(prefs.getString(KEY_SEEK_WAVEFORM_THEME, null))
+    )
+    val seekBarWaveformTheme: StateFlow<WaveformTheme> = _seekBarWaveformTheme.asStateFlow()
+    fun setSeekBarWaveformTheme(theme: WaveformTheme) {
+        _seekBarWaveformTheme.value = theme
+        prefs.edit().putString(KEY_SEEK_WAVEFORM_THEME, theme.name).apply()
+    }
+
     // ---------- Ordenação ----------
     enum class GroupSort { NAME, TRACK_COUNT, TOTAL_DURATION }
     enum class TrackSort { NAME, FILE_SIZE, DURATION, LAST_MODIFIED }
@@ -3570,6 +3929,7 @@ private val _firstPlayedAt = MutableStateFlow(
             put("trackBlacklist", options.trackBlacklist)
         })
         obj.put("theme", _themeId.value.name)
+        obj.put("waveformTheme", _waveformTheme.value.name)
         obj.put("lyricsFont", _lyricsFontPath.value)
         obj.put("lyricsEmphasisFont", _lyricsEmphasisFontPath.value)
         obj.put("uiFont", _uiFontPath.value)
@@ -3592,6 +3952,7 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("audioOutput", _audioOutput.value.name)
         obj.put("preferredSampleRate", _preferredSampleRate.value)
         obj.put("allFilesMode", _allFilesMode.value)
+        obj.put("mediaStoreMode", _mediaStoreMode.value)
         obj.put("splitArtists", _librarySettings.value.splitArtists)
         obj.put("artistSeparators", _librarySettings.value.artistSeparators)
         obj.put("artistExceptions", _librarySettings.value.artistExceptions)
@@ -3602,6 +3963,7 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("fadeMs", _fadeMs.value)
         obj.put("crossfadeMs", _crossfadeMs.value)
         obj.put("seekBarStyle", _seekBarStyle.value.name)
+        obj.put("seekBarWaveformTheme", _seekBarWaveformTheme.value.name)
         obj.put("immersiveNowPlaying", _immersiveNowPlaying.value)
         obj.put("milkIntervalSec", _milkIntervalSec.value)
         obj.put("milkSwitchMode", _milkSwitchMode.value)
@@ -3785,6 +4147,9 @@ private val _firstPlayedAt = MutableStateFlow(
             obj.optString("theme").takeIf { it.isNotBlank() }?.let {
                 try { setThemeId(AppThemeId.valueOf(it)) } catch (_: Exception) {}
             }
+            obj.optString("waveformTheme").takeIf { it.isNotBlank() }?.let {
+                setWaveformTheme(WaveformTheme.fromName(it))
+            }
             if (obj.has("lyricsFont")) setMainLyricsFontPath(obj.optString("lyricsFont").ifBlank { null })
             if (obj.has("lyricsEmphasisFont")) setLyricsEmphasisFontPath(obj.optString("lyricsEmphasisFont").ifBlank { null })
             if (obj.has("lyricsBackingFont")) setLyricsBackingFontPath(obj.optString("lyricsBackingFont").ifBlank { null })
@@ -3819,6 +4184,9 @@ private val _firstPlayedAt = MutableStateFlow(
             if (obj.has("crossfadeMs")) setCrossfadeMs(obj.getInt("crossfadeMs"))
             if (obj.has("seekBarStyle")) {
                 try { setSeekBarStyle(SeekBarStyle.valueOf(obj.getString("seekBarStyle"))) } catch (_: Exception) {}
+            }
+            obj.optString("seekBarWaveformTheme").takeIf { it.isNotBlank() }?.let {
+                setSeekBarWaveformTheme(WaveformTheme.fromName(it))
             }
             if (obj.has("immersiveNowPlaying")) setImmersiveNowPlaying(obj.getBoolean("immersiveNowPlaying"))
             if (obj.has("milkIntervalSec")) setMilkIntervalSec(obj.getInt("milkIntervalSec"))
@@ -3941,6 +4309,7 @@ private val _firstPlayedAt = MutableStateFlow(
                 try { ArtistMetaStore.importAll(getApplication(), obj.getJSONObject("artistMeta").toString()) } catch (_: Exception) {}
             }
             if (obj.has("allFilesMode")) setAllFilesMode(obj.getBoolean("allFilesMode"))
+            if (obj.has("mediaStoreMode")) setMediaStoreMode(obj.getBoolean("mediaStoreMode"))
             true
         } catch (_: Exception) {
             false
@@ -3956,6 +4325,8 @@ private val _firstPlayedAt = MutableStateFlow(
         FavoritesBridge.owner = favoritesOwner
         connectController()
         loadPlaylists()
+        // Espelha desligar o popup pela notificação → UI / botão do Now Playing / settings
+        prefs.registerOnSharedPreferenceChangeListener(popupPrefsListener)
 
         viewModelScope.launch {
             // pastas salvas (+ migração da antiga pasta única), só as que ainda têm permissão
@@ -3975,22 +4346,27 @@ private val _firstPlayedAt = MutableStateFlow(
             // biblioteca em cache: abre na hora; depois scan rápido só de novos/alterados
             val cached = cache.load()
             val allFiles = _allFilesMode.value
+            val mediaStore = _mediaStoreMode.value && hasAudioReadPermission()
             if (cached != null) {
-                _library.value = cached.filter {
-                    it.sourceTree in valid || (allFiles && it.sourceTree == "all_files")
+                _library.value = withContext(Dispatchers.Default) {
+                    cached.filter {
+                        it.sourceTree in valid ||
+                            (allFiles && it.sourceTree == "all_files") ||
+                            (mediaStore && it.sourceTree == "media_store")
+                    }
                 }
                 syncFromController()
                 // Restaura a fila salva assim que a biblioteca em cache estiver pronta
                 if (_library.value.isNotEmpty() && controller != null) restorePlaybackState()
                 if (allFiles && _library.value.none { it.sourceTree == "all_files" }) {
                     refreshAllFiles()
-                } else if (valid.isNotEmpty() || allFiles) {
+                } else if (valid.isNotEmpty() || allFiles || mediaStore) {
                     // em segundo plano: procura arquivos novos sem bloquear a UI
                     quickRescanInBackground()
                 }
             } else if (allFiles) {
                 refreshAllFiles()
-            } else if (valid.isNotEmpty()) {
+            } else if (valid.isNotEmpty() || mediaStore) {
                 refreshLibrary()
             }
             restorePlaybackState()
@@ -4014,6 +4390,11 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_THEME = "app_theme"
         const val KEY_DYNAMIC_DEFAULT_COLOR = "dynamic_default_color"
         const val KEY_DYNAMIC_FLOAT_COLORS = "dynamic_float_colors"
+        const val KEY_PHOTO_THEME_PATH = "photo_theme_path"
+        const val KEY_PHOTO_THEME_BLUR = "photo_theme_blur"
+        const val KEY_DYNAMIC_ALBUM_BLUR = "dynamic_album_blur"
+        const val KEY_ALPHA_SCROLLER_STYLE = "alphabet_scroller_style"
+        const val KEY_WAVEFORM_THEME = "waveform_theme"
         const val KEY_HISTORY = "play_history"
         const val KEY_TRACK_BLACKLIST = "track_blacklist"
         const val KEY_PLAY_COUNTS = "play_counts"
@@ -4037,8 +4418,17 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_IGNORED_FOLDERS = "ignored_folders"
         const val KEY_MIN_DURATION_SEC = "min_duration_sec"
         const val KEY_FIRST_LETTER_ORDER = "first_letter_order"
+        const val KEY_SEARCH_HISTORY = "library_search_history"
+        const val KEY_ARTIST_AUTO_FETCH_MODE = "artist_auto_fetch_mode"
         const val KEY_ALL_FILES = "all_files_mode"
+        const val KEY_MEDIA_STORE_MODE = "media_store_mode"
         const val KEY_AUTO_LYRICS = "auto_fetch_lyrics"
+        const val KEY_AUTO_LYRICS_TARGET = "auto_fetch_lyrics_target"
+        const val KEY_PREFER_NETEASE_ROMANIZATION = "prefer_netease_romanization"
+        const val KEY_LYRICS_POPUP = "lyrics_popup_enabled"
+        const val KEY_SEARCH_STAGGER_MS = "search_stagger_ms"
+        const val KEY_LYRICS_TYPE_ORDER = "lyrics_type_order"
+        const val KEY_LYRICS_SOURCE_ORDER = "lyrics_source_order"
         const val KEY_SHUFFLE_TYPE = "shuffle_type"
         const val KEY_QUEUE_CURRENT_ID = "queue_current_id"
         const val KEY_BIT_PERFECT = "bit_perfect"
@@ -4077,6 +4467,7 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_FADE_MS = "fade_ms"
         const val KEY_CROSSFADE_MS = "crossfade_ms"
         const val KEY_SEEK_BAR_STYLE = "seek_bar_style"
+        const val KEY_SEEK_WAVEFORM_THEME = "seek_bar_waveform_theme"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"
         const val KEY_TRACK_SORT = "track_sort"

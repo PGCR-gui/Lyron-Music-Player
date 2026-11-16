@@ -40,6 +40,12 @@ object TagWriter {
          * etc.) NÃO remove a letra existente.
          */
         val clearLyrics: Boolean = false,
+        /**
+         * false = o usuário não mexeu na letra (ex.: trocou só a capa): o campo LYRICS do arquivo
+         * não é tocado nem verificado. Antes, qualquer diferença de formato na releitura da letra
+         * (quebras de linha, outra tag de origem) fazia a gravação inteira falhar por causa da capa.
+         */
+        val lyricsChanged: Boolean = true,
         val bpm: String = "",
         val isrc: String = "",
         val copyright: String = "",
@@ -114,11 +120,17 @@ object TagWriter {
             } else {
                 tag.setField(FieldKey.LYRICS, v)
                 val storedLyrics = tag.getFirst(FieldKey.LYRICS).orEmpty().trim()
-                if (storedLyrics != v) {
+                if (!sameLyrics(storedLyrics, v)) {
                     throw IllegalStateException("O formato não confirmou a gravação da letra sincronizada")
                 }
             }
         }
+
+    /** Compara letras ignorando diferença de quebra de linha (\r\n x \n) e espaços nas pontas. */
+    private fun sameLyrics(a: String, b: String): Boolean {
+        fun norm(s: String) = s.replace("\r\n", "\n").replace('\r', '\n').trim()
+        return norm(a) == norm(b)
+    }
 
     fun write(context: Context, track: Track, fields: Fields): Result =
         editFile(context, track, { name -> "Tags gravadas em $name" }) { audio ->
@@ -165,18 +177,20 @@ object TagWriter {
             set(FieldKey.COMPOSER, fields.composer)
             set(FieldKey.LYRICIST, fields.lyricist)
             set(FieldKey.COMMENT, fields.comment)
-            if (fields.lyrics.isNotBlank()) {
-                val requestedLyrics = fields.lyrics.trim()
-                val previousLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
-                if (requestedLyrics != previousLyrics) {
-                    set(FieldKey.LYRICS, requestedLyrics)
-                    val storedLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
-                    if (storedLyrics != requestedLyrics) {
-                        throw IllegalStateException("O formato não confirmou a gravação da letra sincronizada")
+            if (fields.lyricsChanged) {
+                if (fields.lyrics.isNotBlank()) {
+                    val requestedLyrics = fields.lyrics.trim()
+                    val previousLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
+                    if (!sameLyrics(requestedLyrics, previousLyrics)) {
+                        set(FieldKey.LYRICS, requestedLyrics)
+                        val storedLyrics = try { tag.getFirst(FieldKey.LYRICS).orEmpty().trim() } catch (_: Exception) { "" }
+                        if (!sameLyrics(storedLyrics, requestedLyrics)) {
+                            throw IllegalStateException("O formato não confirmou a gravação da letra sincronizada")
+                        }
                     }
+                } else if (fields.clearLyrics) {
+                    try { tag.deleteField(FieldKey.LYRICS) } catch (_: Exception) { }
                 }
-            } else if (fields.clearLyrics) {
-                try { tag.deleteField(FieldKey.LYRICS) } catch (_: Exception) { }
             }
             set(FieldKey.BPM, fields.bpm)
             set(FieldKey.ISRC, fields.isrc)

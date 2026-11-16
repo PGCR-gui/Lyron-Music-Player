@@ -1,5 +1,7 @@
 package com.tolete.player.ui
 
+import android.content.Intent
+
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import com.tolete.player.ui.MusicViewModel.AudioOutputBackend
@@ -103,6 +105,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import com.tolete.player.data.LyricsSearchResult
 import com.tolete.player.data.LyricsSource
 import com.tolete.player.data.LyricsType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -149,6 +153,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.Settings
+import android.net.Uri
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -159,6 +167,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.sin
 import androidx.compose.ui.text.font.Font
 import androidx.compose.runtime.DisposableEffect
@@ -177,6 +187,7 @@ import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.LyricsExtractor
 import com.tolete.player.data.Track
 import com.tolete.player.video.LyricsVideoGenerator
+import com.tolete.player.video.WaveformExtractor
 import com.tolete.player.video.LyricsVideoStyle
 import com.tolete.player.visualizer.MilkVisualizer
 import com.tolete.player.visualizer.ProjectMNative
@@ -380,13 +391,20 @@ fun NowPlayingScreen(
     playCount: Int = 0,
     firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L,
+    lyricsPopupEnabled: Boolean = false,
+    onLyricsPopupEnabledChange: (Boolean) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
+    seekWaveformTheme: WaveformTheme = WaveformTheme.BARS,
     immersiveNowPlaying: Boolean = true,
     getPlaybackSpeed: () -> Float = { 1f },
     onPlaybackSpeed: (Float) -> Unit = {},
     lyricsEmphasisFontPath: String? = null,
     lyricsBackingFontPath: String? = null,
-    audioOutputMode: AudioOutputBackend = AudioOutputBackend.DEFAULT
+    audioOutputMode: AudioOutputBackend = AudioOutputBackend.DEFAULT,
+    lastFmUsername: String? = null,
+    libraryTracks: List<Track> = emptyList(),
+    openLastFmTrackInfo: Boolean = false,
+    onLastFmTrackInfoConsumed: () -> Unit = {}
 ) {
     // Mantém a tela acesa enquanto o Now Playing estiver aberto
     KeepScreenOn()
@@ -420,15 +438,27 @@ fun NowPlayingScreen(
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showTechDetails by remember { mutableStateOf(false) }
+    var techPillShowsPreset by remember(track.id) { mutableStateOf(false) }
+    var showLastFmTrackInfo by remember(track.id) { mutableStateOf(false) }
     var showOutputInfo by remember { mutableStateOf(false) }
     var showPlaybackSpeedDialog by remember { mutableStateOf(false) }
     var playbackSpeedDraft by remember { mutableFloatStateOf(getPlaybackSpeed().coerceIn(0.25f, 2f)) }
     var pendingDeleteTrack by remember { mutableStateOf<Track?>(null) }
     var showArtistMenu by remember(track.id) { mutableStateOf(false) }
     var showLyricsSearch by remember { mutableStateOf(false) }
+    var showLyricsContributionDialog by remember(track.id) { mutableStateOf(false) }
+    var lyricsSyncByDraft by remember(track.id) { mutableStateOf("") }
+    var pendingLyricsContribution by remember(track.id) { mutableStateOf<List<LyricLine>?>(null) }
     var showFullLyrics by remember { mutableStateOf(false) }
     var showVideoDialog by remember { mutableStateOf(false) }
     var videoProgressHidden by remember { mutableStateOf(false) }
+
+    LaunchedEffect(openLastFmTrackInfo, track.id) {
+        if (openLastFmTrackInfo) {
+            showLastFmTrackInfo = true
+            onLastFmTrackInfoConsumed()
+        }
+    }
 
     var showEqualizer by remember { mutableStateOf(false) }
     var showSleepTimer by remember { mutableStateOf(false) }
@@ -441,6 +471,12 @@ fun NowPlayingScreen(
     var artNavForward by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+        if (granted) onLyricsPopupEnabledChange(true)
+    }
     var sleepMinutes by remember {
         mutableIntStateOf(
             context.getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
@@ -464,8 +500,13 @@ fun NowPlayingScreen(
         } else milkPresets
         if (pool.isEmpty()) return null
         if (milkPresetOrder == "SEQUENTIAL") {
-            val currentIndex = pool.indexOf(currentPresetPath)
-            return if (currentIndex < 0) pool.first() else pool[(currentIndex + 1) % pool.size]
+            // Ordem alfabética pelo nome do arquivo, a partir do preset atual
+            val ordered = pool.sortedBy {
+                java.io.File(it).nameWithoutExtension.lowercase(java.util.Locale.ROOT)
+            }
+            val currentIndex = ordered.indexOf(currentPresetPath)
+            return if (currentIndex < 0) ordered.first()
+            else ordered[(currentIndex + 1) % ordered.size]
         }
         return pool.filterNot { it == currentPresetPath }.ifEmpty { pool }.randomOrNull()
     }
@@ -515,32 +556,52 @@ fun NowPlayingScreen(
     LaunchedEffect(track.id, isPlaying) {
         position = getPosition()
         lyricsPosition = position
-        pendingSeekMs = null
-        while (isPlaying) {
+        // Não zera pendingSeekMs aqui: um seek feito pausado ainda precisa confirmar
+        var pendingSince = if (pendingSeekMs != null) System.currentTimeMillis() else 0L
+        while (true) {
             // Atualização a cada frame: 48–80 ms fazia a palavra avançar em blocos visíveis
             // e a transição podia ser substituída antes de terminar em versos curtos.
-            delay(if (showFullLyrics) 16 else 32)
+            delay(if (isPlaying) (if (showFullLyrics) 16 else 32) else 100)
             val p = getPosition()
             lyricsPosition = p
             if (isDraggingSeek || dragFraction != null) continue
             val pending = pendingSeekMs
             if (pending != null) {
-                // Espera o player alcançar o seek (ou timeout ~1,2s)
-                if (kotlin.math.abs(p - pending) <= 450L) {
+                if (pendingSince == 0L) pendingSince = System.currentTimeMillis()
+                // Confirma quando o player chega perto do alvo, ou desiste após ~1,5s
+                if (kotlin.math.abs(p - pending) <= 250L || System.currentTimeMillis() - pendingSince > 1500L) {
                     pendingSeekMs = null
+                    pendingSince = 0L
                     position = p
                 }
                 continue
             }
-            if (kotlin.math.abs(p - position) >= 200L || p < position) {
+            pendingSince = 0L
+            if (!isPlaying) {
+                // Pausado: sincroniza se o player mudou (seek externo / rota de áudio)
+                if (kotlin.math.abs(p - position) > 80L) position = p
+                continue
+            }
+            // Em reprodução: atualiza com limiar menor para a seekbar não "saltar"
+            if (kotlin.math.abs(p - position) >= 80L || p < position) {
                 position = p
             }
         }
     }
 
-    // Carrega letras sempre que a faixa muda
+    // Carrega letras sempre que a faixa muda — limpa na hora para não “vazar” a letra anterior
     LaunchedEffect(track.id) {
-        lyrics = loadLyrics()
+        val id = track.id
+        lyrics = emptyList()
+        val loaded = try {
+            loadLyrics()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        // Só aplica se ainda estamos na mesma faixa (evita corrida com auto-fetch lento)
+        if (id == track.id) {
+            lyrics = loaded
+        }
     }
 
     val duration = when {
@@ -549,6 +610,34 @@ fun NowPlayingScreen(
         else -> 1L
     }
     val fraction = dragFraction ?: (position.toFloat() / duration).coerceIn(0f, 1f)
+
+    // ── Waveform da seekbar: só trabalha quando esse estilo está ativo ─────────────
+    val seekWaveActive = seekBarStyle == SeekBarStyle.Waveform
+    val seekPeaksDurationMs = if (track.duration > 0L) track.duration else playerDurationMs
+    var seekPeaks by remember(track.id) {
+        mutableStateOf<FloatArray?>(
+            if (seekWaveActive && seekPeaksDurationMs > 0L) WaveformExtractor.seekCached(track.id, seekPeaksDurationMs) else null
+        )
+    }
+    var seekPeaksFailed by remember(track.id) { mutableStateOf(false) }
+    LaunchedEffect(track.id, seekPeaksDurationMs, seekWaveActive) {
+        if (!seekWaveActive || seekPeaksDurationMs <= 0L || seekPeaks != null) return@LaunchedEffect
+        if (WaveformExtractor.seekKnownFailed(track.id, seekPeaksDurationMs)) {
+            seekPeaksFailed = true
+            return@LaunchedEffect
+        }
+        seekPeaksFailed = false
+        val result = withContext(Dispatchers.IO) {
+            WaveformExtractor.extractForSeekBar(
+                context = context.applicationContext,
+                uri = track.uri,
+                key = track.id,
+                durationMs = seekPeaksDurationMs,
+                cancelled = { !isActive }
+            )
+        }
+        if (result != null) seekPeaks = result else seekPeaksFailed = true
+    }
     val shownPosition = dragFraction?.let { (it * duration).toLong() } ?: position
 
     // Linha ativa (só sincronizadas com timeMs >= 0)
@@ -617,8 +706,12 @@ fun NowPlayingScreen(
     var playerMenuBackdropOrigin by remember {
         mutableStateOf<androidx.compose.ui.geometry.Offset>(androidx.compose.ui.geometry.Offset.Zero)
     }
+    // Não captura o GLSurfaceView do visualizer no backdrop de vidro — gera artefatos
+    // e o Surface fura o menu. Com preset aberto, usa menu sem sample do GL.
     val capturePlayerBackdrop = LocalMenuVisualStyle.current == MenuVisualStyle.GLASS &&
-        GlassConfig.quality != GlassQuality.LIGHT && (showMenu || showArtistMenu || showQueue)
+        GlassConfig.quality != GlassQuality.LIGHT &&
+        (showMenu || showArtistMenu || showQueue) &&
+        !showVisualizer
 
     CompositionLocalProvider(
         LocalGlassBackdrop provides playerMenuBackdrop,
@@ -723,6 +816,32 @@ fun NowPlayingScreen(
                         )
                         LensMenuItem(
                             text = {
+                                Text(
+                                    if (lyricsPopupEnabled) "Desativar letras em popup" else "Ativar letras em popup",
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                if (lyricsPopupEnabled) {
+                                    onLyricsPopupEnabledChange(false)
+                                } else {
+                                    val hasOverlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                                        Settings.canDrawOverlays(context)
+                                    if (hasOverlay) {
+                                        onLyricsPopupEnabledChange(true)
+                                    } else {
+                                        val intent = Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                        overlayPermissionLauncher.launch(intent)
+                                    }
+                                }
+                            }
+                        )
+                        LensMenuItem(
+                            text = {
                                 Text("Editar letra", color = MaterialTheme.colorScheme.onSurface)
                             },
                             onClick = {
@@ -730,6 +849,48 @@ fun NowPlayingScreen(
                                 onEditLyrics()
                             }
                         )
+                        LensMenuItem(
+                            text = {
+                                Text("Compartilhar letra completa (.lrc + .txt)", color = MaterialTheme.colorScheme.onSurface)
+                            },
+                            onClick = {
+                                showMenu = false
+                                scope.launch {
+                                    val linesForShare = lyrics.takeIf { current ->
+                                        current.any { it.text.isNotBlank() || it.words.any { word -> word.text.isNotBlank() } }
+                                    } ?: try {
+                                        loadLyrics().also { loaded -> if (loaded.isNotEmpty()) lyrics = loaded }
+                                    } catch (_: Exception) {
+                                        emptyList()
+                                    }
+                                    if (linesForShare.none { it.text.isNotBlank() || it.words.any { word -> word.text.isNotBlank() } }) {
+                                        Toast.makeText(context, "Nenhuma letra disponível para compartilhar", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    val configuredName = context
+                                        .getSharedPreferences("tolete", android.content.Context.MODE_PRIVATE)
+                                        .getString(LyricsContributionShareHelper.SYNC_BY_PREFERENCE_KEY, "")
+                                        .orEmpty()
+                                        .trim()
+                                    if (configuredName.isNotBlank()) {
+                                        LyricsContributionShareHelper.share(context, track, linesForShare, configuredName)
+                                    } else {
+                                        lyricsSyncByDraft = ""
+                                        pendingLyricsContribution = linesForShare
+                                        showLyricsContributionDialog = true
+                                    }
+                                }
+                            }
+                        )
+                        if (!lastFmUsername.isNullOrBlank()) {
+                            LensMenuItem(
+                                text = { Text("Informações da música no Last.fm", color = MaterialTheme.colorScheme.onSurface) },
+                                onClick = {
+                                    showMenu = false
+                                    showLastFmTrackInfo = true
+                                }
+                            )
+                        }
                         LensMenuItem(
                             text = {
                                 Text(
@@ -832,27 +993,64 @@ fun NowPlayingScreen(
             // Informações técnicas (clicável)
             val info = technicalInfo(track)
             val codecRes = codecDrawableRes(track.codec)
-            Box(Modifier.fillMaxWidth().height(40.dp), contentAlignment = Alignment.Center) {
-                if (info.isNotEmpty() || codecRes != null) {
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color.White.copy(0.18f), Color.White.copy(0.06f))
-                                )
-                            )
-                            .border(
-                                1.dp,
-                                Brush.verticalGradient(
-                                    listOf(Color.White.copy(0.45f), Color.White.copy(0.08f))
-                                ),
-                                RoundedCornerShape(50)
-                            )
-                            .clickable { showTechDetails = true }
-                            .padding(horizontal = 16.dp, vertical = 7.dp)
-                    ) {
+            val infoPillModifier = Modifier
+                .padding(horizontal = 4.dp, vertical = 6.dp)
+                .fillMaxWidth()
+                .height(36.dp)
+                .pointerInput(milkPresets.size, currentPresetPath, techPillShowsPreset) {
+                    var dragDistance = 0f
+                    val threshold = 48.dp.toPx()
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            // Qualquer lado com deslocamento suficiente alterna entre
+                            // informações técnicas e o menu de presets
+                            if (kotlin.math.abs(dragDistance) >= threshold && milkPresets.isNotEmpty()) {
+                                techPillShowsPreset = !techPillShowsPreset
+                            }
+                            dragDistance = 0f
+                        },
+                        onHorizontalDrag = { change, amount ->
+                            dragDistance += amount
+                            change.consume()
+                        }
+                    )
+                }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                if (info.isNotEmpty() || codecRes != null || milkPresets.isNotEmpty()) {
+                    if (techPillShowsPreset && milkPresets.isNotEmpty()) {
+                        PresetGlassBar(
+                            presetPath = currentPresetPath,
+                            isFavorite = currentPresetPath?.let {
+                                java.io.File(it).name in milkPresetFavorites
+                            } == true,
+                            onFavorite = {
+                                currentPresetPath?.let { path ->
+                                    val name = java.io.File(path).name
+                                    milkPresetFavorites = if (name in milkPresetFavorites) {
+                                        milkPresetFavorites - name
+                                    } else milkPresetFavorites + name
+                                }
+                            },
+                            onOpenList = { showPresetPicker = true },
+                            modifier = infoPillModifier
+                        )
+                    } else {
                         Row(
+                            modifier = infoPillModifier
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.22f),
+                                            Color.White.copy(alpha = 0.08f),
+                                            Color.White.copy(alpha = 0.14f)
+                                        )
+                                    ),
+                                    CircleShape
+                                )
+                                .border(1.dp, Color.White.copy(0.30f), CircleShape)
+                                .clickable { showTechDetails = true }
+                                .padding(horizontal = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center
                         ) {
@@ -871,7 +1069,8 @@ fun NowPlayingScreen(
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = Color.White.copy(alpha = 0.92f),
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1000,12 +1199,17 @@ fun NowPlayingScreen(
                         }
                         // Visualizador .milk: ocupa exatamente a área da capa (mesmos cantos)
                         if (showVisualizer) {
+                            // Só pausa o GL em overlays Compose que “furam” a superfície.
+                            // O picker de presets é um Dialog próprio — pausar o GL aqui
+                            // deixava a capa preta e atrapalhava a seleção após a busca.
+                            val overlayMenusOpen = showMenu || showArtistMenu || showQueue
                             MilkVisualizer(
                                 presets = milkPresets,
                                 intervalSeconds = milkIntervalSec,
                                 cornerRadius = 20.dp,
                                 locked = presetLocked,
                                 isPlaying = isPlaying,
+                                surfaceActive = !overlayMenusOpen,
                                 forcePresetPath = forcePresetPath,
                                 modifier = Modifier.fillMaxSize(),
                                 onFailure = {
@@ -1072,25 +1276,6 @@ fun NowPlayingScreen(
                                 modifier = Modifier.size(140.dp)
                             )
                         }
-                    }
-
-                    // Chip do preset ABAIXO da capa (não por cima)
-                    if (showVisualizer && milkPresets.isNotEmpty()) {
-                        PresetGlassBar(
-                            presetPath = currentPresetPath,
-                            isFavorite = currentPresetPath?.let { java.io.File(it).name in milkPresetFavorites } == true,
-                            onFavorite = {
-                                currentPresetPath?.let { path ->
-                                    val name = java.io.File(path).name
-                                    milkPresetFavorites = if (name in milkPresetFavorites) milkPresetFavorites - name
-                                    else milkPresetFavorites + name
-                                }
-                            },
-                            onOpenList = { showPresetPicker = true },
-                            modifier = Modifier
-                                .padding(horizontal = 4.dp, vertical = 6.dp)
-                                .fillMaxWidth()
-                        )
                     }
 
                     // Letra — palavra-a-palavra quando houver sync; senão linha inteira
@@ -1322,6 +1507,9 @@ fun NowPlayingScreen(
                 accentColor = appColors.accent,
                 style = seekBarStyle,
                 isPlaying = isPlaying,
+                peaks = seekPeaks,
+                peaksFailed = seekPeaksFailed,
+                waveformTheme = seekWaveformTheme,
                 onDrag = {
                     isDraggingSeek = true
                     dragFraction = it
@@ -1637,6 +1825,19 @@ fun NowPlayingScreen(
                 lastPlayedAt = lastPlayedAt
             )
         }
+        if (showLastFmTrackInfo) {
+            lastFmUsername?.takeIf { it.isNotBlank() }?.let { user ->
+                NowPlayingLastFmInfoSheet(
+                    user = user,
+                    track = track,
+                    tracks = libraryTracks,
+                    appColors = appColors,
+                    firstPlayedAt = firstPlayedAt,
+                    lastPlayedAt = lastPlayedAt,
+                    onDismiss = { showLastFmTrackInfo = false }
+                )
+            }
+        }
 
         if (showFullLyrics && lyrics.isNotEmpty()) {
             FullscreenLyrics(
@@ -1683,7 +1884,7 @@ fun NowPlayingScreen(
             pendingLyricResult?.let { result ->
                 AppAlertDialog(
                     onDismissRequest = { pendingLyricResult = null },
-                    title = { Text("Salvar letra") },
+                    title = { Text(result.variant?.let { "Salvar letra · ${it.label}" } ?: "Salvar letra") },
                     text = {
                         Text(
                             "Como deseja salvar a letra encontrada?\n\n" +
@@ -1743,6 +1944,68 @@ fun NowPlayingScreen(
                 )
             }
         }
+        if (showLyricsContributionDialog) {
+            val dialogPalette = menuPalette(LocalAppColors.current)
+            AppAlertDialog(
+                onDismissRequest = {
+                    showLyricsContributionDialog = false
+                    pendingLyricsContribution = null
+                },
+                title = { Text("Preparar arquivos de letra", color = dialogPalette.content) },
+                text = {
+                    Column {
+                        Text(
+                            "Informe o nome que será colocado em sync_by no trecho para o index.json do GitHub.",
+                            color = dialogPalette.muted
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = lyricsSyncByDraft,
+                            onValueChange = { lyricsSyncByDraft = it },
+                            label = { Text("Nome para sync_by", color = dialogPalette.muted) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = dialogPalette.content,
+                                unfocusedTextColor = dialogPalette.content,
+                                focusedBorderColor = dialogPalette.accent,
+                                unfocusedBorderColor = dialogPalette.muted,
+                                cursorColor = dialogPalette.accent,
+                                focusedLabelColor = dialogPalette.accent,
+                                unfocusedLabelColor = dialogPalette.muted
+                            )
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "O nome pode ser salvo depois em Configurações → Avançado.",
+                            fontSize = 12.sp,
+                            color = dialogPalette.muted
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = lyricsSyncByDraft.isNotBlank(),
+                        onClick = {
+                            val author = lyricsSyncByDraft.trim()
+                            showLyricsContributionDialog = false
+                            pendingLyricsContribution?.let { lines ->
+                                LyricsContributionShareHelper.share(context, track, lines, author)
+                            }
+                            pendingLyricsContribution = null
+                        }
+                    ) { Text("Gerar e compartilhar", color = dialogPalette.accent) }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        showLyricsContributionDialog = false
+                        pendingLyricsContribution = null
+                    }) {
+                        Text("Cancelar", color = dialogPalette.content)
+                    }
+                }
+            )
+        }
         if (showPresetPicker) {
             MilkPresetPickerDialog(
                 presets = milkPresets,
@@ -1770,48 +2033,55 @@ internal fun TechDetailsDialog(
     firstPlayedAt: Long? = null,
     lastPlayedAt: Long = 0L
 ) {
+    var showPlayHistory by remember(track.id) { mutableStateOf(false) }
     AppAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Informações técnicas") },
+        title = { Text(if (showPlayHistory) "Histórico de reprodução" else "Informações técnicas") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                TechRow("Título", track.title)
-                TechRow("Artista", track.artist)
-                TechRow("Álbum", track.album)
-                TechRow("Gênero", track.genre)
-                track.year?.let { TechRow("Ano", it.toString()) }
-                TechRow("Codec", track.codec ?: "—")
-                TechRow("Bitrate", if (track.bitrate > 0) "${Math.round(track.bitrate / 1000.0)} kbps" else "—")
-                TechRow("Amostragem", formatSampleRate(track.sampleRate))
-                TechRow("Bit depth", if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—")
-                TechRow("Canais", formatChannels(track.channels))
-                TechRow("Duração", formatDuration(track.duration))
-                TechRow(
-                    "Tamanho",
-                    if (track.fileSize > 0) {
-                        val mb = track.fileSize / (1024.0 * 1024.0)
-                        if (mb >= 1.0) "%.2f MB".format(mb) else "%.0f KB".format(track.fileSize / 1024.0)
-                    } else "—"
-                )
-                TechRow("Nº da faixa", track.trackNumber?.toString() ?: "—")
-                TechRow("Nº do disco", track.discNumber?.toString() ?: "—")
-                TechRow("Compositores", track.composer.ifBlank { "—" })
-                TechRow(
-                    "Primeira vez tocada",
-                    if (firstPlayedAt != null && firstPlayedAt > 0L) {
-                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
-                            .format(java.util.Date(firstPlayedAt))
-                    } else "—"
-                )
-                TechRow(
-                    "Última reprodução",
-                    if (lastPlayedAt > 0L) {
-                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault())
-                            .format(java.util.Date(lastPlayedAt))
-                    } else "—"
-                )
-                TechRow("Vezes reproduzida", if (playCount > 0) playCount.toString() else "—")
-                TechRow("Arquivo", track.path)
+            Column {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { showPlayHistory = false }) {
+                        Text("Técnico", color = if (!showPlayHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(onClick = { showPlayHistory = true }) {
+                        Text("Reproduções", color = if (showPlayHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (showPlayHistory) {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        TechRow("Título", track.title)
+                        TechRow("Artista", track.artist)
+                        TechRow("Primeira vez tocada", firstPlayedAt?.takeIf { it > 0L }?.let {
+                            java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
+                        } ?: "—")
+                        TechRow("Última reprodução", lastPlayedAt.takeIf { it > 0L }?.let {
+                            java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
+                        } ?: "—")
+                        TechRow("Vezes reproduzida", if (playCount > 0) playCount.toString() else "—")
+                    }
+                } else {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        TechRow("Título", track.title)
+                        TechRow("Artista", track.artist)
+                        TechRow("Álbum", track.album)
+                        TechRow("Gênero", track.genre)
+                        track.year?.let { TechRow("Ano", it.toString()) }
+                        TechRow("Codec", track.codec ?: "—")
+                        TechRow("Bitrate", if (track.bitrate > 0) "${Math.round(track.bitrate / 1000.0)} kbps" else "—")
+                        TechRow("Amostragem", formatSampleRate(track.sampleRate))
+                        TechRow("Bit depth", if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—")
+                        TechRow("Canais", formatChannels(track.channels))
+                        TechRow("Duração", formatDuration(track.duration))
+                        TechRow("Tamanho", if (track.fileSize > 0) {
+                            val mb = track.fileSize / (1024.0 * 1024.0)
+                            if (mb >= 1.0) "%.2f MB".format(mb) else "%.0f KB".format(track.fileSize / 1024.0)
+                        } else "—")
+                        TechRow("Nº da faixa", track.trackNumber?.toString() ?: "—")
+                        TechRow("Nº do disco", track.discNumber?.toString() ?: "—")
+                        TechRow("Compositores", track.composer.ifBlank { "—" })
+                        TechRow("Arquivo", track.path)
+                    }
+                }
             }
         },
         confirmButton = {
@@ -1874,7 +2144,35 @@ enum class SeekBarStyle {
     Wavy,      // onda senoidal no progresso
     Thick,     // trilha mais grossa, thumb maior
     Slim,      // trilha bem fina
-    Liquid     // bolha/elipse no ponto de progresso (efeito “líquido”)
+    Liquid,    // bolha/elipse no ponto de progresso (efeito “líquido”)
+    WavyLiquid, // onda que corre (Wavy) + thumb de vidro líquido (Liquid)
+    Waveform   // forma de onda real da música; o desenho é escolhido em Configurações
+}
+
+/**
+ * Reduz os picos da faixa a [cols] colunas (mistura de pico e média, como no editor de trecho).
+ * Sem picos (carregando ou falha) devolve uma linha baixa e uniforme.
+ */
+private fun buildSeekAmps(peaks: FloatArray?, cols: Int): FloatArray {
+    val out = FloatArray(cols)
+    val n = peaks?.size ?: 0
+    if (peaks == null || n == 0) {
+        java.util.Arrays.fill(out, 0.12f)
+        return out
+    }
+    for (i in 0 until cols) {
+        val b0 = ((i.toLong() * n) / cols).toInt().coerceIn(0, n - 1)
+        val b1 = ((((i + 1).toLong() * n) / cols).toInt() - 1).coerceIn(b0, n - 1)
+        var mx = 0f
+        var sum = 0f
+        for (b in b0..b1) {
+            val v = peaks[b]
+            if (v > mx) mx = v
+            sum += v
+        }
+        out[i] = max(0.4f * mx + 0.6f * (sum / (b1 - b0 + 1)), 0.04f)
+    }
+    return out
 }
 
 @Composable
@@ -1883,6 +2181,9 @@ private fun SeekBar(
     accentColor: Color = Color.White,
     style: SeekBarStyle = SeekBarStyle.Standard,
     isPlaying: Boolean = true,
+    peaks: FloatArray? = null,
+    peaksFailed: Boolean = false,
+    waveformTheme: WaveformTheme = WaveformTheme.BARS,
     onDrag: (Float) -> Unit,
     onDragEnd: (Float) -> Unit,
     onDragCancel: () -> Unit
@@ -1895,6 +2196,8 @@ private fun SeekBar(
         SeekBarStyle.Thick -> 10.dp
         SeekBarStyle.Slim, SeekBarStyle.Normal -> 3.dp
         SeekBarStyle.Wavy -> 8.dp
+        SeekBarStyle.WavyLiquid -> 8.dp
+        SeekBarStyle.Waveform -> 38.dp
         SeekBarStyle.Liquid -> 6.dp
         SeekBarStyle.Standard -> 5.dp
     }
@@ -1902,11 +2205,14 @@ private fun SeekBar(
         SeekBarStyle.Thick -> 18.dp
         SeekBarStyle.Slim, SeekBarStyle.Normal -> 10.dp
         SeekBarStyle.Liquid -> 16.dp
+        SeekBarStyle.WavyLiquid -> 16.dp
+        SeekBarStyle.Waveform -> 14.dp
         SeekBarStyle.Wavy -> 12.dp
         SeekBarStyle.Standard -> 14.dp
     }
     val boxHeight = when (style) {
-        SeekBarStyle.Thick, SeekBarStyle.Liquid, SeekBarStyle.Wavy -> 32.dp
+        SeekBarStyle.Thick, SeekBarStyle.Liquid, SeekBarStyle.Wavy, SeekBarStyle.WavyLiquid -> 32.dp
+        SeekBarStyle.Waveform -> 48.dp
         else -> 28.dp
     }
 
@@ -1925,12 +2231,34 @@ private fun SeekBar(
     )
     // Wavy: a fase da onda corre continuamente (a onda “flui” para a direita).
     val wavePhase: androidx.compose.runtime.State<Float>? =
-        if (style == SeekBarStyle.Wavy) {
+        if (style == SeekBarStyle.Wavy || style == SeekBarStyle.WavyLiquid) {
             rememberInfiniteTransition(label = "wave").animateFloat(
                 initialValue = 0f,
                 targetValue = (2.0 * Math.PI).toFloat(),
                 animationSpec = infiniteRepeatable(tween(durationMillis = 1400, easing = LinearEasing)),
                 label = "wavePhase"
+            )
+        } else null
+
+    // Waveform: amplitudes por coluna, recalculadas só quando os picos ou a largura mudam
+    // (nada é refeito a cada quadro de reprodução).
+    val isWaveform = style == SeekBarStyle.Waveform
+    val waveColPx = with(LocalDensity.current) { 3.dp.toPx() }
+    val waveCols = max(8, (barWidth / waveColPx).toInt())
+    val waveAmps = remember(peaks, waveCols, isWaveform) {
+        if (isWaveform) buildSeekAmps(peaks, waveCols) else FloatArray(0)
+    }
+    // Enquanto os picos carregam, a parte "ainda não tocada" respira suavemente.
+    val loadPulse: androidx.compose.runtime.State<Float>? =
+        if (isWaveform && peaks == null && !peaksFailed) {
+            rememberInfiniteTransition(label = "seekLoad").animateFloat(
+                initialValue = 0.55f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    tween(durationMillis = 900, easing = FastOutSlowInEasing),
+                    androidx.compose.animation.core.RepeatMode.Reverse
+                ),
+                label = "seekLoadPulse"
             )
         } else null
 
@@ -1979,7 +2307,12 @@ private fun SeekBar(
             },
         contentAlignment = Alignment.Center
     ) {
-        Canvas(Modifier.fillMaxWidth().height(trackHeight)) {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(trackHeight)
+                .graphicsLayer { if (isWaveform) scaleY = 1f + 0.12f * press.coerceIn(0f, 1f) }
+        ) {
             if (size.width > 1f) barWidth = size.width
             val h = size.height
             val frac = fraction.coerceIn(0f, 1f)
@@ -2038,6 +2371,78 @@ private fun SeekBar(
                         )
                     }
                 }
+                SeekBarStyle.WavyLiquid -> {
+                    val strokeW = 3.dp.toPx()
+                    val amp = 2.6.dp.toPx() * waveAmp
+                    val k = (2.0 * Math.PI).toFloat() / 16.dp.toPx()
+                    val phase = wavePhase?.value ?: 0f
+                    val mid = h / 2f
+                    // mesma geometria do Liquid: o ponto de progresso é o centro da pílula
+                    val restW = thumbSize.toPx() * 1.75f
+                    val cx = restW / 2f + frac * (size.width - restW)
+                    val taperLen = 18.dp.toPx()
+                    // trilha restante: linha reta, fina e arredondada, saindo de baixo do thumb
+                    drawLine(
+                        color = Color.White.copy(0.20f),
+                        start = androidx.compose.ui.geometry.Offset(cx, mid),
+                        end = androidx.compose.ui.geometry.Offset(size.width, mid),
+                        strokeWidth = strokeW,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                    if (cx > 1f) {
+                        val path = androidx.compose.ui.graphics.Path()
+                        var x = 0f
+                        var first = true
+                        while (x < cx) {
+                            // a onda "assenta" suavemente ao chegar no thumb, como líquido escorrendo para a gota
+                            val t = ((cx - x) / taperLen).coerceIn(0f, 1f)
+                            val settle = t * t * (3f - 2f * t)
+                            val y = mid + amp * settle * sin(k * x - phase)
+                            if (first) { path.moveTo(x, y); first = false } else path.lineTo(x, y)
+                            x += 3f
+                        }
+                        path.lineTo(cx, mid)
+                        val round = androidx.compose.ui.graphics.StrokeCap.Round
+                        // brilho suave por baixo
+                        drawPath(
+                            path = path,
+                            color = accentColor.copy(alpha = 0.16f),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeW * 2.8f, cap = round)
+                        )
+                        // linha principal, em degradê como o progresso do Liquid
+                        drawPath(
+                            path = path,
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(accentColor.copy(0.55f), accentColor),
+                                startX = 0f,
+                                endX = max(cx, 1f)
+                            ),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = strokeW,
+                                cap = round,
+                                join = androidx.compose.ui.graphics.StrokeJoin.Round
+                            )
+                        )
+                    }
+                }
+                SeekBarStyle.Waveform -> {
+                    val barW = 2.dp.toPx()
+                    val cols = waveAmps.size.coerceAtLeast(1)
+                    // distribui as colunas por toda a largura: o fim da waveform coincide com o fim da barra
+                    val gapPx = (size.width / cols - barW).coerceAtLeast(0.5f)
+                    val pulse = loadPulse?.value ?: 1f
+                    drawWaveAmps(
+                        theme = waveformTheme,
+                        amps = waveAmps,
+                        selL = 0f,
+                        selR = progW,
+                        accent = accentColor,
+                        offColor = Color.White.copy(alpha = 0.28f * pulse),
+                        barW = barW,
+                        gap = gapPx,
+                        minH = 2.dp.toPx()
+                    )
+                }
                 else -> {
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(Color.White.copy(0.22f), cornerRadius = r)
@@ -2055,7 +2460,7 @@ private fun SeekBar(
         }
 
         when (style) {
-            SeekBarStyle.Liquid -> {
+            SeekBarStyle.Liquid, SeekBarStyle.WavyLiquid -> {
                 // Thumb: pílula branca em repouso → “lente de vidro” maior ao arrastar.
                 Canvas(Modifier.fillMaxSize()) {
                     val frac = fraction.coerceIn(0f, 1f)
@@ -2100,6 +2505,29 @@ private fun SeekBar(
                             style = androidx.compose.ui.graphics.drawscope.Stroke(0.8.dp.toPx())
                         )
                     }
+                }
+            }
+            SeekBarStyle.Waveform -> {
+                // Cursor: pílula branca fina com halo; cresce um pouco ao arrastar.
+                Canvas(Modifier.fillMaxSize()) {
+                    val frac = fraction.coerceIn(0f, 1f)
+                    val p = press.coerceIn(0f, 1f)
+                    val w = 3.dp.toPx() + 1.8.dp.toPx() * p
+                    val hh = size.height * (0.88f + 0.12f * p)
+                    val cx = (frac * size.width).coerceIn(w / 2f, size.width - w / 2f)
+                    val cy = size.height / 2f
+                    drawRoundRect(
+                        color = accentColor.copy(alpha = 0.22f + 0.10f * p),
+                        topLeft = androidx.compose.ui.geometry.Offset(cx - w * 1.8f, cy - hh / 2f),
+                        size = Size(w * 3.6f, hh),
+                        cornerRadius = CornerRadius(w * 1.8f, w * 1.8f)
+                    )
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = androidx.compose.ui.geometry.Offset(cx - w / 2f, cy - hh / 2f),
+                        size = Size(w, hh),
+                        cornerRadius = CornerRadius(w / 2f, w / 2f)
+                    )
                 }
             }
             SeekBarStyle.Wavy -> {
@@ -2617,6 +3045,7 @@ internal fun LyricsSearchDialog(
     var results by remember { mutableStateOf<List<LyricsSearchResult>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
+    var report by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     val dialogDark = menuPalette(LocalAppColors.current).content
@@ -2667,6 +3096,11 @@ internal fun LyricsSearchDialog(
                     }
                 } else if (searched && results.isEmpty()) {
                     Text("Nenhum resultado encontrado.", fontSize = 14.sp, color = dialogMuted)
+                    if (report.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        // Mostra por fonte se houve resposta (número) ou falha (HTTP 503, sem conexão…).
+                        Text(report, fontSize = 11.sp, color = dialogMuted.copy(alpha = 0.8f))
+                    }
                 } else if (results.isNotEmpty()) {
                     var expandedId by remember { mutableStateOf<String?>(null) }
                     LazyColumn(Modifier.height(280.dp)) {
@@ -2709,6 +3143,9 @@ internal fun LyricsSearchDialog(
                                             append(r.artistName)
                                             if (r.albumName.isNotBlank()) append(" · ${r.albumName}")
                                             if (r.durationSec > 0) append(" · ${r.durationSec}s")
+                                            r.syncedBy?.takeIf { it.isNotBlank() }?.let {
+                                                append(" · sync: $it")
+                                            }
                                         },
                                         fontSize = 12.sp,
                                         color = dialogMuted,
@@ -2724,6 +3161,13 @@ internal fun LyricsSearchDialog(
                                             if (isLyronRepository) Color(0xFFE7D1FF) else Color(0xFFECEFF1),
                                             if (isLyronRepository) Color(0xFF45216B) else Color(0xFF263238)
                                         )
+                                        r.variant?.let { variant ->
+                                            LyricsBadge(
+                                                variant.label,
+                                                if (variant == com.tolete.player.data.LyricsVariant.ROMANIZED) Color(0xFFD9F2E6) else Color(0xFFFFE8C2),
+                                                if (variant == com.tolete.player.data.LyricsVariant.ROMANIZED) Color(0xFF185C3A) else Color(0xFF704500)
+                                            )
+                                        }
                                         val (badgeBg, badgeFg) = when (r.type) {
                                             LyricsType.PLAIN -> Color(0xFFE0E0E0) to Color(0xFF424242)
                                             LyricsType.SYNCED -> Color(0xFFD6E4FF) to Color(0xFF1E4DB7)
@@ -2760,6 +3204,10 @@ internal fun LyricsSearchDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    r.variant?.let { variant ->
+                                        Text("variante", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                        Text(variant.label, fontSize = 13.sp, color = Color.White)
+                                    }
                                     Text("tipo de letra", fontSize = 11.sp, color = Color(0xFF8BC9A0))
                                     Text(
                                         r.type.label,
@@ -2768,6 +3216,16 @@ internal fun LyricsSearchDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    r.syncedBy?.takeIf { it.isNotBlank() }?.let { by ->
+                                        Text("sincronizado por", fontSize = 11.sp, color = Color(0xFF8BC9A0))
+                                        Text(
+                                            by,
+                                            fontSize = 13.sp,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                     if (r.hasElrcEffects) {
                                         Row(Modifier.padding(top = 4.dp)) {
                                             LyricsBadge("ELRC+", Color(0xFFFFE0B2), Color(0xFF8A3B00))
@@ -2818,7 +3276,14 @@ internal fun LyricsSearchDialog(
                     scope.launch {
                         loading = true
                         searched = false
-                        results = try { onSearch(title.trim(), artist.trim()) } catch (_: Exception) { emptyList() }
+                        report = ""
+                        results = try {
+                            onSearch(title.trim(), artist.trim())
+                        } catch (e: Exception) {
+                            report = "erro inesperado: ${e.javaClass.simpleName}"
+                            emptyList()
+                        }
+                        if (report.isEmpty()) report = com.tolete.player.data.LyricsSearch.lastReport
                         loading = false
                         searched = true
                     }
@@ -3493,18 +3958,28 @@ private fun PresetGlassBar(
     val name = presetPath?.let { java.io.File(it).nameWithoutExtension } ?: "Preset"
     Row(
         modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color.Black.copy(alpha = 0.45f))
-            .border(1.dp, Color.White.copy(0.22f), RoundedCornerShape(16.dp))
+            .clip(CircleShape)
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        Color.White.copy(alpha = 0.22f),
+                        Color.White.copy(alpha = 0.08f),
+                        Color.White.copy(alpha = 0.14f)
+                    )
+                ),
+                CircleShape
+            )
+            .border(1.dp, Color.White.copy(0.30f), CircleShape)
             .clickable(onClick = onOpenList)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
         Text(
             name,
-            color = Color.White,
-            fontSize = 13.sp,
+            color = Color.White.copy(alpha = 0.92f),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
@@ -3516,7 +3991,7 @@ private fun PresetGlassBar(
             contentDescription = "Favoritar preset",
             tint = if (isFavorite) Color(0xFFE53935) else Color.White.copy(0.85f),
             modifier = Modifier
-                .size(20.dp)
+                .size(18.dp)
                 .clickable(onClick = onFavorite)
         )
     }
@@ -3662,7 +4137,16 @@ internal fun MilkPresetPickerDialog(
                                     )
                                     .combinedClickable(
                                         onClick = {
-                                            if (!manageMode) onSelect(path)
+                                            if (!manageMode) {
+                                                // Fecha o IME antes de aplicar — evita toque “comido” pela busca
+                                                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                                                    as? android.view.inputmethod.InputMethodManager
+                                                imm?.hideSoftInputFromWindow(
+                                                    (context as? android.app.Activity)?.currentFocus?.windowToken,
+                                                    0
+                                                )
+                                                onSelect(path)
+                                            }
                                         },
                                         onLongClick = {
                                             if (onDelete != null) pendingDelete = path

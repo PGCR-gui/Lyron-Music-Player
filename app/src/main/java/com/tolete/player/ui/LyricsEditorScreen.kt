@@ -88,10 +88,11 @@ import com.tolete.player.data.LyricAnimation
 import com.tolete.player.data.LyricWord
 import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.LyricsExtractor
+import com.tolete.player.data.LyricsFormat
 import com.tolete.player.data.Track
 import java.io.File
+import kotlin.math.roundToLong
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -131,15 +132,18 @@ fun LyricsEditorScreen(
             editorPlayer.release()
         }
     }
-    val lines = remember(track.id, initialLines) {
+    val normalizedInitialLines = remember(track.id, initialLines) {
+        LyricsFormat.normalizeBackgroundLines(initialLines)
+    }
+    val lines = remember(track.id, normalizedInitialLines) {
         mutableStateListOf<EditableLine>().apply {
-            if (initialLines.isEmpty()) {
+            if (normalizedInitialLines.isEmpty()) {
                 add(EditableLine(timeMs = -1L, text = ""))
             } else {
                 // Agrupa traduções: linhas isTranslation ficam como translationText da linha principal anterior
                 var i = 0
-                while (i < initialLines.size) {
-                    val src = initialLines[i]
+                while (i < normalizedInitialLines.size) {
+                    val src = normalizedInitialLines[i]
                     if (src.isTranslation) {
                         // Tradução solta — trata como linha normal marcada
                         val words = src.words.map {
@@ -149,6 +153,8 @@ fun LyricsEditorScreen(
                             timeMs = src.timeMs,
                             text = src.text,
                             words = words,
+                            endMs = src.endMs,
+                            agent = src.agent,
                             isTranslation = true,
                             isBackground = src.isBackground
                         ))
@@ -160,9 +166,9 @@ fun LyricsEditorScreen(
                     }
                     var trText = ""
                     var trWords = emptyList<EditableWord>()
-                    if (i + 1 < initialLines.size && initialLines[i + 1].isTranslation) {
-                        trText = initialLines[i + 1].text
-                        trWords = initialLines[i + 1].words.map {
+                    if (i + 1 < normalizedInitialLines.size && normalizedInitialLines[i + 1].isTranslation) {
+                        trText = normalizedInitialLines[i + 1].text
+                        trWords = normalizedInitialLines[i + 1].words.map {
                             EditableWord(timeMs = it.timeMs, text = it.text, isSyllable = it.isSyllable, animation = it.animation, endMs = it.endMs)
                         }
                         i++ // consome a tradução
@@ -171,6 +177,8 @@ fun LyricsEditorScreen(
                         timeMs = src.timeMs,
                         text = src.text,
                         words = words,
+                        endMs = src.endMs,
+                        agent = src.agent,
                         isBackground = src.isBackground,
                         translationText = trText,
                         translationWords = trWords
@@ -244,8 +252,8 @@ fun LyricsEditorScreen(
     }
     var simpleText by remember(track.id, initialLines) {
         mutableStateOf(
-            if (initialLines.isEmpty()) ""
-            else initialLines.joinToString("\n") {
+            if (normalizedInitialLines.isEmpty()) ""
+            else normalizedInitialLines.joinToString("\n") {
                 (if (it.isBackground) "{bg}" else "") + (if (it.isTranslation) "{tr}" else "") + wordsWithMarkers(
                     it.words.map { w -> EditableWord(w.timeMs, w.text, w.isSyllable, w.animation, w.endMs) },
                     it.text
@@ -267,18 +275,56 @@ fun LyricsEditorScreen(
     var showSpeedDialog by remember { mutableStateOf(false) }
     var speedDraft by remember { mutableStateOf(playbackSpeed) }
 
-    LaunchedEffect(editorPlayer, previewIsPlaying) {
-        while (true) {
-            position = editorPlayer.currentPosition
-            if (!previewIsPlaying) break
-            delay(50)
+    // Âncora monotônica: interpola a posição entre atualizações do ExoPlayer, de modo que
+    // dois toques rápidos não reutilizem o mesmo currentPosition em cache.
+    val playbackPositionSample = remember(editorPlayer) {
+        longArrayOf(
+            editorPlayer.currentPosition.coerceAtLeast(0L),
+            android.os.SystemClock.elapsedRealtimeNanos()
+        )
+    }
+    fun reanchorEditorPosition(targetMs: Long) {
+        val target = targetMs.coerceIn(0L, duration)
+        playbackPositionSample[0] = target
+        playbackPositionSample[1] = android.os.SystemClock.elapsedRealtimeNanos()
+        position = target
+    }
+    fun estimateEditorPosition(nowNs: Long, playerPositionMs: Long): Long {
+        val playerPosition = playerPositionMs.coerceIn(0L, duration)
+        if (!previewIsPlaying) return playerPosition
+        val elapsedNs = (nowNs - playbackPositionSample[1]).coerceIn(0L, 250_000_000L)
+        val extrapolated = playbackPositionSample[0] +
+            (elapsedNs / 1_000_000.0 * editorPlayer.playbackParameters.speed.toDouble()).roundToLong()
+        return maxOf(playerPosition, extrapolated).coerceIn(0L, duration)
+    }
+    fun captureEditorPositionMs(): Long {
+        val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
+        val captured = estimateEditorPosition(nowNs, editorPlayer.currentPosition)
+        playbackPositionSample[0] = captured
+        playbackPositionSample[1] = nowNs
+        position = captured
+        return captured
+    }
+
+    LaunchedEffect(editorPlayer, previewIsPlaying, playbackSpeed) {
+        val initialPosition = editorPlayer.currentPosition.coerceIn(0L, duration)
+        playbackPositionSample[0] = initialPosition
+        playbackPositionSample[1] = android.os.SystemClock.elapsedRealtimeNanos()
+        position = initialPosition
+        while (previewIsPlaying) {
+            androidx.compose.runtime.withFrameNanos { }
+            val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
+            val current = estimateEditorPosition(nowNs, editorPlayer.currentPosition)
+            position = current
+            playbackPositionSample[0] = current
+            playbackPositionSample[1] = nowNs
         }
     }
 
         fun parseTimeToMs(raw: String): Long? {
         val t = raw.trim()
         if (t.isEmpty()) return null
-        // Aceita m:ss, mm:ss, m:ss.cc, mm:ss.cc, ss.cc
+        // Aceita m:ss, mm:ss, m:ss.mmm, mm:ss.mmm e ss.mmm.
         val re = Regex("""^(?:(\d+):)?(\d{1,2})(?:[.:](\d{1,3}))?$""")
         val m = re.matchEntire(t) ?: return null
         val mins = m.groupValues[1].toLongOrNull() ?: 0L
@@ -294,12 +340,12 @@ fun LyricsEditorScreen(
     }
 
     fun formatTime(ms: Long): String {
-        if (ms < 0) return "—:——.—"
+        if (ms < 0) return "—:——.———"
         val totalSec = ms / 1000
         val m = totalSec / 60
         val s = totalSec % 60
-        val frac = (ms % 1000) / 10
-        return "%d:%02d.%02d".format(m, s, frac)
+        val frac = ms % 1000
+        return "%d:%02d.%03d".format(m, s, frac)
     }
 
     fun decodeTaggedText(text: String): Pair<String, List<EditableWord>> {
@@ -585,9 +631,9 @@ fun LyricsEditorScreen(
 
 
     fun seekBy(deltaMs: Long) {
-        val next = (editorPlayer.currentPosition + deltaMs).coerceIn(0L, duration)
+        val next = (captureEditorPositionMs() + deltaMs).coerceIn(0L, duration)
         editorPlayer.seekTo(next)
-        position = next
+        reanchorEditorPosition(next)
     }
 
     fun applySpeed(next: Float) {
@@ -710,6 +756,8 @@ fun LyricsEditorScreen(
                                 timeMs = adjusted.timeMs,
                                 text = text,
                                 words = words,
+                                endMs = adjusted.endMs,
+                                agent = adjusted.agent,
                                 isTranslation = adjusted.isTranslation,
                                 isBackground = adjusted.isBackground
                             )
@@ -755,7 +803,8 @@ fun LyricsEditorScreen(
                         }
                         // Preenche endMs de palavras e linhas — mesmo pós-processamento do parse de LRC baixado,
                         // para o karaokê ter a mesma suavidade nas letras sincronizadas manualmente.
-                        onSave(com.tolete.player.data.LyricsExtractor.finalizeLyricsTimings(out), initialTarget)
+                        val normalized = LyricsFormat.normalizeBackgroundLines(out)
+                        onSave(com.tolete.player.data.LyricsExtractor.finalizeLyricsTimings(normalized), initialTarget)
                     },
                     modifier = Modifier
                         .size(40.dp)
@@ -959,12 +1008,12 @@ fun LyricsEditorScreen(
                             onPlayLine = {
                                 if (line.timeMs >= 0) {
                                     editorPlayer.seekTo(line.timeMs)
-                                    position = line.timeMs
+                                    reanchorEditorPosition(line.timeMs)
                                     if (!previewIsPlaying) editorPlayer.play()
                                 }
                             },
                             onSync = {
-                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
+                                val t = captureEditorPositionMs()
                                 lines[index] = line.copy(timeMs = t)
                                 val info = lineListState.layoutInfo
                                 info.visibleItemsInfo.firstOrNull { it.index == index }?.let { item ->
@@ -979,7 +1028,7 @@ fun LyricsEditorScreen(
                             },
                             onLongSync = {
                                 manualTimeTarget = index to null
-                                manualTimeMs = if (line.timeMs >= 0) line.timeMs else editorPlayer.currentPosition
+                                manualTimeMs = if (line.timeMs >= 0) line.timeMs else captureEditorPositionMs()
                             },
                             onToggleBackground = {
                                 lines[index] = line.copy(isBackground = !line.isBackground)
@@ -1058,21 +1107,21 @@ fun LyricsEditorScreen(
                                 val time = lines[index].timeMs
                                 if (time >= 0) {
                                     editorPlayer.seekTo(time)
-                                    position = time
+                                    reanchorEditorPosition(time)
                                     if (!previewIsPlaying) editorPlayer.play()
                                 }
                             },
                             onLineSync = { coords ->
-                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
+                                val t = captureEditorPositionMs()
                                 lines[index] = lines[index].copy(timeMs = t)
                                 autoScrollWordList(coords)
                             },
                             onLongLineSync = {
                                 manualTimeTarget = index to null
-                                manualTimeMs = if (lines[index].timeMs >= 0) lines[index].timeMs else editorPlayer.currentPosition
+                                manualTimeMs = if (lines[index].timeMs >= 0) lines[index].timeMs else captureEditorPositionMs()
                             },
                             onWordSync = { wordIndex, coords ->
-                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
+                                val t = captureEditorPositionMs()
                                 val el = lines[index].ensureWords()
                                 val newWords = el.words.toMutableList()
                                 if (wordIndex in newWords.indices) {
@@ -1087,10 +1136,10 @@ fun LyricsEditorScreen(
                                 val el = lines[index].ensureWords()
                                 val t = el.words.getOrNull(wordIndex)?.timeMs ?: -1L
                                 manualTimeTarget = index to wordIndex
-                                manualTimeMs = if (t >= 0) t else editorPlayer.currentPosition
+                                manualTimeMs = if (t >= 0) t else captureEditorPositionMs()
                             },
                             onLastWordEndSync = {
-                                val t = editorPlayer.currentPosition.coerceAtLeast(0L)
+                                val t = captureEditorPositionMs()
                                 val el = lines[index].ensureWords()
                                 val newWords = el.words.toMutableList()
                                 if (newWords.isNotEmpty()) {
@@ -1234,7 +1283,7 @@ fun LyricsEditorScreen(
                                         onClick = {
                                             if (line.timeMs >= 0) {
                                                 editorPlayer.seekTo(line.timeMs)
-                                                position = line.timeMs
+                                                reanchorEditorPosition(line.timeMs)
                                                 if (!previewIsPlaying) editorPlayer.play()
                                             }
                                         },
@@ -1375,13 +1424,13 @@ fun LyricsEditorScreen(
                         )
                     },
                     text = {
-                        // Entrada textual mm:ss.cc
+                        // Entrada textual mm:ss.mmm.
                         var timeText by remember(manualTimeMs) {
                             mutableStateOf(formatTime(manualTimeMs))
                         }
                         Column {
                             Text(
-                                "Formato: mm:ss.cc  (ex. 0:09.63)",
+                                "Formato: mm:ss.mmm  (ex. 0:09.630)",
                                 color = MaterialTheme.colorScheme.onSurface.copy(0.55f),
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(bottom = 8.dp)
@@ -1409,7 +1458,7 @@ fun LyricsEditorScreen(
                             Spacer(Modifier.height(10.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 TextButton(onClick = {
-                                    manualTimeMs = editorPlayer.currentPosition
+                                    manualTimeMs = captureEditorPositionMs()
                                     timeText = formatTime(manualTimeMs)
                                 }) {
                                     Text("Agora", color = MaterialTheme.colorScheme.primary)
@@ -1476,7 +1525,7 @@ fun LyricsEditorScreen(
                     onValueChange = {
                         val target = (it * duration).toLong()
                         editorPlayer.seekTo(target)
-                        position = target
+                        reanchorEditorPosition(target)
                     },
                     colors = SliderDefaults.colors(
                         thumbColor = appColors.accent,
@@ -1488,7 +1537,7 @@ fun LyricsEditorScreen(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(formatTime(position), fontSize = 11.sp, color = Color.White.copy(0.6f))
+                    LiveEditorClock(editorPlayer, previewIsPlaying, position)
                     Text(formatTime(duration), fontSize = 11.sp, color = Color.White.copy(0.6f))
                 }
                 Row(
@@ -1529,7 +1578,10 @@ fun LyricsEditorScreen(
                     IconButton(
                         onClick = {
                             if (previewIsPlaying) editorPlayer.pause() else {
-                                if (editorPlayer.playbackState == Player.STATE_ENDED) editorPlayer.seekTo(0L)
+                                if (editorPlayer.playbackState == Player.STATE_ENDED) {
+                                    editorPlayer.seekTo(0L)
+                                    reanchorEditorPosition(0L)
+                                }
                                 editorPlayer.play()
                             }
                         },
@@ -1553,6 +1605,22 @@ fun LyricsEditorScreen(
                             tint = Color.White,
                             modifier = Modifier.size(32.dp)
                         )
+                    }
+                    if (editorMode != EditorMode.SIMPLE) {
+                        Spacer(Modifier.width(6.dp))
+                        TextButton(
+                            onClick = { applySpeed(1f) },
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Color.White.copy(0.10f))
+                                .border(1.dp, Color.White.copy(0.22f), RoundedCornerShape(50))
+                        ) {
+                            Text(
+                                "1x",
+                                color = if (playbackSpeed != 1f) appColors.accent else Color.White.copy(0.6f),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -2512,6 +2580,8 @@ private data class EditableLine(
     val timeMs: Long,
     val text: String,
     val words: List<EditableWord> = emptyList(),
+    val endMs: Long = -1L,
+    val agent: String? = null,
     val isTranslation: Boolean = false,
     val isBackground: Boolean = false,
     val translationText: String = "",
@@ -2557,4 +2627,65 @@ fun lyricLinesToTagText(lines: List<LyricLine>): String {
     // Mesmo serializador do salvamento direto (atalho do menu), para os dois caminhos
     // gerarem exatamente o mesmo texto ({tr}, sem <00:00.00> espúrio, {sil} na ordem certa).
     return LyricsEmbedder.linesToLrcText(lines).trimEnd()
+}
+
+
+/**
+ * Contador ao vivo do editor (m:ss.mmm). Tem estado próprio e lê o player a cada quadro,
+ * então só este Text recompõe (e não a tela inteira do editor).
+ *
+ * Enquanto toca, pede ao sistema a taxa de atualização máxima da tela: aparelhos com tela
+ * variável (LTPO) baixam para 10–30 Hz quando só um texto pequeno muda e não há toque, e era
+ * isso que fazia o contador voltar a atualizar devagar depois de alguns segundos.
+ */
+@Composable
+private fun LiveEditorClock(
+    player: androidx.media3.exoplayer.ExoPlayer,
+    playing: Boolean,
+    fallbackMs: Long
+) {
+    var ms by remember(player) { mutableLongStateOf(player.currentPosition) }
+    // Parado (seek, toque numa linha...): acompanha a posição que a tela já calculou.
+    LaunchedEffect(player, playing, if (playing) 0L else fallbackMs) {
+        ms = player.currentPosition
+        while (playing) {
+            androidx.compose.runtime.withFrameMillis { }
+            ms = player.currentPosition
+        }
+    }
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(view, playing) {
+        val window = (view.context as? android.app.Activity)?.window
+        if (playing) {
+            if (android.os.Build.VERSION.SDK_INT >= 35) {
+                view.requestedFrameRate = android.view.View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+            } else if (window != null) {
+                val maxHz = try {
+                    view.display?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 0f
+                } catch (_: Exception) { 0f }
+                if (maxHz > 0f) {
+                    val lp = window.attributes
+                    lp.preferredRefreshRate = maxHz
+                    window.attributes = lp
+                }
+            }
+        }
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= 35) {
+                view.requestedFrameRate = android.view.View.REQUESTED_FRAME_RATE_CATEGORY_NO_PREFERENCE
+            } else if (window != null) {
+                val lp = window.attributes
+                if (lp.preferredRefreshRate != 0f) {
+                    lp.preferredRefreshRate = 0f
+                    window.attributes = lp
+                }
+            }
+        }
+    }
+    val t = ms.coerceAtLeast(0L)
+    Text(
+        "%d:%02d.%03d".format(t / 60_000, (t / 1000) % 60, t % 1000),
+        fontSize = 11.sp,
+        color = Color.White.copy(0.85f)
+    )
 }

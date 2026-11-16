@@ -166,7 +166,8 @@ fun staticTheme(id: AppThemeId): AppColors = when (id) {
     AppThemeId.EMBER -> EmberColors
     AppThemeId.AMOLED -> AmoledColors
     AppThemeId.TWILIGHT -> TwilightColors
-    AppThemeId.DEFAULT, AppThemeId.DYNAMIC -> DefaultAppColors
+    // PHOTO: cores base iguais ao padrão; o fundo borrado é aplicado na UI (backdrop).
+    AppThemeId.DEFAULT, AppThemeId.DYNAMIC, AppThemeId.PHOTO -> DefaultAppColors
 }
 
 /**
@@ -281,16 +282,14 @@ fun rememberAppColors(
     val fixed = remember(themeId, dynamicDefaultArgb, manualFloats) {
         if (themeId == AppThemeId.DYNAMIC) dynamicIdle else staticTheme(themeId)
     }
-    val useArt = themeId == AppThemeId.DYNAMIC && isPlaying
+    // DYNAMIC e PHOTO: com faixa tocando, as cores da capa dominam o gradiente e as flutuantes.
+    // Cores manuais de flutuantes só valem quando NÃO há música tocando.
+    val useArt = (themeId == AppThemeId.DYNAMIC || themeId == AppThemeId.PHOTO) && isPlaying
     val fromArt by produceState(initialValue = dynamicIdle, artPath, useArt, dynamicDefaultArgb, manualFloats) {
         if (useArt) {
             val extracted = withContext(Dispatchers.Default) { colorsFromArt(artPath, dynamicIdle) }
-            // Preferência do usuário sobrepõe as cores auto da capa quando definida.
-            value = if (manualFloats.isNotEmpty()) {
-                extracted.copy(floatColors = manualFloats)
-            } else {
-                extracted
-            }
+            // Capa manda: NÃO sobrescrever floatColors com as manuais enquanto toca.
+            value = extracted
         } else {
             value = dynamicIdle
         }
@@ -301,7 +300,7 @@ fun rememberAppColors(
     val bottom by animateColorAsState(target.gradientBottom, colorTransition, label = "gradBottom")
     val accent by animateColorAsState(target.accent, colorTransition, label = "accent")
     val surface by animateColorAsState(target.surface, colorTransition, label = "surface")
-    val floatColors = if (themeId == AppThemeId.DYNAMIC) {
+    val floatColors = if (themeId == AppThemeId.DYNAMIC || themeId == AppThemeId.PHOTO) {
         target.floatColors.mapIndexed { index, color ->
             animateColorAsState(color, colorTransition, label = "floatColor$index").value
         }

@@ -65,6 +65,17 @@ object LyricsExtractor {
             } catch (_: Exception) { }
         }
 
+        // Formatos que o leitor nativo acima não cobre (M4A/MP4, WAV, AIFF, DSF, APE, WV…):
+        // lê com o mesmo JAudioTagger usado para GRAVAR a letra. Sem isto, a letra salva
+        // nesses formatos existia no arquivo (e no editor), mas o player nunca a carregava.
+        try {
+            val text = TagReader.read(context, track)?.lyrics
+            if (!text.isNullOrBlank()) {
+                val parsed = parseLyricsContent(text)
+                if (parsed.isNotEmpty()) return parsed
+            }
+        } catch (_: Exception) { }
+
         try {
             val r = MediaMetadataRetriever()
             r.setDataSource(context, track.uri)
@@ -283,9 +294,18 @@ object LyricsExtractor {
                 for (i in tags.indices) {
                     val wTime = parseTimestamp(tags[i].groupValues[1], tags[i].groupValues[2], tags[i].groupValues[3])
                     val rawText = if (i + 1 < parts.size) parts[i + 1] else ""
+                    if (rawText.isBlank()) {
+                        // eLRC: tag sem texto logo após uma palavra marca o FIM dela (<t>palavra<fim>).
+                        // Antes era descartada e o endMs definido à mão se perdia ao salvar.
+                        val last = words.lastOrNull()
+                        if (last != null && last.timeMs >= 0 && wTime > last.timeMs && last.endMs <= last.timeMs) {
+                            words[words.lastIndex] = last.copy(endMs = wTime)
+                        }
+                        continue
+                    }
                     appendWordSegment(words, rawText, wTime)
                 }
-                // endMs e fim de linha são preenchidos em finalizeLyricsTimings
+                // endMs sem tag explícita e fim de linha são preenchidos em finalizeLyricsTimings
             } else if (wordMarkerRegex.containsMatchIn(lyricPart)) {
                 // Mantém animações/sílabas em linhas simples, sem timestamps de palavra.
                 appendWordSegment(words, lyricPart, time)

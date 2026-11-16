@@ -109,7 +109,20 @@ object LyricsEmbedder {
 
     private fun fmtTs(ms: Long): String {
         val t = ms.coerceAtLeast(0L)
-        return String.format(Locale.US, "%02d:%02d.%02d", t / 60_000, (t % 60_000) / 1000, (t % 1000) / 10)
+        return String.format(Locale.US, "%02d:%02d.%03d", t / 60_000, (t % 60_000) / 1000, t % 1000)
+    }
+
+    /**
+     * Fim da palavra só é gravado quando não dá para inferi-lo na leitura: na leitura o fim
+     * padrão é o início da próxima palavra com tempo, então fim igual a isso não precisa de tag.
+     * Sem isto, o endMs marcado manualmente no sincronizador nunca chegava ao arquivo.
+     */
+    private fun explicitWordEnd(words: List<LyricWord>, index: Int): Long? {
+        val w = words[index]
+        if (w.timeMs < 0L || w.endMs <= w.timeMs) return null
+        val nextStart = words.drop(index + 1).firstOrNull { it.timeMs > w.timeMs }?.timeMs
+        if (nextStart != null && kotlin.math.abs(w.endMs - nextStart) <= 10L) return null
+        return w.endMs
     }
 
     private fun animationTag(animation: LyricAnimation): String = when (animation) {
@@ -134,12 +147,12 @@ object LyricsEmbedder {
     /**
      * Serializa linhas em LRC ou eLRC (word-by-word). Formato único, também usado pelo editor de tags:
      *  - backing vocal leva {bg} e tradução leva {tr} logo após o timestamp;
-     *  - só palavras COM tempo recebem <mm:ss.xx> (nunca grava <00:00.00> para palavra sem tempo);
+     *  - só palavras COM tempo recebem <mm:ss.xxx> (nunca grava <00:00.000> para palavra sem tempo);
      *  - sílaba: <mm:ss.xx>{sil}texto (a ordem que o parser espera);
      *  - linha sem nenhuma palavra com tempo vira LRC simples.
      */
     fun linesToLrcText(lines: List<LyricLine>): String = buildString {
-        lines.forEach { line ->
+        LyricsFormat.normalizeBackgroundLines(lines).forEach { line ->
             val lineMarkers = (if (line.isBackground) "{bg}" else "") +
                 (if (line.isTranslation) "{tr}" else "")
             val hasTimedWords = line.words.any { it.timeMs >= 0 }
@@ -170,6 +183,10 @@ object LyricsEmbedder {
                             if (w.isSyllable) append("{sil}")
                             append(w.text)
                             append(animationTag(w.animation))
+                            // endMs definido à mão (ou vindo da fonte) que a leitura não consegue inferir.
+                            explicitWordEnd(line.words, i)?.let { end ->
+                                append('<').append(fmtTs(end)).append('>')
+                            }
                         } else {
                             // Palavra ainda sem tempo: cola no texto anterior, sem tag.
                             if (i > 0 && !w.isSyllable) append(' ')
@@ -287,7 +304,11 @@ object LyricsEmbedder {
         return true
     }
 
-    private fun syncTimes(lines: List<LyricLine>): List<Long> = lines.flatMap { line ->
+    private fun syncTimes(lines: List<LyricLine>): List<Long> = lines
+        // O parser descarta linhas sem texto (pausas instrumentais "[01:23.45]"); contá-las aqui
+        // fazia a conferência falhar mesmo com a letra gravada corretamente.
+        .filter { it.text.isNotBlank() || it.words.isNotEmpty() }
+        .flatMap { line ->
         val wordTimes = line.words.mapNotNull { it.timeMs.takeIf { time -> time >= 0L } }
         if (wordTimes.isNotEmpty()) wordTimes
         else listOfNotNull(line.timeMs.takeIf { it >= 0L })

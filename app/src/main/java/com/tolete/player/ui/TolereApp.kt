@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -156,6 +157,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
@@ -210,6 +213,8 @@ val LocalUiFontFamily = staticCompositionLocalOf<FontFamily?> { null }
  * Lida por listas ordenadas e pelo índice lateral A–Z.
  */
 internal val LocalFirstLetterOrder = androidx.compose.runtime.compositionLocalOf { false }
+internal val LocalAlphabetScrollerStyle =
+    androidx.compose.runtime.compositionLocalOf { MusicViewModel.AlphabetScrollerStyle.GLASS }
 
 private data class GroupItem(
     val title: String,
@@ -256,13 +261,19 @@ fun TolereApp(
     onPickMilkFiles: () -> Unit = {},
     onDeleteTracks: (List<Track>) -> Unit = {},
     onRequestAllFilesPermission: () -> Unit = {},
+    onRequestMediaStorePermission: () -> Unit = {},
     onExportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     onImportBackup: (MusicViewModel.BackupOptions) -> Unit = {},
     openLastFmDashboard: Boolean = false,
     onOpenLastFmDashboardConsumed: () -> Unit = {},
+    openRetrospectiveChoice: Boolean = false,
+    retrospectivePeriod: String? = null,
+    onRetrospectiveChoiceConsumed: () -> Unit = {},
     openNowPlaying: Boolean = false,
     openNowPlayingTrackId: String? = null,
-    onOpenNowPlayingConsumed: () -> Unit = {}
+    onOpenNowPlayingConsumed: () -> Unit = {},
+    openNowPlayingLastFmInfo: Boolean = false,
+    onOpenNowPlayingLastFmInfoConsumed: () -> Unit = {}
 ) {
     val tracks by vm.tracks.collectAsStateWithLifecycle()
     val isScanning by vm.isScanning.collectAsStateWithLifecycle()
@@ -290,10 +301,13 @@ fun TolereApp(
     val shuffle by vm.shuffle.collectAsStateWithLifecycle()
     val isSearching by vm.isSearching.collectAsStateWithLifecycle()
     val searchQuery by vm.searchQuery.collectAsStateWithLifecycle()
+    val searchPending by vm.searchPending.collectAsStateWithLifecycle()
+    val searchHistory by vm.searchHistory.collectAsStateWithLifecycle()
     val searchResults by vm.searchResults.collectAsStateWithLifecycle()
     val searchArtists by vm.searchArtists.collectAsStateWithLifecycle()
     val searchAlbums by vm.searchAlbums.collectAsStateWithLifecycle()
     val searchGenres by vm.searchGenres.collectAsStateWithLifecycle()
+    val searchStaggerMs by vm.searchStaggerMs.collectAsStateWithLifecycle()
     val themeId by vm.themeId.collectAsStateWithLifecycle()
     val themeRetainTrackColors by vm.themeRetainTrackColors.collectAsStateWithLifecycle()
     val repeatMode by vm.repeatMode.collectAsStateWithLifecycle()
@@ -304,18 +318,27 @@ fun TolereApp(
     val uiFontPath by vm.uiFontPath.collectAsStateWithLifecycle()
     val librarySettings by vm.librarySettings.collectAsStateWithLifecycle()
     val allFilesMode by vm.allFilesMode.collectAsStateWithLifecycle()
+    val mediaStoreMode by vm.mediaStoreMode.collectAsStateWithLifecycle()
     // Indexa as fotos de artista uma vez (IO) e converte .url antigos em .jpg
-    LaunchedEffect(allFilesMode) {
+    LaunchedEffect(allFilesMode, librarySettings.artistAutoFetchMode) {
         withContext(Dispatchers.IO) {
             ArtistMetaStore.rebuildPhotoIndex()
-            ArtistMetaStore.migrateLegacyUrlFiles()
+            if (com.tolete.player.data.ArtistImageResolver.isAutomaticLookupAllowed()) {
+                ArtistMetaStore.migrateLegacyUrlFiles()
+            }
         }
     }
     val autoFetchLyrics by vm.autoFetchLyrics.collectAsStateWithLifecycle()
+    val autoLyricsSaveTarget by vm.autoLyricsSaveTarget.collectAsStateWithLifecycle()
+    val preferNeteaseRomanization by vm.preferNeteaseRomanization.collectAsStateWithLifecycle()
+    val lyricsPopupEnabled by vm.lyricsPopupEnabled.collectAsStateWithLifecycle()
+    val lyricsTypeOrder by vm.lyricsTypeOrder.collectAsStateWithLifecycle()
+    val lyricsSourceOrder by vm.lyricsSourceOrder.collectAsStateWithLifecycle()
     val shuffleType by vm.shuffleType.collectAsStateWithLifecycle()
     val fadeMs by vm.fadeMs.collectAsStateWithLifecycle()
     val crossfadeMs by vm.crossfadeMs.collectAsStateWithLifecycle()
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
+    val seekBarWaveformTheme by vm.seekBarWaveformTheme.collectAsStateWithLifecycle()
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
     val glassQuality by vm.glassQuality.collectAsStateWithLifecycle()
@@ -345,6 +368,11 @@ fun TolereApp(
     val splashEnabled by vm.splashEnabled.collectAsStateWithLifecycle()
     val splashSoundEnabled by vm.splashSoundEnabled.collectAsStateWithLifecycle()
     val floatingIconsEnabled by vm.floatingIconsEnabled.collectAsStateWithLifecycle()
+    val photoThemePath by vm.photoThemePath.collectAsStateWithLifecycle()
+    val photoThemeBlur by vm.photoThemeBlur.collectAsStateWithLifecycle()
+    val dynamicAlbumBlur by vm.dynamicAlbumBlur.collectAsStateWithLifecycle()
+    val alphabetScrollerStyle by vm.alphabetScrollerStyle.collectAsStateWithLifecycle()
+    val waveformTheme by vm.waveformTheme.collectAsStateWithLifecycle()
     val homeButtonFontPath by vm.homeButtonFontPath.collectAsStateWithLifecycle()
     val homeButtonColor by vm.homeButtonColor.collectAsStateWithLifecycle()
     val shareFontPath by vm.shareFontPath.collectAsStateWithLifecycle()
@@ -362,6 +390,32 @@ fun TolereApp(
         themeId, nowPlaying?.artPath, isPlaying || themeRetainTrackColors,
         dynamicDefaultArgb, dynamicFloatArgb
     )
+    val photoThemeScope = rememberCoroutineScope()
+    val photoThemePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        photoThemeScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                try {
+                    val dir = File(rootContext.filesDir, "theme_photos").also { it.mkdirs() }
+                    val dest = File(dir, "photo_theme.jpg")
+                    rootContext.contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    if (dest.exists() && dest.length() > 0L) dest.absolutePath else null
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            if (saved != null) {
+                vm.setPhotoThemePath(saved)
+                android.widget.Toast.makeText(rootContext, "Foto do tema salva", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(rootContext, "Falha ao salvar a foto", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val layoutScale = rememberLayoutScale()
 
     val uiFontFamily = remember(uiFontPath) {
@@ -369,6 +423,7 @@ fun TolereApp(
     }
 
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+
     // Pilha simples para o botão voltar do sistema restaurar a tela anterior
     // (ex.: NowPlaying → Artista → voltar restaura NowPlaying)
     var returnToNowPlaying by remember { mutableStateOf(false) }
@@ -415,18 +470,30 @@ fun TolereApp(
     val selectionMode = selectedTrackIds.isNotEmpty()
 
     var showLastFm by remember { mutableStateOf(false) }
+    var showLastFmTrackInfoInNowPlaying by remember { mutableStateOf(false) }
+    var showRetrospectiveChoice by remember { mutableStateOf(false) }
     LaunchedEffect(openLastFmDashboard) {
         if (openLastFmDashboard) {
             showLastFm = true
             onOpenLastFmDashboardConsumed()
         }
     }
-    LaunchedEffect(openNowPlaying, nowPlaying?.id, openNowPlayingTrackId) {
+    LaunchedEffect(openRetrospectiveChoice) {
+        if (openRetrospectiveChoice) {
+            showRetrospectiveChoice = true
+            onRetrospectiveChoiceConsumed()
+        }
+    }
+    LaunchedEffect(openNowPlaying, openNowPlayingLastFmInfo, nowPlaying?.id, openNowPlayingTrackId) {
         val currentTrackId = nowPlaying?.id
-        if (openNowPlaying && currentTrackId != null &&
+        if ((openNowPlaying || openNowPlayingLastFmInfo) && currentTrackId != null &&
             (openNowPlayingTrackId == null || currentTrackId == openNowPlayingTrackId)
         ) {
             showNowPlaying = true
+            if (openNowPlayingLastFmInfo) {
+                showLastFmTrackInfoInNowPlaying = true
+                onOpenNowPlayingLastFmInfoConsumed()
+            }
             onOpenNowPlayingConsumed()
         }
     }
@@ -500,7 +567,7 @@ fun TolereApp(
             SettingsPage.FOLDERS -> SettingsPage.LIBRARY
                             SettingsPage.ORGANIZE -> SettingsPage.LIBRARY
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
-            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.ADVANCED, SettingsPage.VISUALIZER, SettingsPage.SCROBBLE -> SettingsPage.MENU
+            SettingsPage.LIBRARY, SettingsPage.ORGANIZE, SettingsPage.APPEARANCE, SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.ADVANCED, SettingsPage.VISUALIZER, SettingsPage.SCROBBLE, SettingsPage.LYRICS_CONTRIBUTIONS -> SettingsPage.MENU
             SettingsPage.CHANGELOG -> SettingsPage.ABOUT
             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
             else -> SettingsPage.NONE
@@ -528,7 +595,9 @@ fun TolereApp(
         LocalGlassBackdrop provides backdrop,
         LocalGlassBackdropOrigin provides backdropOrigin,
         LocalScrollerHost provides scrollerHost,
-        LocalFirstLetterOrder provides librarySettings.firstLetterOrder
+        LocalFirstLetterOrder provides librarySettings.firstLetterOrder,
+        LocalAlphabetScrollerStyle provides alphabetScrollerStyle,
+        LocalWaveformTheme provides waveformTheme
     ) {
     val uiTypography = remember(uiFontFamily) {
         if (uiFontFamily != null) {
@@ -562,6 +631,33 @@ fun TolereApp(
         contentColor = Color.White
     ) {
         Box(Modifier.fillMaxSize()) {
+            // Fundo global (tema PHOTO): cobre listas, filtros, settings e overlays
+            val globalBlurPath = when {
+                themeId != MusicViewModel.AppThemeId.PHOTO -> null
+                (isPlaying || themeRetainTrackColors) &&
+                    dynamicAlbumBlur &&
+                    !nowPlaying?.artPath.isNullOrBlank() -> nowPlaying?.artPath
+                !photoThemePath.isNullOrBlank() -> photoThemePath
+                (isPlaying || themeRetainTrackColors) &&
+                    !nowPlaying?.artPath.isNullOrBlank() -> nowPlaying?.artPath
+                else -> null
+            }
+            if (globalBlurPath != null) {
+                val blurDp = (8f + photoThemeBlur * 32f).dp
+                AsyncImage(
+                    model = File(globalBlurPath),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .blur(blurDp, BlurredEdgeTreatment.Unbounded)
+                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.28f + photoThemeBlur * 0.12f))
+                )
+            }
 
             // ---------- Conteúdo ----------
             Box(
@@ -581,10 +677,16 @@ fun TolereApp(
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(rememberFloatingGradient(appColors))
+                        // No tema PHOTO o fundo é a foto global; gradiente só nos outros temas
+                        .then(
+                            if (themeId == MusicViewModel.AppThemeId.PHOTO) {
+                                Modifier.background(Color.Transparent)
+                            } else {
+                                Modifier.background(rememberFloatingGradient(appColors))
+                            }
+                        )
                         .nestedScroll(navScrollConnection)
                 ) {
-                    // Ícones flutuantes: pausados enquanto o Now Playing cobre a tela (economiza GPU/CPU)
                     if (floatingIconsEnabled && !showNowPlaying) {
                         if (isSearching) {
                             FloatingIconsBackground(kind = "search")
@@ -745,37 +847,61 @@ fun TolereApp(
                                 label = "mainContent"
                             ) { key ->
                             when {
-                                key == "search" || isSearching -> SearchResultsPanel(
-                                    tracks = searchResults,
-                                    artists = searchArtists,
-                                    albums = searchAlbums,
-                                    genres = searchGenres,
-                                    nowPlayingId = nowPlaying?.id,
-                                    bottomPadding = bottomPadding,
-                                    selectedIds = selectedTrackIds,
-                                    selectionMode = selectionMode,
-                                    onTrackClick = { index, track ->
-                                        if (selectionMode) {
-                                            selectedTrackIds = if (track.id in selectedTrackIds)
-                                                selectedTrackIds - track.id else selectedTrackIds + track.id
+                                key == "search" || isSearching -> androidx.compose.animation.AnimatedContent(
+                                    targetState = searchPending && searchQuery.isNotBlank(),
+                                    modifier = Modifier.fillMaxSize(),
+                                    transitionSpec = {
+                                        if (!targetState) {
+                                            (slideInHorizontally(tween(360, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(220))) togetherWith
+                                                fadeOut(tween(140))
                                         } else {
-                                            vm.playTracks(searchResults, index)
+                                            fadeIn(tween(120)) togetherWith
+                                                (slideOutHorizontally(tween(140)) { -it } + fadeOut(tween(120)))
                                         }
                                     },
-                                    onTrackLongClick = { track ->
-                                        selectedTrackIds = selectedTrackIds + track.id
-                                    },
-                                    onOpenArtist = { name ->
-                                        vm.openArtist(name)
-                                    },
-                                    onOpenAlbum = { name ->
-                                        vm.openAlbum(name)
-                                    },
-                                    onOpenGenre = { name ->
-                                        vm.setTab(MusicViewModel.Tab.GENRES)
-                                        vm.openGroup(name)
+                                    label = "searchResults"
+                                ) { pending ->
+                                    if (pending) {
+                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            Text("Pesquisando…", color = Color.White.copy(0.6f))
+                                        }
+                                    } else {
+                                        SearchResultsPanel(
+                                            tracks = searchResults,
+                                            artists = searchArtists,
+                                            albums = searchAlbums,
+                                            genres = searchGenres,
+                                            query = searchQuery,
+                                            searchPending = false,
+                                            searchHistory = searchHistory,
+                                            onHistorySelect = vm::setSearchQuery,
+                                            onClearHistory = vm::clearSearchHistory,
+                                            onRemoveHistoryItem = vm::removeSearchHistoryItem,
+                                            nowPlayingId = nowPlaying?.id,
+                                            bottomPadding = bottomPadding,
+                                            selectedIds = selectedTrackIds,
+                                            selectionMode = selectionMode,
+                                            staggerMs = searchStaggerMs,
+                                            onTrackClick = { index, track ->
+                                                if (selectionMode) {
+                                                    selectedTrackIds = if (track.id in selectedTrackIds)
+                                                        selectedTrackIds - track.id else selectedTrackIds + track.id
+                                                } else {
+                                                    vm.playTracks(searchResults, index)
+                                                }
+                                            },
+                                            onTrackLongClick = { track ->
+                                                selectedTrackIds = selectedTrackIds + track.id
+                                            },
+                                            onOpenArtist = { name -> vm.openArtist(name) },
+                                            onOpenAlbum = { name -> vm.openAlbum(name) },
+                                            onOpenGenre = { name ->
+                                                vm.setTab(MusicViewModel.Tab.GENRES)
+                                                vm.openGroup(name)
+                                            }
+                                        )
                                     }
-                                )
+                                }
 
                                 isScanning && tracks.isEmpty() -> Column(
                                     Modifier.fillMaxSize(),
@@ -791,21 +917,37 @@ fun TolereApp(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.Center
                                 ) {
-                                    Text("Nenhuma música ainda", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                                     Text(
-                                        if (allFilesMode) "Nenhuma faixa encontrada no armazenamento."
-                                        else "Ative o acesso a todos os arquivos para escanear suas músicas.",
+                                        if (!allFilesMode && !mediaStoreMode) "Escolha como carregar sua biblioteca"
+                                        else "Nenhuma música encontrada",
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                    )
+                                    Text(
+                                        when {
+                                            allFilesMode -> "Nenhuma faixa encontrada no armazenamento."
+                                            mediaStoreMode -> "O modo Músicas e áudio usa o índice do Android. Alguns arquivos não indexados, como certos DSF, podem não aparecer; operações de arquivo também podem exigir autorização adicional."
+                                            else -> "Você pode permitir a leitura dos áudios indexados pelo Android ou escolher o acesso amplo a todos os arquivos. O modo pelo índice pode não encontrar alguns formatos/arquivos e limita operações de edição e gerenciamento."
+                                        },
                                         modifier = Modifier.padding(vertical = 12.dp),
                                         color = Color.White.copy(alpha = 0.7f),
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                     )
-                                    if (!allFilesMode) {
-                                        Button(onClick = onRequestAllFilesPermission) {
-                                            Text("Permitir acesso total")
+                                    if (!allFilesMode && !mediaStoreMode) {
+                                        Button(onClick = onRequestMediaStorePermission) {
+                                            Text("Usar permissão Músicas e áudio")
+                                        }
+                                        TextButton(onClick = onRequestAllFilesPermission) {
+                                            Text("Usar acesso a todos os arquivos")
+                                        }
+                                    } else if (mediaStoreMode) {
+                                        Button(onClick = onRequestMediaStorePermission) {
+                                            Text("Verificar permissão e escanear")
                                         }
                                     } else {
-                                        Button(onClick = { vm.refreshLibrary() }) {
-                                            Text("Escanear novamente")
+                                        Button(onClick = onRequestAllFilesPermission) {
+                                            Text("Verificar acesso e escanear")
                                         }
                                     }
                                 }
@@ -832,6 +974,7 @@ fun TolereApp(
                                         bottomPadding = bottomPadding,
                                         nowPlayingId = nowPlaying?.id,
                                         accent = appColors.accent,
+                                        artistAutoFetchMode = librarySettings.artistAutoFetchMode,
                                         selectedIds = selectedTrackIds,
                                         selectionMode = selectionMode,
                                         onOpenAlbum = {
@@ -899,6 +1042,7 @@ fun TolereApp(
                                         nowPlayingId = nowPlaying?.id,
                                         bottomPadding = bottomPadding,
                                         accent = appColors.accent,
+                                        artistAutoFetchMode = librarySettings.artistAutoFetchMode,
                                         selectedIds = selectedTrackIds,
                                         selectionMode = selectionMode,
                                         onPlayAll = { vm.playTracks(albumTracks, 0) },
@@ -1093,16 +1237,20 @@ fun TolereApp(
                                                 }
                                             }
                                         }
-                                        MusicViewModel.Tab.ALBUMS -> vm.sortedAlbums(albums).map {
-                                            GroupItem(
-                                                it.name,
-                                                "${it.artist} · ${faixas(it.trackCount)}",
-                                                "album-key::${it.key}",
-                                                it.artPath
-                                            )
+                                        MusicViewModel.Tab.ALBUMS -> remember(albums, groupSort, groupOrder) {
+                                            vm.sortedAlbums(albums).map {
+                                                GroupItem(
+                                                    it.name,
+                                                    "${it.artist} · ${faixas(it.trackCount)}",
+                                                    "album-key::${it.key}",
+                                                    it.artPath
+                                                )
+                                            }
                                         }
-                                        MusicViewModel.Tab.GENRES -> vm.sortedGenres(genres).map {
-                                            GroupItem(it.name, faixas(it.trackCount), it.name, it.artPath)
+                                        MusicViewModel.Tab.GENRES -> remember(genres, groupSort, groupOrder) {
+                                            vm.sortedGenres(genres).map {
+                                                GroupItem(it.name, faixas(it.trackCount), it.name, it.artPath)
+                                            }
                                         }
                                         else -> emptyList()
                                     }
@@ -1194,6 +1342,44 @@ fun TolereApp(
                 )
             }
 
+            // ---------- Escolha de retrospectiva (notificação semanal/mensal/anual) ----------
+            if (showRetrospectiveChoice) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showRetrospectiveChoice = false },
+                    title = {
+                        Text(
+                            when (retrospectivePeriod) {
+                                "weekly" -> "Retrospectiva da semana"
+                                "monthly" -> "Retrospectiva do mês"
+                                "yearly" -> "Retrospectiva do ano"
+                                else -> "Retrospectiva"
+                            },
+                            color = Color.White
+                        )
+                    },
+                    text = {
+                        Text(
+                            "De onde você quer gerar a retrospectiva?",
+                            color = Color.White.copy(0.8f)
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showRetrospectiveChoice = false
+                            showLastFm = true
+                        }) { Text("Last.fm") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showRetrospectiveChoice = false
+                            // Abre o dashboard; a exportação local fica no fluxo de estatísticas da home
+                            showLastFm = true
+                        }) { Text("Histórico local / Last.fm") }
+                    },
+                    containerColor = Color(0xFF1A1A22)
+                )
+            }
+
             // ---------- Dashboard do Last.fm ----------
             AnimatedVisibility(
                 visible = showLastFm,
@@ -1235,7 +1421,8 @@ fun TolereApp(
                             SettingsPage.LYRICS_VIEWER -> SettingsPage.APPEARANCE
                             SettingsPage.CHANGELOG, SettingsPage.LICENSES, SettingsPage.FONT_CREDITS -> SettingsPage.ABOUT
                             SettingsPage.LIBRARY, SettingsPage.APPEARANCE,
-                            SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.SCROBBLE -> SettingsPage.MENU
+                            SettingsPage.ABOUT, SettingsPage.PLAYER, SettingsPage.BACKUP, SettingsPage.SCROBBLE,
+                            SettingsPage.LYRICS_CONTRIBUTIONS -> SettingsPage.MENU
                             else -> SettingsPage.NONE
                         }
                     },
@@ -1257,6 +1444,17 @@ fun TolereApp(
                     onDynamicDefaultColorChange = vm::setDynamicDefaultColor,
                     dynamicFloatColors = dynamicFloatArgb,
                     onDynamicFloatColorsChange = vm::setDynamicFloatColors,
+                    photoThemePath = photoThemePath,
+                    onPickPhotoTheme = { photoThemePicker.launch("image/*") },
+                    onClearPhotoTheme = { vm.setPhotoThemePath(null) },
+                    photoThemeBlur = photoThemeBlur,
+                    onPhotoThemeBlurChange = vm::setPhotoThemeBlur,
+                    dynamicAlbumBlur = dynamicAlbumBlur,
+                    onDynamicAlbumBlurChange = vm::setDynamicAlbumBlur,
+                    alphabetScrollerStyle = alphabetScrollerStyle,
+                    onAlphabetScrollerStyleChange = vm::setAlphabetScrollerStyle,
+                    waveformTheme = waveformTheme,
+                    onWaveformThemeChange = vm::setWaveformTheme,
                     onPickFont = { vm.beginFontPickForLyrics(); onPickFont() },
                     onClearFont = { vm.setMainLyricsFontPath(null) },
                     onPickUiFont = onPickUiFont,
@@ -1299,11 +1497,27 @@ fun TolereApp(
                     },
                     onMinDurationSecChange = vm::setMinDurationSec,
                     onFirstLetterOrderChange = vm::setFirstLetterOrder,
+                    onArtistAutoFetchModeChange = vm::setArtistAutoFetchMode,
                     allFilesMode = allFilesMode,
                     onAllFilesModeChange = vm::setAllFilesMode,
                     onRequestAllFilesPermission = onRequestAllFilesPermission,
+                    mediaStoreMode = mediaStoreMode,
+                    onMediaStoreModeChange = vm::setMediaStoreMode,
+                    onRequestMediaStorePermission = onRequestMediaStorePermission,
                     autoFetchLyrics = autoFetchLyrics,
                     onAutoFetchLyricsChange = vm::setAutoFetchLyrics,
+                    autoLyricsSaveTarget = autoLyricsSaveTarget,
+                    onAutoLyricsSaveTargetChange = vm::setAutoLyricsSaveTarget,
+                    preferNeteaseRomanization = preferNeteaseRomanization,
+                    onPreferNeteaseRomanizationChange = vm::setPreferNeteaseRomanization,
+                    lyricsPopupEnabled = lyricsPopupEnabled,
+                    onLyricsPopupEnabledChange = vm::setLyricsPopupEnabled,
+                    searchStaggerMs = searchStaggerMs,
+                    onSearchStaggerMsChange = vm::setSearchStaggerMs,
+                    lyricsTypeOrder = lyricsTypeOrder,
+                    onMoveLyricsType = vm::moveLyricsType,
+                    lyricsSourceOrder = lyricsSourceOrder,
+                    onMoveLyricsSource = vm::moveLyricsSource,
                     shuffleType = shuffleType,
                     onShuffleTypeChange = vm::setShuffleType,
                     fadeMs = fadeMs,
@@ -1312,6 +1526,8 @@ fun TolereApp(
                     onCrossfadeMsChange = vm::setCrossfadeMs,
                     seekBarStyle = seekBarStyle,
                     onSeekBarStyleChange = vm::setSeekBarStyle,
+                    seekBarWaveformTheme = seekBarWaveformTheme,
+                    onSeekBarWaveformThemeChange = vm::setSeekBarWaveformTheme,
                     immersiveNowPlaying = immersiveNowPlaying,
                     onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
                     audioOutput = audioOutput,
@@ -1679,6 +1895,10 @@ fun TolereApp(
                         searchLyrics = { t, a -> vm.searchLyrics(t, a) },
                         embedLyricsResult = { r, target -> vm.embedLyricsResult(current, r, target) },
                         appColors = appColors,
+                        lastFmUsername = lastFmUsername,
+                        libraryTracks = tracks,
+                        openLastFmTrackInfo = showLastFmTrackInfoInNowPlaying,
+                        onLastFmTrackInfoConsumed = { showLastFmTrackInfoInNowPlaying = false },
                         milkPresets = milkPresets,
                         onDeletePreset = { path -> vm.deleteMilkPreset(path) },
                         milkIntervalSec = milkIntervalSec,
@@ -1696,7 +1916,10 @@ fun TolereApp(
                         playCount = vm.playCountOf(current.id),
                         firstPlayedAt = vm.firstPlayedAtOf(current.id).takeIf { it > 0L },
                         lastPlayedAt = vm.lastPlayedAt(current.id),
+                        lyricsPopupEnabled = lyricsPopupEnabled,
+                        onLyricsPopupEnabledChange = vm::setLyricsPopupEnabled,
                         seekBarStyle = seekBarStyle,
+                        seekWaveformTheme = seekBarWaveformTheme,
                         immersiveNowPlaying = immersiveNowPlaying,
                         onOpenContainingFolder = {
                             val path = current.path
@@ -2187,10 +2410,17 @@ private fun SearchResultsPanel(
     artists: List<Artist>,
     albums: List<Album>,
     genres: List<Genre>,
+    query: String,
+    searchPending: Boolean,
+    searchHistory: List<String>,
+    onHistorySelect: (String) -> Unit,
+    onClearHistory: () -> Unit,
+    onRemoveHistoryItem: (String) -> Unit = {},
     nowPlayingId: String?,
     bottomPadding: Dp,
     selectedIds: Set<String>,
     selectionMode: Boolean,
+    staggerMs: Int = 50,
     onTrackClick: (Int, Track) -> Unit,
     onTrackLongClick: (Track) -> Unit,
     onOpenArtist: (String) -> Unit,
@@ -2198,8 +2428,87 @@ private fun SearchResultsPanel(
     onOpenGenre: (String) -> Unit
 ) {
     val searchCtx = LocalContext.current
+    if (query.isBlank()) {
+        LazyColumn(contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding)) {
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Pesquisas recentes",
+                        modifier = Modifier.weight(1f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White.copy(0.6f)
+                    )
+                    if (searchHistory.isNotEmpty()) {
+                        Text(
+                            "Limpar",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.clickable(onClick = onClearHistory).padding(6.dp)
+                        )
+                    }
+                }
+            }
+            if (searchHistory.isEmpty()) {
+                item {
+                    Text(
+                        "Suas pesquisas concluídas aparecerão aqui.",
+                        color = Color.White.copy(0.45f),
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                    )
+                }
+            } else {
+                items(searchHistory, key = { it.lowercase() }) { term ->
+                    var showItemMenu by remember(term) { mutableStateOf(false) }
+                    Box(Modifier.fillMaxWidth()) {
+                        Text(
+                            term,
+                            color = Color.White.copy(0.9f),
+                            fontSize = 15.sp,
+                            modifier = Modifier.fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { onHistorySelect(term) },
+                                    onLongClick = { showItemMenu = true }
+                                )
+                                .padding(horizontal = 20.dp, vertical = 12.dp)
+                        )
+                        AppDropdownMenu(
+                            expanded = showItemMenu,
+                            onDismissRequest = { showItemMenu = false },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.appMenuOutline(RoundedCornerShape(14.dp))
+                        ) {
+                            LensMenuItem(
+                                text = {
+                                    Text("Limpar este item", color = MaterialTheme.colorScheme.onSurface)
+                                },
+                                onClick = {
+                                    showItemMenu = false
+                                    onRemoveHistoryItem(term)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
     val hasGroups = artists.isNotEmpty() || albums.isNotEmpty() || genres.isNotEmpty()
     if (!hasGroups) {
+        if (tracks.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (searchPending) "Pesquisando…" else "Nenhum resultado encontrado.",
+                    color = Color.White.copy(0.6f)
+                )
+            }
+            return
+        }
         TrackList(
             tracks = tracks,
             nowPlayingId = nowPlayingId,
@@ -2209,12 +2518,17 @@ private fun SearchResultsPanel(
             selectionMode = selectionMode,
             onClick = onTrackClick,
             onLongClick = onTrackLongClick,
-            showAlphabetScroller = false
+            showAlphabetScroller = false,
+            staggerAppear = true,
+            staggerMs = staggerMs
         )
         return
     }
+    val artistsLimited = artists.take(20)
+    val albumsLimited = albums.take(20)
+    val genresLimited = genres.take(20)
     LazyColumn(contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding)) {
-        if (artists.isNotEmpty()) {
+        if (artistsLimited.isNotEmpty()) {
             item {
                 Text(
                     "Artistas",
@@ -2224,29 +2538,31 @@ private fun SearchResultsPanel(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                 )
             }
-            items(artists.take(20)) { a ->
+            itemsIndexed(artistsLimited) { index, a ->
                 val metaImg = ArtistMetaStore.cachedPhotoPath(a.name)
                 val art = metaImg ?: a.artPath
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenArtist(a.name) }
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ArtImage(path = art, size = 48.dp, shape = CircleShape)
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(a.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            faixas(a.trackCount),
-                            fontSize = 13.sp,
-                            color = Color.White.copy(0.6f)
-                        )
+                StaggeredSearchItem(index = index, staggerMs = staggerMs) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenArtist(a.name) }
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ArtImage(path = art, size = 48.dp, shape = CircleShape)
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text(a.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                faixas(a.trackCount),
+                                fontSize = 13.sp,
+                                color = Color.White.copy(0.6f)
+                            )
+                        }
                     }
                 }
             }
         }
-        if (albums.isNotEmpty()) {
+        if (albumsLimited.isNotEmpty()) {
             item {
                 Text(
                     "Álbuns",
@@ -2256,29 +2572,31 @@ private fun SearchResultsPanel(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                 )
             }
-            items(albums.take(20)) { al ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenAlbum("album-key::${al.key}") }
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ArtImage(path = al.artPath, size = 48.dp, shape = RoundedCornerShape(10.dp))
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(al.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "${al.artist} · ${faixas(al.trackCount)}",
-                            fontSize = 13.sp,
-                            color = Color.White.copy(0.6f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+            itemsIndexed(albumsLimited) { index, al ->
+                StaggeredSearchItem(index = artistsLimited.size + index, staggerMs = staggerMs) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenAlbum("album-key::${al.key}") }
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ArtImage(path = al.artPath, size = 48.dp, shape = RoundedCornerShape(10.dp))
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text(al.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "${al.artist} · ${faixas(al.trackCount)}",
+                                fontSize = 13.sp,
+                                color = Color.White.copy(0.6f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
         }
-        if (genres.isNotEmpty()) {
+        if (genresLimited.isNotEmpty()) {
             item {
                 Text(
                     "Gêneros",
@@ -2288,22 +2606,24 @@ private fun SearchResultsPanel(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                 )
             }
-            items(genres.take(20)) { g ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenGenre(g.name) }
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ArtImage(path = g.artPath, size = 48.dp, shape = RoundedCornerShape(10.dp))
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(g.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            faixas(g.trackCount),
-                            fontSize = 13.sp,
-                            color = Color.White.copy(0.6f)
-                        )
+            itemsIndexed(genresLimited) { index, g ->
+                StaggeredSearchItem(index = artistsLimited.size + albumsLimited.size + index, staggerMs = staggerMs) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenGenre(g.name) }
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ArtImage(path = g.artPath, size = 48.dp, shape = RoundedCornerShape(10.dp))
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text(g.name, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                faixas(g.trackCount),
+                                fontSize = 13.sp,
+                                color = Color.White.copy(0.6f)
+                            )
+                        }
                     }
                 }
             }
@@ -2319,56 +2639,59 @@ private fun SearchResultsPanel(
                 )
             }
             itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
+                val itemIndex = artistsLimited.size + albumsLimited.size + genresLimited.size + index
                 val active = track.id == nowPlayingId
                 val selected = track.id in selectedIds
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
-                        .combinedClickable(
-                            onClick = { onTrackClick(index, track) },
-                            onLongClick = { onTrackLongClick(track) }
-                        )
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (selectionMode) {
-                        Box(
-                            Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (selected) {
-                                Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                StaggeredSearchItem(index = itemIndex, staggerMs = staggerMs) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+                            .combinedClickable(
+                                onClick = { onTrackClick(index, track) },
+                                onLongClick = { onTrackLongClick(track) }
+                            )
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (selectionMode) {
+                            Box(
+                                Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (selected) {
+                                    Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                }
                             }
+                            Spacer(Modifier.width(12.dp))
                         }
-                        Spacer(Modifier.width(12.dp))
-                    }
-                    ArtImage(path = track.artPath, size = 48.dp)
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                        ArtImage(path = track.artPath, size = 48.dp)
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text(
+                                track.title,
+                                fontSize = 16.sp,
+                                color = if (active) MaterialTheme.colorScheme.primary else Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${track.artist} · ${track.album}",
+                                fontSize = 13.sp,
+                                color = Color.White.copy(alpha = 0.6f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Text(
-                            track.title,
-                            fontSize = 16.sp,
-                            color = if (active) MaterialTheme.colorScheme.primary else Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            "${track.artist} · ${track.album}",
+                            formatDuration(track.duration),
                             fontSize = 13.sp,
                             color = Color.White.copy(alpha = 0.6f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            modifier = Modifier.padding(start = 12.dp)
                         )
                     }
-                    Text(
-                        formatDuration(track.duration),
-                        fontSize = 13.sp,
-                        color = Color.White.copy(alpha = 0.6f),
-                        modifier = Modifier.padding(start = 12.dp)
-                    )
                 }
             }
         }
@@ -2421,6 +2744,14 @@ internal fun SearchHeader(
 private fun GroupList(items: List<GroupItem>, bottomPadding: Dp, onClick: (String) -> Unit) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val firstLetterOrder = LocalFirstLetterOrder.current
+    var draggedLetter by remember { mutableStateOf<Char?>(null) }
+    val currentLetter by remember(items, listState, firstLetterOrder) {
+        androidx.compose.runtime.derivedStateOf {
+            items.getOrNull(listState.firstVisibleItemIndex)?.title
+                ?.let { AlphaSort.indexLetter(it, 0, firstLetterOrder) }
+        }
+    }
     val scrollerLabels = remember(items) { items.map { it.title } }
     // Só esta lista recompõe quando uma foto de artista muda (não a tela inteira)
     val photoVersion = ArtistMetaStore.photoVersion.collectAsStateWithLifecycle().value
@@ -2430,7 +2761,9 @@ private fun GroupList(items: List<GroupItem>, bottomPadding: Dp, onClick: (Strin
             contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding, end = 20.dp)
         ) {
             items(items, key = { it.key }, contentType = { "group" }) { item ->
-                GroupRow(item, photoVersion, onClick)
+                val dimmed = draggedLetter != null &&
+                    AlphaSort.indexLetter(item.title, 0, firstLetterOrder) != draggedLetter
+                GroupRow(item, photoVersion, onClick, dimmed)
             }
         }
         AlphabetScrollerSlot(
@@ -2441,19 +2774,27 @@ private fun GroupList(items: List<GroupItem>, bottomPadding: Dp, onClick: (Strin
                 .padding(top = 12.dp, bottom = AlphabetScrollerBottomGap, end = 2.dp),
             onScrollTo = { idx ->
                 scope.launch { listState.scrollToItem(idx.coerceIn(0, items.lastIndex.coerceAtLeast(0))) }
-            }
+            },
+            currentLetter = currentLetter,
+            onActiveLetterChange = { draggedLetter = it }
         )
     }
 }
 
 @Composable
-private fun GroupRow(item: GroupItem, photoVersion: Int, onClick: (String) -> Unit) {
+private fun GroupRow(item: GroupItem, photoVersion: Int, onClick: (String) -> Unit, dimmed: Boolean = false) {
+    val rowAlpha by animateFloatAsState(
+        targetValue = if (dimmed) 0.30f else 1f,
+        animationSpec = tween(140),
+        label = "alphabetDim"
+    )
     val art = remember(item.photoName, item.artPath, photoVersion) {
         item.photoName?.let { ArtistMetaStore.cachedPhotoPath(it) } ?: item.artPath
     }
     Row(
         Modifier
             .fillMaxWidth()
+            .graphicsLayer { alpha = rowAlpha }
             .clickable { onClick(item.key) }
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -2563,6 +2904,316 @@ private val TongueGlassFill = Brush.horizontalGradient(
 )
 
 /**
+ * Barrinha na cor dominante + letras discretas; arrastar/tocar rola a lista.
+ * Bolha da letra ativa ao lado do dedo.
+ */
+@Composable
+private fun ClassicAlphabetScroller(
+    index: AlphaIndex,
+    modifier: Modifier = Modifier,
+    onScrollTo: (Int) -> Unit
+) {
+    val present = remember(index) {
+        AlphabetLetters.filter { it in index.letters }
+    }
+    if (present.isEmpty()) return
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val accent = LocalAppColors.current.accent
+    // Garante contraste: se o accent for muito escuro, usa branco
+    val barColor = remember(accent) {
+        val l = 0.2126f * accent.red + 0.7152f * accent.green + 0.0722f * accent.blue
+        if (l < 0.35f) Color.White.copy(0.85f) else accent
+    }
+    var active by remember { mutableStateOf<Char?>(null) }
+    var trackH by remember { mutableFloatStateOf(1f) }
+    var fingerY by remember { mutableFloatStateOf(0f) }
+
+    fun select(y: Float) {
+        fingerY = y
+        val h = trackH.coerceAtLeast(1f)
+        val frac = (y / h).coerceIn(0f, 0.9999f)
+        val i = (frac * present.size).toInt().coerceIn(0, present.lastIndex)
+        val letter = present[i]
+        if (letter != active) {
+            active = letter
+            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+            index.letters[letter]?.let(onScrollTo)
+        }
+    }
+
+    Box(
+        modifier
+            .width(28.dp)
+            .fillMaxHeight()
+            .padding(vertical = 6.dp)
+            .onGloballyPositioned { trackH = it.size.height.toFloat() }
+            .pointerInput(present) {
+                detectTapGestures { offset -> select(offset.y) }
+            }
+            .pointerInput(present) {
+                detectVerticalDragGestures(
+                    onDragStart = { offset -> select(offset.y) },
+                    onVerticalDrag = { change, _ ->
+                        change.consume()
+                        select(change.position.y)
+                    },
+                    onDragEnd = { active = null },
+                    onDragCancel = { active = null }
+                )
+            }
+    ) {
+        // Barrinha vertical (sempre visível)
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .width(5.dp)
+                .fillMaxHeight()
+                .padding(end = 2.dp)
+                .clip(RoundedCornerShape(50))
+                .background(barColor.copy(alpha = if (active != null) 1f else 0.75f))
+        )
+        // Letras discretas à esquerda da barrinha
+        Column(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .padding(end = 10.dp),
+            verticalArrangement = Arrangement.SpaceEvenly,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            present.forEach { letter ->
+                val isActive = letter == active
+                Text(
+                    text = letter.toString(),
+                    color = if (isActive) barColor else Color.White.copy(0.55f),
+                    fontSize = if (isActive) 11.sp else 9.sp,
+                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1
+                )
+            }
+        }
+        val letter = active
+        if (letter != null && trackH > 1f) {
+            val bubbleY = (fingerY - 16f).coerceIn(0f, (trackH - 32f).coerceAtLeast(0f))
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .offset { androidx.compose.ui.unit.IntOffset(0, bubbleY.toInt()) }
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(barColor)
+                    .padding(2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = letter.toString(),
+                    color = Color.Black,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Estilo Slim: barra fina na borda direita (trilho discreto + alça na cor do tema). Ao arrastar,
+ * a alça engrossa e um balão com a letra aparece à esquerda, com o canto inferior direito reto
+ * apontando para a alça. Só a faixa estreita da borda recebe toque; o resto da área reservada
+ * deixa os gestos passarem para a lista.
+ */
+@Composable
+private fun SlimAlphabetScroller(
+    index: AlphaIndex,
+    modifier: Modifier = Modifier,
+    currentLetter: Char? = null,
+    onActiveLetterChange: (Char?) -> Unit = {},
+    onScrollTo: (Int) -> Unit
+) {
+    val present = remember(index) { AlphabetLetters.filter { it in index.letters } }
+    if (present.isEmpty()) return
+    val density = LocalDensity.current
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val accent = LocalAppColors.current.accent
+    val barColor = remember(accent) {
+        val l = 0.2126f * accent.red + 0.7152f * accent.green + 0.0722f * accent.blue
+        if (l < 0.35f) Color.White.copy(0.9f) else accent
+    }
+    val onBar = remember(barColor) {
+        val l = 0.2126f * barColor.red + 0.7152f * barColor.green + 0.0722f * barColor.blue
+        if (l > 0.55f) Color.Black else Color.White
+    }
+    var dragging by remember { mutableStateOf(false) }
+    var active by remember { mutableStateOf<Char?>(null) }
+    var shownLetter by remember { mutableStateOf('A') }
+    var trackH by remember { mutableFloatStateOf(1f) }
+    var fingerY by remember { mutableFloatStateOf(0f) }
+    val restFrac = remember(currentLetter, present) {
+        val target = currentLetter?.let { AlphabetLetters.indexOf(it) } ?: 0
+        val nearest = present.indices.minByOrNull { i ->
+            kotlin.math.abs(AlphabetLetters.indexOf(present[i]) - target)
+        } ?: 0
+        if (present.size <= 1) 0f else nearest.toFloat() / (present.lastIndex)
+    }
+    val syncedRestFrac by animateFloatAsState(
+        targetValue = restFrac,
+        animationSpec = tween(180),
+        label = "slimScrollSync"
+    )
+
+    DisposableEffect(Unit) {
+        onDispose { IndexScrollerDrag.active = false }
+    }
+
+    val bubbleAnim by animateFloatAsState(
+        if (dragging && active != null) 1f else 0f,
+        androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 520f),
+        label = "slimBubble"
+    )
+    val thumbGrow by animateFloatAsState(
+        if (dragging) 1f else 0f,
+        tween(120),
+        label = "slimThumb"
+    )
+    val thumbHeight by animateDpAsState(
+        if (dragging) 52.dp else 34.dp,
+        tween(120),
+        label = "slimThumbHeight"
+    )
+
+    val bubbleSize = 54.dp
+    val bubblePx = with(density) { bubbleSize.toPx() }
+    val vPadPx = with(density) { 6.dp.toPx() }
+
+    fun select(y: Float) {
+        val h = trackH.coerceAtLeast(1f)
+        fingerY = y.coerceIn(0f, h)
+        val frac = (y / h).coerceIn(0f, 0.9999f)
+        val letter = present[(frac * present.size).toInt().coerceIn(0, present.lastIndex)]
+        if (letter != active) {
+            active = letter
+            shownLetter = letter
+            onActiveLetterChange(letter)
+            haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+            index.letters[letter]?.let(onScrollTo)
+        }
+    }
+
+    Box(modifier) {
+        val currentThumbHPx = with(density) { thumbHeight.toPx() }
+        val centerY = if (dragging) fingerY else syncedRestFrac * trackH
+        val thumbTop = (centerY - currentThumbHPx / 2f).coerceIn(0f, (trackH - currentThumbHPx).coerceAtLeast(0f))
+
+        // Faixa de toque estreita, colada na borda
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .width(28.dp)
+                .fillMaxHeight()
+                .padding(vertical = 6.dp)
+                .onSizeChanged { trackH = it.height.toFloat() }
+                .pointerInput(present) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        dragging = true
+                        IndexScrollerDrag.active = true
+                        active = null
+                        onActiveLetterChange(null)
+                        select(down.position.y)
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                change.consume()
+                                select(change.position.y)
+                            }
+                        } finally {
+                            dragging = false
+                            IndexScrollerDrag.active = false
+                            active = null
+                            onActiveLetterChange(null)
+                        }
+                    }
+                }
+        ) {
+            // Trilho discreto
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 4.dp)
+                    .width(2.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.04f),
+                                barColor.copy(alpha = if (dragging) 0.26f else 0.13f),
+                                Color.White.copy(alpha = 0.04f)
+                            )
+                        )
+                    )
+            )
+            // Alça
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = 3.dp)
+                    .offset { androidx.compose.ui.unit.IntOffset(0, thumbTop.toInt()) }
+                    .width((3f + 3f * thumbGrow).dp)
+                    .height(thumbHeight)
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(barColor.copy(alpha = if (dragging) 0.72f else 0.52f), barColor)
+                        )
+                    )
+            )
+        }
+
+        // Balão da letra: canto inferior direito reto, apontando para a alça
+        if (bubbleAnim > 0.01f) {
+            val bubbleTop = (centerY - bubblePx + with(density) { 12.dp.toPx() })
+                .coerceIn(0f, (trackH - bubblePx).coerceAtLeast(0f)) + vPadPx
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            -(bubbleSize + 16.dp).roundToPx(),
+                            bubbleTop.toInt()
+                        )
+                    }
+                    .graphicsLayer {
+                        alpha = bubbleAnim.coerceIn(0f, 1f)
+                        scaleX = 0.6f + 0.4f * bubbleAnim
+                        scaleY = 0.6f + 0.4f * bubbleAnim
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(1f, 1f)
+                    }
+                    .size(bubbleSize)
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 27.dp, topEnd = 27.dp,
+                            bottomStart = 27.dp, bottomEnd = 4.dp
+                        )
+                    )
+                    .background(barColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = shownLetter.toString(),
+                    color = onBar,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+/**
  * Índice alfabético lateral em vidro.
  * - Arraste para cima/baixo: uma "língua" de vidro sai de dentro do trilho, colada nele, com a letra.
  * - Ainda arrastando, deslize para a ESQUERDA: abre um mini trilho com os prefixos da letra (DA, DB…).
@@ -2576,10 +3227,31 @@ private fun AlphabetFastScroller(
     modifier: Modifier = Modifier,
     backdrop: GraphicsLayer? = null,
     firstLetterOrder: Boolean = false,
+    currentLetter: Char? = null,
+    onActiveLetterChange: (Char?) -> Unit = {},
     onScrollTo: (Int) -> Unit
 ) {
     val index = remember(labels, firstLetterOrder) { buildAlphaIndex(labels, firstLetterOrder) }
     if (index.isEmpty) return
+    val scrollerStyle = LocalAlphabetScrollerStyle.current
+    if (scrollerStyle == MusicViewModel.AlphabetScrollerStyle.CLASSIC) {
+        ClassicAlphabetScroller(
+            index = index,
+            modifier = modifier,
+            onScrollTo = onScrollTo
+        )
+        return
+    }
+    if (scrollerStyle == MusicViewModel.AlphabetScrollerStyle.SLIM) {
+        SlimAlphabetScroller(
+            index = index,
+            modifier = modifier,
+            currentLetter = currentLetter,
+            onActiveLetterChange = onActiveLetterChange,
+            onScrollTo = onScrollTo
+        )
+        return
+    }
     val density = LocalDensity.current
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
 
@@ -2933,6 +3605,8 @@ private class TongueShape(private val flare: Dp) : androidx.compose.ui.graphics.
 internal class ScrollerEntry {
     var labels by mutableStateOf<List<String>>(emptyList())
     var onScrollTo by mutableStateOf<(Int) -> Unit>({})
+    var onActiveLetterChange by mutableStateOf<(Char?) -> Unit>({})
+    var currentLetter by mutableStateOf<Char?>(null)
     var bounds by mutableStateOf(androidx.compose.ui.geometry.Rect.Zero)
     /** Opção "ordem alfabética pela primeira letra" (Configurações › Biblioteca). */
     var firstLetterOrder by mutableStateOf(false)
@@ -2953,7 +3627,9 @@ internal val LocalScrollerHost = androidx.compose.runtime.compositionLocalOf<Scr
 private fun AlphabetScrollerSlot(
     labels: List<String>,
     modifier: Modifier,
-    onScrollTo: (Int) -> Unit
+    onScrollTo: (Int) -> Unit,
+    currentLetter: Char? = null,
+    onActiveLetterChange: (Char?) -> Unit = {}
 ) {
     val firstLetterOrder = LocalFirstLetterOrder.current
     val host = LocalScrollerHost.current
@@ -2962,6 +3638,8 @@ private fun AlphabetScrollerSlot(
             labels = labels,
             modifier = modifier,
             firstLetterOrder = firstLetterOrder,
+            currentLetter = currentLetter,
+            onActiveLetterChange = onActiveLetterChange,
             onScrollTo = onScrollTo
         )
         return
@@ -2970,6 +3648,8 @@ private fun AlphabetScrollerSlot(
     SideEffect {
         entry.labels = labels
         entry.onScrollTo = onScrollTo
+        entry.onActiveLetterChange = onActiveLetterChange
+        entry.currentLetter = currentLetter
         entry.firstLetterOrder = firstLetterOrder
     }
     DisposableEffect(host, entry) {
@@ -3017,6 +3697,8 @@ internal fun BoxScope.ScrollerOverlay(host: ScrollerOverlayHost, backdrop: Graph
                         modifier = Modifier.fillMaxSize(),
                         backdrop = backdrop,
                         firstLetterOrder = entry.firstLetterOrder,
+                        currentLetter = entry.currentLetter,
+                        onActiveLetterChange = entry.onActiveLetterChange,
                         onScrollTo = { entry.onScrollTo(it) }
                     )
                 }
@@ -3270,10 +3952,20 @@ private fun TrackList(
     selectionMode: Boolean = false,
     onClick: (Int, Track) -> Unit,
     onLongClick: (Track) -> Unit,
-    showAlphabetScroller: Boolean = true
+    showAlphabetScroller: Boolean = true,
+    staggerAppear: Boolean = false,
+    staggerMs: Int = 50
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val firstLetterOrder = LocalFirstLetterOrder.current
+    var draggedLetter by remember { mutableStateOf<Char?>(null) }
+    val currentLetter by remember(tracks, listState, firstLetterOrder) {
+        androidx.compose.runtime.derivedStateOf {
+            tracks.getOrNull(listState.firstVisibleItemIndex)?.title
+                ?.let { AlphaSort.indexLetter(it, 0, firstLetterOrder) }
+        }
+    }
     val scrollerLabels = remember(tracks, showAlphabetScroller) {
         if (showAlphabetScroller) tracks.map { it.title } else emptyList()
     }
@@ -3285,61 +3977,31 @@ private fun TrackList(
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             val active = track.id == nowPlayingId
             val selected = track.id in selectedIds
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
-                    .combinedClickable(
+            val dimmed = draggedLetter != null &&
+                AlphaSort.indexLetter(track.title, 0, firstLetterOrder) != draggedLetter
+            if (staggerAppear) {
+                StaggeredSearchItem(index = index, staggerMs = staggerMs) {
+                    TrackListRow(
+                        track = track,
+                        active = active,
+                        selected = selected,
+                        selectionMode = selectionMode,
+                        showTrackNumbers = showTrackNumbers,
+                        dimmed = dimmed,
                         onClick = { onClick(index, track) },
                         onLongClick = { onLongClick(track) }
                     )
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (selectionMode) {
-                    Box(
-                        Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (selected) {
-                            Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                        }
-                    }
-                    Spacer(Modifier.width(12.dp))
-                } else if (showTrackNumbers) {
-                    Text(
-                        track.trackNumber?.toString() ?: "–",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White.copy(0.7f),
-                        modifier = Modifier.width(28.dp)
-                    )
                 }
-                ArtImage(path = track.artPath, size = 48.dp)
-                Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                    Text(
-                        track.title,
-                        fontSize = 16.sp,
-                        color = if (active) MaterialTheme.colorScheme.primary else Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        "${track.artist} · ${track.album}",
-                        fontSize = 13.sp,
-                        color = Color.White.copy(alpha = 0.6f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Text(
-                    formatDuration(track.duration),
-                    fontSize = 13.sp,
-                    color = Color.White.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(start = 12.dp)
+            } else {
+                TrackListRow(
+                    track = track,
+                    active = active,
+                    selected = selected,
+                    selectionMode = selectionMode,
+                    showTrackNumbers = showTrackNumbers,
+                    dimmed = dimmed,
+                    onClick = { onClick(index, track) },
+                    onLongClick = { onLongClick(track) }
                 )
             }
         }
@@ -3353,10 +4015,113 @@ private fun TrackList(
                 .padding(top = 12.dp, bottom = AlphabetScrollerBottomGap, end = 2.dp),
             onScrollTo = { idx ->
                 scope.launch { listState.scrollToItem(idx.coerceIn(0, tracks.lastIndex.coerceAtLeast(0))) }
-            }
+            },
+            currentLetter = currentLetter,
+            onActiveLetterChange = { draggedLetter = it }
         )
     }
     } // Box
+}
+
+@Composable
+private fun StaggeredSearchItem(
+    index: Int,
+    staggerMs: Int = 50,
+    content: @Composable () -> Unit
+) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(staggerMs) {
+        if (staggerMs <= 0) {
+            visible = true
+        } else {
+            delay(index * staggerMs.toLong())
+            visible = true
+        }
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(220)) + slideInVertically(tween(280, easing = FastOutSlowInEasing)) { it / 5 },
+        exit = fadeOut(tween(120))
+    ) {
+        content()
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun TrackListRow(
+    track: Track,
+    active: Boolean,
+    selected: Boolean,
+    selectionMode: Boolean,
+    showTrackNumbers: Boolean,
+    dimmed: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    val rowAlpha by animateFloatAsState(
+        targetValue = if (dimmed) 0.30f else 1f,
+        animationSpec = tween(140),
+        label = "alphabetDim"
+    )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .graphicsLayer { alpha = rowAlpha }
+            .background(if (selected) Color.White.copy(alpha = 0.12f) else Color.Transparent)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (selectionMode) {
+            Box(
+                Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(0.2f)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (selected) {
+                    Text("✓", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+        } else if (showTrackNumbers) {
+            Text(
+                track.trackNumber?.toString() ?: "–",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.7f),
+                modifier = Modifier.width(28.dp)
+            )
+        }
+        ArtImage(path = track.artPath, size = 48.dp)
+        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+            Text(
+                track.title,
+                fontSize = 16.sp,
+                color = if (active) MaterialTheme.colorScheme.primary else Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                "${track.artist} · ${track.album}",
+                fontSize = 13.sp,
+                color = Color.White.copy(alpha = 0.6f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            formatDuration(track.duration),
+            fontSize = 13.sp,
+            color = Color.White.copy(alpha = 0.6f),
+            modifier = Modifier.padding(start = 12.dp)
+        )
+    }
 }
 
 @Composable
@@ -3677,7 +4442,8 @@ private data class ArtistAlbumItem(
 @Composable
 private fun AlbumWikiInfoSection(
     albumName: String,
-    artistName: String?
+    artistName: String?,
+    artistAutoFetchMode: String
 ) {
     val context = LocalContext.current
     val prefs = remember {
@@ -3696,25 +4462,30 @@ private fun AlbumWikiInfoSection(
 
     var lastFmSummary by remember { mutableStateOf<String?>(null) }
     var savedAlbum by remember(albumName, artistName) { mutableStateOf<ArtistMetaStore.Meta?>(null) }
-    LaunchedEffect(albumName, artistName) {
+    LaunchedEffect(albumName, artistName, artistAutoFetchMode) {
         loadingWiki = true
         val albumMetaKey = ArtistMetaStore.albumKey(albumName, artistName)
         savedAlbum = withContext(Dispatchers.IO) { ArtistMetaStore.load(context, albumMetaKey) }
-        wikiInfo = withContext(Dispatchers.IO) {
-            com.tolete.player.data.WikidataClient.searchAlbum(albumName, artistName)
-        }
-        val txt = wikiInfo?.extract ?: wikiInfo?.description
-        if (txt.isNullOrBlank()) {
-            val lfm = withContext(Dispatchers.IO) { LastFmClient.getAlbumInfo(albumName, artistName) }
-            lastFmSummary = lfm?.summary
-            if (!lfm?.summary.isNullOrBlank() && manualInfo.isNullOrBlank()) {
-                withContext(Dispatchers.IO) {
-                    ArtistMetaStore.saveText(context, albumMetaKey, lfm?.summary, "lastfm")
-                }
+        val hasCachedText = !savedAlbum?.text.isNullOrBlank() || !manualInfo.isNullOrBlank()
+        if (!hasCachedText && artistAutoFetchMode != "OFF" &&
+            com.tolete.player.data.ArtistImageResolver.isAutomaticLookupAllowed()
+        ) {
+            wikiInfo = withContext(Dispatchers.IO) {
+                com.tolete.player.data.WikidataClient.searchAlbum(albumName, artistName)
             }
-        } else if (manualInfo.isNullOrBlank()) {
-            withContext(Dispatchers.IO) {
-                ArtistMetaStore.saveText(context, albumMetaKey, txt, "wikidata")
+            val txt = wikiInfo?.extract ?: wikiInfo?.description
+            if (txt.isNullOrBlank()) {
+                val lfm = withContext(Dispatchers.IO) { LastFmClient.getAlbumInfo(albumName, artistName) }
+                lastFmSummary = lfm?.summary
+                if (!lfm?.summary.isNullOrBlank() && manualInfo.isNullOrBlank()) {
+                    withContext(Dispatchers.IO) {
+                        ArtistMetaStore.saveText(context, albumMetaKey, lfm?.summary, "lastfm")
+                    }
+                }
+            } else if (manualInfo.isNullOrBlank()) {
+                withContext(Dispatchers.IO) {
+                    ArtistMetaStore.saveText(context, albumMetaKey, txt, "wikidata")
+                }
             }
         }
         loadingWiki = false
@@ -3806,6 +4577,7 @@ private fun ArtistDetailScreen(
     bottomPadding: Dp,
     nowPlayingId: String? = null,
     accent: Color = Color.White,
+    artistAutoFetchMode: String = "ON",
     selectedIds: Set<String> = emptySet(),
     selectionMode: Boolean = false,
     onOpenAlbum: (String) -> Unit,
@@ -3872,7 +4644,8 @@ private fun ArtistDetailScreen(
         if (trackSortAsc) base else base.reversed()
     }
     var mbYears by remember(artistName) { mutableStateOf<Map<String, Int>>(emptyMap()) }
-    LaunchedEffect(artistName, albums) {
+    LaunchedEffect(artistName, albums, artistAutoFetchMode) {
+        if (!com.tolete.player.data.ArtistImageResolver.isAutomaticLookupAllowed()) return@LaunchedEffect
         // Limita a 4 álbuns e busca em paralelo para não travar a UI do artista
         val missing = albums.filter { it.year == null }.map { it.name }.distinct().take(4)
         if (missing.isEmpty()) return@LaunchedEffect
@@ -3966,9 +4739,9 @@ private fun ArtistDetailScreen(
     }
 
     val displayInfo = savedMeta?.text ?: remoteText
+    val canFetchArtistData = com.tolete.player.data.ArtistImageResolver.isAutomaticLookupAllowed()
     val photoModel: Any? = savedMeta?.localImagePath?.let { File(it) }
-        ?: savedMeta?.imageUrl
-        ?: remoteImage
+        ?: if (canFetchArtistData) savedMeta?.imageUrl ?: remoteImage else null
 
     var refreshing by remember { mutableStateOf(false) }
     val pullState = rememberPullToRefreshState()
@@ -4066,6 +4839,7 @@ private fun ArtistDetailScreen(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        val accentPlay = LocalAppColors.current.accent
                         Button(
                             onClick = {
                                 if (onPlayTracks != null) onPlayTracks.invoke(sortedArtistTracks, 0)
@@ -4074,7 +4848,7 @@ private fun ArtistDetailScreen(
                             modifier = Modifier.weight(1f).height(48.dp),
                             shape = RoundedCornerShape(50),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color.White,
+                                containerColor = accentPlay,
                                 contentColor = Color.Black
                             )
                         ) {
@@ -4398,7 +5172,7 @@ private fun ArtistDetailScreen(
                 context.getSharedPreferences("wikidata_overrides", Context.MODE_PRIVATE)
                     .edit().remove("artist_info_$artistName").apply()
             } catch (_: Exception) {}
-            val r = com.tolete.player.data.ArtistImageResolver.resolve(artistName)
+            val r = com.tolete.player.data.ArtistImageResolver.resolve(artistName, force = true)
             if (!r.imageUrl.isNullOrBlank()) {
                 ArtistMetaStore.saveRemoteImage(context, metaKey, r.imageUrl, r.source)
             }
@@ -4681,11 +5455,15 @@ private fun PlaylistTracksScreen(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    val accentPlayAlbum = LocalAppColors.current.accent
                     Button(
                         onClick = onPlayAll,
                         modifier = Modifier.weight(1f).height(44.dp),
                         shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = accentPlayAlbum,
+                            contentColor = Color.Black
+                        )
                     ) {
                         Icon(Icons.Rounded.PlayArrow, null, Modifier.size(20.dp))
                         Spacer(Modifier.width(4.dp))
@@ -4829,6 +5607,7 @@ private fun AlbumDetailScreen(
     nowPlayingId: String?,
     bottomPadding: Dp,
     accent: Color,
+    artistAutoFetchMode: String = "ON",
     selectedIds: Set<String>,
     selectionMode: Boolean,
     onPlayAll: () -> Unit,
@@ -4947,19 +5726,21 @@ private fun AlbumDetailScreen(
                 // Info do álbum via Wikidata (editável)
                 AlbumWikiInfoSection(
                     albumName = albumName,
-                    artistName = artists.firstOrNull()
+                    artistName = artists.firstOrNull(),
+                    artistAutoFetchMode = artistAutoFetchMode
                 )
                 Spacer(Modifier.height(12.dp))
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    val accentPlayAlbumDetail = LocalAppColors.current.accent
                     Button(
                         onClick = onPlayAll,
                         modifier = Modifier.weight(1f).height(48.dp),
                         shape = RoundedCornerShape(50),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color.White,
+                            containerColor = accentPlayAlbumDetail,
                             contentColor = Color.Black
                         )
                     ) {
@@ -5185,6 +5966,8 @@ fun applyRenamePattern(pattern: String, track: Track): String {
 @Composable
 internal fun BatchRenameDialog(
     tracks: List<Track>,
+    totalCount: Int = tracks.size,
+    isLoading: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit
 ) {
@@ -5195,9 +5978,12 @@ internal fun BatchRenameDialog(
 
     AppAlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Renomear por tags (${tracks.size})") },
+        title = { Text("Renomear por tags ($totalCount)") },
         text = {
             Column {
+                if (isLoading) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
                 patterns.forEach { p ->
                     Row(
                         Modifier
@@ -5246,7 +6032,7 @@ internal fun BatchRenameDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(selected) }) { Text("Renomear") }
+            TextButton(enabled = !isLoading, onClick = { onConfirm(selected) }) { Text("Renomear") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancelar") }
@@ -5802,7 +6588,8 @@ private fun HomeLiquidGlassButton(
 
 @Composable
 internal fun FloatingIconsBackground(kind: String) {
-    val baseIcons = when (kind) {
+    val baseIcons = remember(kind) {
+        when (kind) {
         "inicio" -> listOf(
             R.drawable.ic_float_inicio_1,
             R.drawable.ic_float_inicio_2,
@@ -5843,6 +6630,12 @@ internal fun FloatingIconsBackground(kind: String) {
             R.drawable.ic_float_files_2,
             R.drawable.ic_float_files_3
         )
+        // Gerenciador de espaço (ManageSpaceActivity / limpeza de dados)
+        "managespace" -> listOf(
+            R.drawable.ic_float_managespace_1,
+            R.drawable.ic_float_managespace_2,
+            R.drawable.ic_float_managespace_3
+        )
         "help" -> listOf(
             R.drawable.ic_float_help_1,
             R.drawable.ic_float_help_2,
@@ -5853,7 +6646,8 @@ internal fun FloatingIconsBackground(kind: String) {
             R.drawable.ic_float_lastfm_2,
             R.drawable.ic_float_lastfm_3
         )
-        else -> emptyList()
+            else -> emptyList()
+        }
     }
     if (baseIcons.isEmpty()) return
 

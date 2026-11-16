@@ -31,6 +31,11 @@ import com.tolete.player.ui.TolereApp
 import com.tolete.player.ui.UpdateHost
 import com.tolete.player.ui.ChangelogOnUpdateDialog
 import androidx.compose.foundation.layout.Box
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
@@ -43,8 +48,12 @@ class MainActivity : ComponentActivity() {
     private var showSplash by mutableStateOf(true)
     private var openNowPlayingRequested by mutableStateOf(false)
     private var openNowPlayingTrackId by mutableStateOf<String?>(null)
+    private var openNowPlayingLastFmInfo by mutableStateOf(false)
     /** Toque na notificação do scrobbler: abre o dashboard do Last.fm. */
     private var openLastFmDashboard by mutableStateOf(false)
+    /** Toque na notificação de retrospectiva: diálogo Last.fm vs histórico local. */
+    private var openRetrospectiveChoice by mutableStateOf(false)
+    private var retrospectivePeriod by mutableStateOf<String?>(null)
 
     companion object {
         const val EXTRA_OPEN_NOW_PLAYING = "com.tolete.player.extra.OPEN_NOW_PLAYING"
@@ -101,25 +110,31 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@registerForActivityResult
-        try {
-            val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".m3u")?.removeSuffix(".M3U")
-                ?: "Importada"
-            contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBytes()
-                var text = String(bytes, Charsets.UTF_8)
-                // Listas antigas (Windows) vêm em ISO-8859-1: se o UTF-8 deu caracteres inválidos, relê assim
-                if (text.contains('\uFFFD')) text = String(bytes, Charsets.ISO_8859_1)
+        val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".m3u")?.removeSuffix(".M3U")
+            ?: "Importada"
+        lifecycleScope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) {
+                    val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IllegalStateException("Não foi possível ler o arquivo")
+                    var decoded = String(bytes, Charsets.UTF_8)
+                    // Playlists antigas (Windows) podem estar em ISO-8859-1.
+                    if (decoded.contains('\uFFFD')) decoded = String(bytes, Charsets.ISO_8859_1)
+                    decoded
+                }
                 val r = viewModel.importPlaylistM3u(name, text)
                 val msg = when {
                     r.id != null && r.matched < r.total -> "Playlist importada: ${r.matched} de ${r.total} faixas encontradas"
                     r.id != null -> "Playlist importada (${r.matched} faixas)"
                     r.total == 0 -> "O arquivo não tem faixas"
-                    else -> "Nenhuma das ${r.total} faixas foi encontrada na biblioteca"
+                    else -> "Nenhuma das ${r.total} faixas foi encontrada"
                 }
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Falha ao importar", Toast.LENGTH_SHORT).show()
             }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Falha ao importar", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -271,6 +286,7 @@ class MainActivity : ComponentActivity() {
 
 
     private var pendingDeleteIds: Set<String> = emptySet()
+    private var deleteInProgress = false
 
     private val deleteMediaRequest = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -283,46 +299,70 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Exclusão cancelada", Toast.LENGTH_SHORT).show()
         }
         pendingDeleteIds = emptySet()
+        deleteInProgress = false
     }
 
     /** Apaga permanentemente; no Android 11+ pode abrir diálogo do sistema. */
     private fun requestPermanentDelete(tracks: List<com.tolete.player.data.Track>) {
-        if (tracks.isEmpty()) return
-        val needConfirm = viewModel.deleteTracksPermanent(tracks)
-        if (needConfirm.isEmpty()) {
-            Toast.makeText(this, "Música(s) excluída(s)", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        if (tracks.isEmpty() || deleteInProgress) return
+        deleteInProgress = true
+        lifecycleScope.launch {
+            var awaitingSystemConfirmation = false
             try {
-                pendingDeleteIds = tracks.map { it.id }.toSet()
-                val pi = MediaStore.createDeleteRequest(contentResolver, needConfirm)
-                deleteMediaRequest.launch(
-                    IntentSenderRequest.Builder(pi.intentSender).build()
-                )
+                val needConfirm = withContext(Dispatchers.IO) {
+                    viewModel.deleteTracksPermanent(tracks)
+                }
+                if (needConfirm.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "Música(s) excluída(s)", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    pendingDeleteIds = tracks.map { it.id }.toSet()
+                    val pi = MediaStore.createDeleteRequest(contentResolver, needConfirm)
+                    awaitingSystemConfirmation = true
+                    deleteMediaRequest.launch(
+                        IntentSenderRequest.Builder(pi.intentSender).build()
+                    )
+                } else {
+                    // API < 30: tenta de novo e remove da lib mesmo assim
+                    viewModel.removeTracksFromLibrary(tracks.map { it.id }.toSet())
+                    Toast.makeText(this@MainActivity, "Removido da biblioteca", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Toast.makeText(this, "Não foi possível excluir: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Não foi possível excluir: ${e.message}", Toast.LENGTH_LONG).show()
                 pendingDeleteIds = emptySet()
+                awaitingSystemConfirmation = false
+            } finally {
+                if (!awaitingSystemConfirmation) deleteInProgress = false
             }
-        } else {
-            // API < 30: tenta de novo e remove da lib mesmo assim
-            viewModel.removeTracksFromLibrary(tracks.map { it.id }.toSet())
-            Toast.makeText(this, "Removido da biblioteca", Toast.LENGTH_SHORT).show()
         }
     }
 
 
     private val requestNotifications = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* sem ação */ }
+    ) { granted ->
+        if (granted) {
+            com.tolete.player.scrobble.RetrospectiveReminder.checkAndNotify(this)
+        }
+    }
 
     private val requestReadAudio = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
         val ok = grants.values.any { it }
+        val wasAllFilesRequest = pendingLegacyAllFilesEnable
+        pendingLegacyAllFilesEnable = false
         if (ok) {
-            viewModel.setAllFilesMode(true)
-            Toast.makeText(this, "Permissão concedida — escaneando músicas", Toast.LENGTH_SHORT).show()
+            if (wasAllFilesRequest) {
+                viewModel.setAllFilesMode(true)
+                Toast.makeText(this, "Permissão concedida — escaneando armazenamento", Toast.LENGTH_SHORT).show()
+            } else {
+                viewModel.setMediaStoreMode(true)
+                Toast.makeText(this, "Permissão concedida — lendo o índice de áudio", Toast.LENGTH_SHORT).show()
+            }
         } else {
             Toast.makeText(this, "Permissão negada", Toast.LENGTH_SHORT).show()
         }
@@ -330,6 +370,8 @@ class MainActivity : ComponentActivity() {
 
     /** Após voltar das configurações de "Todos os arquivos". */
     private var pendingAllFilesEnable = false
+    /** Diferencia o READ_EXTERNAL_STORAGE legado solicitado pelo modo amplo do modo MediaStore. */
+    private var pendingLegacyAllFilesEnable = false
 
     override fun onResume() {
         super.onResume()
@@ -340,6 +382,10 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(this, "Acesso total ativado — escaneando músicas", Toast.LENGTH_SHORT).show()
             }
         }
+        // Catch-up: se já passou das 20h no dia alvo e a notificação ainda não saiu, dispara agora.
+        try {
+            com.tolete.player.scrobble.RetrospectiveReminder.checkAndNotify(this)
+        } catch (_: Exception) { }
     }
 
     private fun hasAllFilesAccess(): Boolean {
@@ -349,6 +395,29 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
                 PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    private fun hasMediaAudioAccess(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestMediaStorePermission() {
+        if (hasMediaAudioAccess()) {
+            viewModel.setMediaStoreMode(true)
+            Toast.makeText(this, "Permissão já concedida — lendo o índice de áudio", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val permission = if (Build.VERSION.SDK_INT >= 33) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        requestReadAudio.launch(arrayOf(permission))
     }
 
     private fun requestAllFilesAccess() {
@@ -368,9 +437,8 @@ class MainActivity : ComponentActivity() {
                 pendingAllFilesEnable = true
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
-        } else if (Build.VERSION.SDK_INT >= 33) {
-            requestReadAudio.launch(arrayOf(Manifest.permission.READ_MEDIA_AUDIO))
         } else {
+            pendingLegacyAllFilesEnable = true
             requestReadAudio.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
         }
     }
@@ -397,10 +465,32 @@ class MainActivity : ComponentActivity() {
     private fun handleIncomingIntent(intent: Intent?, recreated: Boolean = false) {
         if (intent == null) return
         val action = intent.action
+        if (action == com.tolete.player.scrobble.RetrospectiveReminder.ACTION_OPEN_RETROSPECTIVE) {
+            if (!recreated) {
+                openRetrospectiveChoice = true
+                retrospectivePeriod = intent.getStringExtra(
+                    com.tolete.player.scrobble.RetrospectiveReminder.EXTRA_PERIOD
+                )
+            }
+            intent.action = null
+            return
+        }
+        if (action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_OPEN_NOW_PLAYING_LASTFM_INFO) {
+            if (!recreated) {
+                openNowPlayingRequested = true
+                openNowPlayingTrackId = intent.getStringExtra(
+                    com.tolete.player.scrobble.ScrobbleNotifier.EXTRA_NOTIFICATION_TRACK_ID
+                )
+                    ?.takeIf { it.isNotBlank() }
+                openNowPlayingLastFmInfo = true
+                showSplash = false
+            }
+            intent.action = null
+            return
+        }
         if (action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_OPEN_LASTFM_DASHBOARD ||
             action == com.tolete.player.scrobble.ScrobbleNotifier.ACTION_SHOW_TRACK_INFO
         ) {
-            // Activity recriada (girar a tela etc.) não reabre o dashboard.
             if (!recreated) openLastFmDashboard = true
             intent.action = null
             return
@@ -447,6 +537,8 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         com.tolete.player.data.LyronStorage.init(this)
+        com.tolete.player.data.ArtistImageResolver.initialize(this)
+        com.tolete.player.data.LastFmClient.initialize(this)
         consumeOpenNowPlayingRequest(intent)
         handleIncomingIntent(intent, recreated = savedInstanceState != null)
 
@@ -456,6 +548,9 @@ class MainActivity : ComponentActivity() {
         ) {
             requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        try {
+            com.tolete.player.scrobble.RetrospectiveReminder.checkAndNotify(this)
+        } catch (_: Exception) { }
 
         // Preferência de splash lida antes do primeiro frame (evita side-effect na composição)
         if (!getSharedPreferences("tolete", MODE_PRIVATE).getBoolean("splash_enabled", true)) {
@@ -465,7 +560,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Box {
-                // ViewModel já inicia o carregamento da biblioteca no init (em paralelo à splash)
+                // A splash permanece visualmente intacta; o ViewModel é aquecido após o primeiro frame.
                 if (showSplash) {
                     val splashSound = remember {
                         getSharedPreferences("tolete", MODE_PRIVATE)
@@ -497,6 +592,7 @@ class MainActivity : ComponentActivity() {
                         onPickMilkFiles = { pickMilkFiles.launch(arrayOf("*/*")) },
                         onDeleteTracks = { tracks -> requestPermanentDelete(tracks) },
                         onRequestAllFilesPermission = { requestAllFilesAccess() },
+                        onRequestMediaStorePermission = { requestMediaStorePermission() },
                         onExportBackup = { opts ->
                             viewModel.pendingBackupOptions = opts
                             pendingBackupJson = viewModel.exportBackup(opts)
@@ -508,12 +604,20 @@ class MainActivity : ComponentActivity() {
                         },
                         openLastFmDashboard = openLastFmDashboard,
                         onOpenLastFmDashboardConsumed = { openLastFmDashboard = false },
+                        openRetrospectiveChoice = openRetrospectiveChoice,
+                        retrospectivePeriod = retrospectivePeriod,
+                        onRetrospectiveChoiceConsumed = {
+                            openRetrospectiveChoice = false
+                            retrospectivePeriod = null
+                        },
                         openNowPlaying = openNowPlayingRequested,
                         openNowPlayingTrackId = openNowPlayingTrackId,
+                        openNowPlayingLastFmInfo = openNowPlayingLastFmInfo,
                         onOpenNowPlayingConsumed = {
                             openNowPlayingRequested = false
                             openNowPlayingTrackId = null
-                        }
+                        },
+                        onOpenNowPlayingLastFmInfoConsumed = { openNowPlayingLastFmInfo = false }
                     )
                 }
 
@@ -525,5 +629,15 @@ class MainActivity : ComponentActivity() {
                 } // Box
             }
         }
+
+        if (showSplash) {
+            window.decorView.postOnAnimation {
+                if (!isFinishing) prewarmViewModel()
+            }
+        }
+    }
+
+    private fun prewarmViewModel() {
+        viewModel
     }
 }

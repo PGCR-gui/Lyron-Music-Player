@@ -40,7 +40,8 @@ object StorageManager {
         val exports: Item,
         val cacheBytes: Long
     ) {
-        val totalBytes: Long get() = items.sumOf { it.bytes }
+        /** Total mostrado nas duas telas: itens limpáveis + letras exportadas (que "Limpar tudo" preserva). */
+        val totalBytes: Long get() = items.sumOf { it.bytes } + exports.bytes
     }
 
     // Itens que o app cria dentro de LyronStorage.root.

@@ -2,6 +2,10 @@ package com.tolete.player.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.tolete.player.PlaybackService
 import com.tolete.player.data.AudioOutputInfo
 import com.tolete.player.data.LibrarySettings
+import com.tolete.player.data.LyricsEmbedder
 import com.tolete.player.data.OutputSummary
 import com.tolete.player.data.SourceFolder
 import com.tolete.player.ui.MusicViewModel.AppThemeId
@@ -52,6 +57,18 @@ import kotlinx.coroutines.withContext
 internal fun PlayerPage(
     autoFetchLyrics: Boolean,
     onAutoFetchLyricsChange: (Boolean) -> Unit,
+    autoLyricsSaveTarget: LyricsEmbedder.Target = LyricsEmbedder.Target.LRC_FILE,
+    onAutoLyricsSaveTargetChange: (LyricsEmbedder.Target) -> Unit = {},
+    preferNeteaseRomanization: Boolean = false,
+    onPreferNeteaseRomanizationChange: (Boolean) -> Unit = {},
+    lyricsPopupEnabled: Boolean = false,
+    onLyricsPopupEnabledChange: (Boolean) -> Unit = {},
+    searchStaggerMs: Int = 50,
+    onSearchStaggerMsChange: (Int) -> Unit = {},
+    lyricsTypeOrder: List<String> = listOf("WORD", "SYNCED", "PLAIN"),
+    onMoveLyricsType: (Int, Int) -> Unit = { _, _ -> },
+    lyricsSourceOrder: List<String> = listOf("LYRON_REPOSITORY", "LRCLIB", "QQ_MUSIC", "NETEASE", "KUGOU"),
+    onMoveLyricsSource: (Int, Int) -> Unit = { _, _ -> },
     shuffleType: ShuffleType,
     onShuffleTypeChange: (ShuffleType) -> Unit,
     fadeMs: Int = 300,
@@ -64,6 +81,8 @@ internal fun PlayerPage(
     onPlayCountMinutesChange: (Int) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
+    seekBarWaveformTheme: WaveformTheme = WaveformTheme.BARS,
+    onSeekBarWaveformThemeChange: (WaveformTheme) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
     onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
     audioOutput: AudioOutputBackend = AudioOutputBackend.DEFAULT,
@@ -71,6 +90,14 @@ internal fun PlayerPage(
     bitPerfect: Boolean = false,
     onBitPerfectChange: (Boolean) -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val hasOverlayPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+        onLyricsPopupEnabledChange(granted)
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -208,6 +235,155 @@ internal fun PlayerPage(
             Switch(checked = immersiveNowPlaying, onCheckedChange = onImmersiveNowPlayingChange)
         }
 
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Letras em popup sobre outros apps", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Mostra a linha atual da letra durante a reprodução. O Android pedirá permissão de sobreposição.",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(0.55f)
+                )
+            }
+            Switch(
+                checked = lyricsPopupEnabled && hasOverlayPermission,
+                onCheckedChange = { enabled ->
+                    if (!enabled) {
+                        onLyricsPopupEnabledChange(false)
+                    } else if (!hasOverlayPermission) {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        overlayPermissionLauncher.launch(intent)
+                    } else {
+                        onLyricsPopupEnabledChange(true)
+                    }
+                }
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                Text("Busca automática de letras", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Quando não houver letra local, busca online e salva no destino escolhido abaixo. Usa a ordem de tipo e servidor configurada.",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(0.55f)
+                )
+            }
+            Switch(checked = autoFetchLyrics, onCheckedChange = onAutoFetchLyricsChange)
+        }
+
+        if (autoFetchLyrics) {
+            Spacer(Modifier.height(12.dp))
+            Text("Salvar automaticamente em", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            ShuffleTypeOption(
+                title = "Arquivo .lrc ao lado da música",
+                subtitle = "Se a pasta não aceitar escrita, mantém o fallback histórico para as tags do áudio",
+                selected = autoLyricsSaveTarget == LyricsEmbedder.Target.LRC_FILE,
+                onClick = { onAutoLyricsSaveTargetChange(LyricsEmbedder.Target.LRC_FILE) }
+            )
+            Spacer(Modifier.height(6.dp))
+            ShuffleTypeOption(
+                title = "Tags embutidas no arquivo",
+                subtitle = "Grava a letra nas tags do áudio",
+                selected = autoLyricsSaveTarget == LyricsEmbedder.Target.EMBEDDED,
+                onClick = { onAutoLyricsSaveTargetChange(LyricsEmbedder.Target.EMBEDDED) }
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Priorizar romanização no NetEase", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    Text("Na escolha automática, prefere romalrc quando a fonte o disponibiliza. A busca manual continua mostrando as duas variantes.", fontSize = 12.sp, color = Color.White.copy(0.55f))
+                }
+                Switch(
+                    checked = preferNeteaseRomanization,
+                    onCheckedChange = onPreferNeteaseRomanizationChange
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Prioridade do tipo de letra",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.75f)
+            )
+            Text(
+                "O primeiro da lista tem preferência na escolha automática",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.45f),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            PriorityOrderList(
+                items = lyricsTypeOrder,
+                labelOf = {
+                    when (it) {
+                        "WORD" -> "Palavra por palavra"
+                        "SYNCED" -> "Sincronizada"
+                        "PLAIN" -> "Simples"
+                        else -> it
+                    }
+                },
+                onMove = onMoveLyricsType
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Prioridade de servidor",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.75f)
+            )
+            Text(
+                "Ordem de fallback entre fontes online",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.45f),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            PriorityOrderList(
+                items = lyricsSourceOrder,
+                labelOf = {
+                    when (it) {
+                        "LYRON_REPOSITORY" -> "Lyron · GitHub"
+                        "LRCLIB" -> "LRCLIB"
+                        "QQ_MUSIC" -> "QQ Music"
+                        "NETEASE" -> "NetEase"
+                        "KUGOU" -> "KuGou"
+                        else -> it
+                    }
+                },
+                onMove = onMoveLyricsSource
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Text(
+            "Pesquisa",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            "Atraso entre itens nos resultados (${searchStaggerMs} ms)",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Text(
+            "0 = todos juntos · valores maiores = cascata mais lenta",
+            fontSize = 13.sp,
+            color = Color.White.copy(0.55f),
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Slider(
+            value = searchStaggerMs.toFloat(),
+            onValueChange = { onSearchStaggerMsChange(it.toInt()) },
+            valueRange = 0f..150f,
+            steps = 29
+        )
+
         Spacer(Modifier.height(24.dp))
         Text(
             "Barra de progresso (Now Playing)",
@@ -228,7 +404,9 @@ internal fun PlayerPage(
             SeekBarStyle.Wavy to "Wavy — onda senoidal",
             SeekBarStyle.Thick to "Thick — trilha grossa",
             SeekBarStyle.Slim to "Slim — bem fina",
-            SeekBarStyle.Liquid to "Liquid — bolha no progresso"
+            SeekBarStyle.Liquid to "Liquid — bolha no progresso",
+            SeekBarStyle.WavyLiquid to "Wavy Liquid — onda + bolha líquida",
+            SeekBarStyle.Waveform to "Waveform — forma de onda da música"
         )
         seekStyles.forEach { (style, label) ->
             val selected = seekBarStyle == style
@@ -247,6 +425,58 @@ internal fun PlayerPage(
                     onClick = { onSeekBarStyleChange(style) }
                 )
                 Text(label, fontSize = 15.sp, modifier = Modifier.padding(start = 4.dp))
+            }
+        }
+
+        if (seekBarStyle == SeekBarStyle.Waveform) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Desenho da waveform da barra",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(0.55f),
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            Text(
+                "Usa a cor de destaque do tema (exceto Multicolor). A forma de onda de cada música é calculada " +
+                    "uma vez, em segundo plano, e fica guardada para as próximas vezes.",
+                fontSize = 12.sp,
+                color = Color.White.copy(0.45f),
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            val seekWaveAccent = LocalAppColors.current.accent
+            WaveformTheme.values().forEach { option ->
+                val optionSelected = seekBarWaveformTheme == option
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (optionSelected) Color.White.copy(0.14f) else Color.White.copy(0.06f))
+                        .clickable { onSeekBarWaveformThemeChange(option) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = optionSelected,
+                        onClick = { onSeekBarWaveformThemeChange(option) }
+                    )
+                    Text(
+                        option.label,
+                        fontSize = 15.sp,
+                        fontWeight = if (optionSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 4.dp)
+                    )
+                    WaveformThemePreview(
+                        theme = option,
+                        accent = seekWaveAccent,
+                        modifier = Modifier
+                            .width(110.dp)
+                            .height(36.dp)
+                    )
+                }
             }
         }
 
@@ -441,5 +671,58 @@ private fun OutputInfoRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(label, fontSize = 13.sp, color = Color.White.copy(0.55f), modifier = Modifier.width(92.dp))
         Text(value, fontSize = 13.sp, color = Color.White.copy(0.9f), modifier = Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun PriorityOrderList(
+    items: List<String>,
+    labelOf: (String) -> String,
+    onMove: (Int, Int) -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(0.05f))
+            .padding(vertical = 4.dp)
+    ) {
+        items.forEachIndexed { index, id ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "${index + 1}.",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.width(28.dp)
+                )
+                Text(
+                    labelOf(id),
+                    fontSize = 14.sp,
+                    color = Color.White.copy(0.92f),
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "▲",
+                    fontSize = 14.sp,
+                    color = if (index > 0) Color.White.copy(0.85f) else Color.White.copy(0.25f),
+                    modifier = Modifier
+                        .clickable(enabled = index > 0) { onMove(index, index - 1) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+                Text(
+                    "▼",
+                    fontSize = 14.sp,
+                    color = if (index < items.lastIndex) Color.White.copy(0.85f) else Color.White.copy(0.25f),
+                    modifier = Modifier
+                        .clickable(enabled = index < items.lastIndex) { onMove(index, index + 1) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
     }
 }

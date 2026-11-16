@@ -58,7 +58,9 @@ class MusicScanner(private val context: Context) {
      */
     suspend fun scanAllMedia(
         onTrack: () -> Unit = {},
-        existingById: Map<String, Track> = emptyMap()
+        existingById: Map<String, Track> = emptyMap(),
+        sourceTree: String = "all_files",
+        scanUnindexedDsf: Boolean = sourceTree == "all_files"
     ): List<Track> = withContext(Dispatchers.IO) {
         val tracks = mutableListOf<Track>()
         val collection = if (Build.VERSION.SDK_INT >= 29) {
@@ -130,9 +132,9 @@ class MusicScanner(private val context: Context) {
                     val cached = existingById[trackId]
                     if (cached != null &&
                         (modified == 0L || cached.lastModified == 0L || cached.lastModified == modified) &&
-                        (size == 0L || cached.fileSize == 0L || cached.fileSize == size)
+                        (size == 0L || cached.fileSize == 0L || size == cached.fileSize)
                     ) {
-                        tracks += cached
+                        tracks += if (cached.sourceTree == sourceTree) cached else cached.copy(sourceTree = sourceTree)
                         onTrack()
                         continue
                     }
@@ -143,7 +145,7 @@ class MusicScanner(private val context: Context) {
                         fileName = fileName,
                         extension = extension,
                         size = size,
-                        sourceTree = "all_files",
+                        sourceTree = sourceTree,
                         lastModified = modified,
                         albumKey = albumKey
                     )
@@ -177,7 +179,7 @@ class MusicScanner(private val context: Context) {
                             trackNumber = trackNum,
                             discNumber = null,
                             artPath = null,
-                            sourceTree = "all_files",
+                            sourceTree = sourceTree,
                             codec = null,
                             fileSize = size,
                             lastModified = modified,
@@ -193,7 +195,7 @@ class MusicScanner(private val context: Context) {
         // diretamente nos volumes compartilhados, sem depender da classificação do sistema.
         val hasBroadStorageAccess = Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             Environment.isExternalStorageManager()
-        if (hasBroadStorageAccess) {
+        if (scanUnindexedDsf && hasBroadStorageAccess) {
             tracks += scanDsfFilesFromStorage(existingById, tracks, onTrack)
         }
         tracks

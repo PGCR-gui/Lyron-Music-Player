@@ -7,10 +7,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -31,6 +33,12 @@
         android:requestLegacyExternalStorage="true"
         android:manageSpaceActivity="com.tolete.player.ManageSpaceActivity"
         android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".LyricsPopupCustomizeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/AppTheme" />
 
         <activity
             android:name=".MainActivity"
@@ -102,6 +110,25 @@
             android:name=".scrobble.ScrobbleActionReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".LyricsPopupActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".scrobble.RetrospectiveReminderReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".scrobble.RetrospectiveReminderBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <activity
             android:name=".scrobble.ScrobbleEditActivity"
             android:exported="false"
@@ -112,6 +139,11 @@
 
         <service
             android:name=".video.LyricsVideoService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".video.RetrospectiveVideoService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

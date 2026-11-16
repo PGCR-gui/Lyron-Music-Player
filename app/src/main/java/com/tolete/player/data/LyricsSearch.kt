@@ -1,15 +1,22 @@
 package com.tolete.player.data
 
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.supervisorScope
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.SocketTimeoutException
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.SSLException
 
 /** Fontes disponíveis na busca manual de letras. */
 enum class LyricsSource(val label: String) {
@@ -27,6 +34,12 @@ enum class LyricsType(val label: String) {
     WORD("Palavra por palavra")
 }
 
+/** Variante linguística de uma letra, quando o provedor a distingue. */
+enum class LyricsVariant(val label: String) {
+    ORIGINAL("Original"),
+    ROMANIZED("Romanizada")
+}
+
 /**
  * Resultado unificado da busca de letras (qualquer fonte).
  * [lines] já vem parseado; [lrcText] é o texto pronto para gravar em .lrc / tags
@@ -41,11 +54,68 @@ data class LyricsSearchResult(
     val durationSec: Int,
     val type: LyricsType,
     val lines: List<LyricLine>,
-    val lrcText: String
+    val lrcText: String,
+    /** Quem sincronizou/enviou (ex.: repositório Lyron no GitHub). */
+    val syncedBy: String? = null,
+    /** Variante oferecida explicitamente pela fonte (ex.: original/romanizada da NetEase). */
+    val variant: LyricsVariant? = null
 ) {
     /** Efeitos/segmentos ELRC+ são adicionais ao tipo simples, sincronizado ou por palavra. */
     val hasElrcEffects: Boolean
         get() = LyricsFormat.hasElrcEffects(lines, lrcText)
+}
+
+/**
+ * Diagnóstico da última busca: por fonte, quantos resultados vieram ou por que falhou
+ * (HTTP 503, sem conexão, tempo esgotado…). Serve para a tela distinguir "a fonte está fora
+ * do ar" de "a música realmente não existe lá".
+ */
+internal object LyricsDiagnostics {
+    private val counts = ConcurrentHashMap<String, Int>()
+    private val errors = ConcurrentHashMap<String, String>()
+
+    fun reset() {
+        counts.clear()
+        errors.clear()
+    }
+
+    fun count(source: String, n: Int) {
+        counts[source] = n
+    }
+
+    /** Guarda só o primeiro erro de cada fonte (o mais provável de ser a causa). */
+    fun error(source: String, message: String) {
+        errors.putIfAbsent(source, message)
+    }
+
+    fun summary(order: List<String>): String = order.joinToString(" · ") { name ->
+        val n = counts[name] ?: 0
+        val err = errors[name]
+        when {
+            n > 0 -> "$name: $n"
+            err != null -> "$name: $err"
+            else -> "$name: 0"
+        }
+    }
+
+    fun labelFor(url: String): String {
+        val host = try { URL(url).host.lowercase(Locale.ROOT) } catch (_: Exception) { "" }
+        return when {
+            host.contains("lrclib") -> "LRCLIB"
+            host.contains("163.com") -> "NetEase"
+            host.contains("qq.com") -> "QQ Music"
+            host.contains("kugou") -> "KuGou"
+            host.contains("githubusercontent") || host.contains("github") -> "Lyron"
+            else -> host.ifBlank { "rede" }
+        }
+    }
+
+    fun describe(e: Throwable): String = when (e) {
+        is UnknownHostException -> "sem conexão/DNS"
+        is SocketTimeoutException -> "tempo esgotado"
+        is SSLException -> "erro TLS (confira data/hora)"
+        else -> e.javaClass.simpleName.ifBlank { "erro" }
+    }
 }
 
 /**
@@ -54,31 +124,64 @@ data class LyricsSearchResult(
  */
 object LyricsSearch {
 
+    /** Quando true, a variante romanizada da NetEase sobe antes da original quando ambas existem. */
+    @Volatile
+    var preferRomanization: Boolean = false
+
+    /** Resumo por fonte da última busca (ex.: "LRCLIB: HTTP 503 · NetEase: 2"). */
+    @Volatile
+    var lastReport: String = ""
+        private set
+
+    private val SOURCE_ORDER = listOf("Lyron", "LRCLIB", "QQ Music", "NetEase", "KuGou")
+
     private const val LRCLIB_MAX = 8
     private const val OTHER_MAX = 5
 
-    suspend fun search(trackName: String, artistName: String): List<LyricsSearchResult> =
-        coroutineScope {
+    suspend fun search(
+        trackName: String,
+        artistName: String,
+        preferRomanization: Boolean = LyricsSearch.preferRomanization
+    ): List<LyricsSearchResult> =
+        supervisorScope {
             val t = trackName.trim()
             val a = artistName.trim()
-            if (t.isBlank()) return@coroutineScope emptyList()
+            if (t.isBlank()) return@supervisorScope emptyList()
+            LyricsDiagnostics.reset()
+            val searchJob = coroutineContext[Job] ?: return@supervisorScope emptyList()
 
             val tasks: List<Deferred<List<LyricsSearchResult>>> = listOf(
-                async(Dispatchers.IO) { safe { LyronLyricsRepository.search(t, a) } },
-                async(Dispatchers.IO) { safe { LrcLibClient.search(t, a).take(LRCLIB_MAX).mapNotNull { it.toUnified() } } },
-                async(Dispatchers.IO) { safe { QqMusicLyricsClient.search(t, a, OTHER_MAX) } },
-                async(Dispatchers.IO) { safe { NeteaseLyricsClient.search(t, a, OTHER_MAX) } },
-                async(Dispatchers.IO) { safe { KugouLyricsClient.search(t, a, OTHER_MAX) } }
+                async(Dispatchers.IO) { safe(searchJob, "Lyron") { LyronLyricsRepository.search(t, a) } },
+                async(Dispatchers.IO) { safe(searchJob, "LRCLIB") { LrcLibClient.search(t, a).take(LRCLIB_MAX).mapNotNull { it.toUnified() } } },
+                async(Dispatchers.IO) { safe(searchJob, "QQ Music") { QqMusicLyricsClient.search(t, a, OTHER_MAX) } },
+                async(Dispatchers.IO) { safe(searchJob, "NetEase") { NeteaseLyricsClient.search(t, a, OTHER_MAX, preferRomanization) } },
+                async(Dispatchers.IO) { safe(searchJob, "KuGou") { KugouLyricsClient.search(t, a, OTHER_MAX) } }
             )
-            rank(tasks.awaitAll().flatten().distinctBy { it.id }, t, a)
+            val ranked = rank(tasks.awaitAll().flatten().distinctBy { it.id }, t, a).map { result ->
+                result.copy(lines = LyricsFormat.normalizeBackgroundLines(result.lines))
+            }
+            lastReport = LyricsDiagnostics.summary(SOURCE_ORDER)
+            Log.i("LyricsSearch", "\"$t\" / \"$a\" -> $lastReport")
+            ranked
         }
 
-    private inline fun safe(block: () -> List<LyricsSearchResult>): List<LyricsSearchResult> =
+    private suspend fun safe(
+        parentJob: Job,
+        source: String,
+        block: suspend () -> List<LyricsSearchResult>
+    ): List<LyricsSearchResult> =
         try {
-            block()
+            block().also { LyricsDiagnostics.count(source, it.size) }
         } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
+            // Mantém o cancelamento solicitado pelo usuário, mas trata cancelamento isolado
+            // de um provedor como falha local para preservar resultados das outras fontes.
+            parentJob.ensureActive()
+            Log.w("LyricsSearch", "$source search canceled", e)
+            LyricsDiagnostics.error(source, "cancelada")
+            emptyList()
+        } catch (e: Exception) {
+            Log.w("LyricsSearch", "$source search failed", e)
+            LyricsDiagnostics.error(source, LyricsDiagnostics.describe(e))
             emptyList()
         }
 
@@ -160,6 +263,35 @@ internal object LyricsFormat {
         else -> LyricsType.PLAIN
     }
 
+    private val backgroundPrefixRegex = Regex(
+        "^\\s*(?:\\{bg\\}|\\[bg\\]|\\(bg\\)|（bg）)\\s*",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Marca e remove prefixos legados/externos de backing vocal, sem tocar em tempos ou palavras. */
+    fun normalizeBackgroundLines(lines: List<LyricLine>): List<LyricLine> {
+        // Chaves/colchetes escapados dos dois lados: o regex (ICU) do Android lança
+        // PatternSyntaxException com "}" ou "]" soltos.
+        val prefix = backgroundPrefixRegex
+        return lines.map { line ->
+            val textHadMarker = prefix.containsMatchIn(line.text)
+            val cleanText = prefix.replaceFirst(line.text, "")
+            val firstWord = line.words.firstOrNull()
+            val wordHadMarker = firstWord != null && prefix.containsMatchIn(firstWord.text)
+            val words = if (wordHadMarker) line.words.mapIndexed { index, word ->
+                if (index == 0) word.copy(text = prefix.replaceFirst(word.text, "")) else word
+            } else line.words
+            val agentIsBackground = line.agent?.trim()?.lowercase(Locale.ROOT)?.let {
+                it in setOf("bg", "background", "backing", "backing vocal", "backing vocals")
+            } == true
+            line.copy(
+                text = cleanText,
+                words = words,
+                isBackground = line.isBackground || textHadMarker || wordHadMarker || agentIsBackground
+            )
+        }
+    }
+
     fun fmtTs(ms: Long): String {
         val t = ms.coerceAtLeast(0L)
         return String.format(Locale.US, "%02d:%02d.%02d", t / 60_000, (t % 60_000) / 1000, (t % 1000) / 10)
@@ -191,9 +323,10 @@ internal object LyricsFormat {
         artistName: String,
         albumName: String,
         durationSec: Int,
-        rawLines: List<LyricLine>
+        rawLines: List<LyricLine>,
+        variant: LyricsVariant? = null
     ): LyricsSearchResult? {
-        val lines = rawLines.filterNot {
+        val lines = normalizeBackgroundLines(rawLines).filterNot {
             it.timeMs in 0..30_000 && creditRegex.containsMatchIn(it.text)
         }
         if (lines.isEmpty()) return null
@@ -208,7 +341,8 @@ internal object LyricsFormat {
             durationSec = durationSec,
             type = type,
             lines = lines,
-            lrcText = toLrcText(lines, type)
+            lrcText = toLrcText(lines, type),
+            variant = variant
         )
     }
 
@@ -273,9 +407,15 @@ internal object LyricsHttp {
                 if (contentType != null) conn.setRequestProperty("Content-Type", contentType)
                 conn.outputStream.use { it.write(body) }
             }
-            if (conn.responseCode !in 200..299) null
-            else conn.inputStream.use { it.readBytes() }.toString(Charsets.UTF_8)
-        } catch (_: Exception) {
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                Log.w("LyricsHttp", "HTTP $code em $url")
+                LyricsDiagnostics.error(LyricsDiagnostics.labelFor(url), "HTTP $code")
+                null
+            } else conn.inputStream.use { it.readBytes() }.toString(Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.w("LyricsHttp", "Falha em $url", e)
+            LyricsDiagnostics.error(LyricsDiagnostics.labelFor(url), LyricsDiagnostics.describe(e))
             null
         } finally {
             conn.disconnect()
