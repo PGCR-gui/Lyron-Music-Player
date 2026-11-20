@@ -143,11 +143,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         searchDebounceJob = viewModelScope.launch {
             delay(1_000)
             if (_searchQuery.value.trim() == term && _isSearching.value) {
+                // Só ativa a pesquisa. O termo NÃO vai para o histórico aqui:
+                // ele só é salvo quando o usuário toca em um resultado (commitSearchToHistory).
                 _activeSearchQuery.value = term
-                addSearchHistory(term)
             }
             _searchPending.value = false
         }
+    }
+
+    /**
+     * Salva a pesquisa atual no histórico. Chamado apenas quando o usuário toca em um
+     * resultado (faixa, artista, álbum ou gênero), não a cada pesquisa digitada.
+     */
+    fun commitSearchToHistory() {
+        val term = _activeSearchQuery.value.trim().ifBlank { _searchQuery.value.trim() }
+        if (term.isNotBlank()) addSearchHistory(term)
     }
 
     private fun addSearchHistory(term: String) {
@@ -1632,6 +1642,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val c = controller ?: return
         if (startIndex !in list.indices) return
         _queue.value = list
+        _pinnedQueueIds.value = emptySet()
         c.setMediaItems(list.map { it.toMediaItem() }, startIndex, 0L)
         c.prepare()
         requestPlaybackButtonState(playing = true)
@@ -1901,6 +1912,39 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         persistPlaybackState(paused = false)
     }
 
+    /** Faixas fixadas na fila: ficam agrupadas logo após a faixa atual. */
+    private val _pinnedQueueIds = MutableStateFlow<Set<String>>(emptySet())
+    val pinnedQueueIds: StateFlow<Set<String>> = _pinnedQueueIds.asStateFlow()
+
+    /**
+     * Fixa/desafixa uma faixa da fila. Ao fixar, a faixa vai para logo depois da atual (e depois
+     * das outras já fixadas, na ordem em que foram fixadas) e ganha um alfinete na lista.
+     * Desafixar só remove a marca; a posição fica como está.
+     */
+    fun togglePinQueueItem(track: Track) {
+        val pinned = _pinnedQueueIds.value
+        if (track.id in pinned) {
+            _pinnedQueueIds.value = pinned - track.id
+            return
+        }
+        _pinnedQueueIds.value = pinned + track.id
+        val q = _queue.value
+        val from = q.indexOfFirst { it.id == track.id }
+        if (from < 0) return
+        val currentId = _nowPlaying.value?.id
+        if (track.id == currentId) return // a que está tocando só ganha a marca
+        val rest = q.toMutableList().also { it.removeAt(from) }
+        val curIdx = rest.indexOfFirst { it.id == currentId }
+        var anchor = curIdx
+        var i = curIdx + 1
+        while (i < rest.size && rest[i].id in pinned) {
+            anchor = i
+            i++
+        }
+        val to = (anchor + 1).coerceIn(0, rest.size)
+        if (to != from) moveQueueItem(from, to)
+    }
+
     /** Reordena a fila atual (arrastar na lista de reprodução). */
     fun moveQueueItem(from: Int, to: Int) {
         val list = _queue.value
@@ -2123,6 +2167,54 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         trackTotal = if (hasTrackTotal) trackTotal else null,
                         discTotal = if (hasDiscTotal) discTotal else null
                     )
+                    if (result.ok) ok++ else fail++
+                }
+            }
+            onDone?.invoke(ok, fail)
+        }
+    }
+
+    /**
+     * Edição em lote completa (editor em tela cheia): aplica só os campos não nulos de [fields]
+     * nas faixas [trackIds] e, se houver, a mesma capa em todas. "" apaga a tag no arquivo.
+     */
+    fun batchUpdateTagsFull(
+        trackIds: List<String>,
+        fields: TagWriter.BatchFields,
+        onDone: ((Int, Int) -> Unit)? = null
+    ) {
+        val idSet = trackIds.toSet()
+        if (idSet.isEmpty() || !fields.hasChanges) {
+            onDone?.invoke(0, 0)
+            return
+        }
+        val newArtPath = fields.cover?.let {
+            try { TagWriter.saveCoverPreview(getApplication(), it, "image/jpeg") } catch (_: Exception) { null }
+        }
+        fun patch(t: Track): Track {
+            if (t.id !in idSet) return t
+            return t.copy(
+                artist = fields.artist?.takeIf { it.isNotBlank() } ?: t.artist,
+                album = fields.album?.takeIf { it.isNotBlank() } ?: t.album,
+                albumArtist = fields.albumArtist ?: t.albumArtist,
+                genre = fields.genre?.takeIf { it.isNotBlank() } ?: t.genre,
+                year = fields.year?.let { y -> y.trim().take(4).toIntOrNull()?.takeIf { it in 1000..9999 } } ?: t.year,
+                discNumber = fields.disc?.let { d -> d.trim().substringBefore('/').toIntOrNull()?.takeIf { it > 0 } } ?: t.discNumber,
+                composer = fields.composer ?: t.composer,
+                artPath = newArtPath ?: t.artPath
+            )
+        }
+        _library.value = _library.value.map(::patch)
+        _queue.value = _queue.value.map(::patch)
+        _nowPlaying.value = _nowPlaying.value?.let(::patch)
+        viewModelScope.launch {
+            scanMutex.withLock { cache.save(_library.value) }
+            var ok = 0
+            var fail = 0
+            withContext(Dispatchers.IO) {
+                for (id in trackIds) {
+                    val track = _library.value.firstOrNull { it.id == id } ?: continue
+                    val result = TagWriter.writeBatch(getApplication(), track, fields)
                     if (result.ok) ok++ else fail++
                 }
             }
@@ -3402,6 +3494,8 @@ private val _firstPlayedAt = MutableStateFlow(
     fun setLyricsBorderColor(argb: Int) {
         _lyricsBorderColor.value = argb
         prefs.edit().putInt(KEY_LYRICS_BORDER, argb).apply()
+        if (!prefs.contains(KEY_LYRICS_BACKING_BORDER)) _lyricsBackingBorderColor.value = argb
+        if (!prefs.contains(KEY_LYRICS_TRANSLATION_BORDER)) _lyricsTranslationBorderColor.value = argb
     }
 
     private val _lyricsBorderWidth = MutableStateFlow(prefs.getFloat(KEY_LYRICS_BORDER_W, 0f))
@@ -3410,6 +3504,48 @@ private val _firstPlayedAt = MutableStateFlow(
         val v = w.coerceIn(0f, 8f)
         _lyricsBorderWidth.value = v
         prefs.edit().putFloat(KEY_LYRICS_BORDER_W, v).apply()
+        if (!prefs.contains(KEY_LYRICS_BACKING_BORDER_W)) _lyricsBackingBorderWidth.value = v
+        if (!prefs.contains(KEY_LYRICS_TRANSLATION_BORDER_W)) _lyricsTranslationBorderWidth.value = v
+    }
+
+    // Contorno próprio do backing vocal e da tradução. Enquanto o usuário não personaliza,
+    // seguem o contorno da letra principal (valor salvo só ao alterar).
+    private val _lyricsBackingBorderColor = MutableStateFlow(
+        prefs.getInt(KEY_LYRICS_BACKING_BORDER, prefs.getInt(KEY_LYRICS_BORDER, 0xFF000000.toInt()))
+    )
+    val lyricsBackingBorderColor: StateFlow<Int> = _lyricsBackingBorderColor.asStateFlow()
+    fun setLyricsBackingBorderColor(argb: Int) {
+        _lyricsBackingBorderColor.value = argb
+        prefs.edit().putInt(KEY_LYRICS_BACKING_BORDER, argb).apply()
+    }
+
+    private val _lyricsBackingBorderWidth = MutableStateFlow(
+        prefs.getFloat(KEY_LYRICS_BACKING_BORDER_W, prefs.getFloat(KEY_LYRICS_BORDER_W, 0f))
+    )
+    val lyricsBackingBorderWidth: StateFlow<Float> = _lyricsBackingBorderWidth.asStateFlow()
+    fun setLyricsBackingBorderWidth(w: Float) {
+        val v = w.coerceIn(0f, 8f)
+        _lyricsBackingBorderWidth.value = v
+        prefs.edit().putFloat(KEY_LYRICS_BACKING_BORDER_W, v).apply()
+    }
+
+    private val _lyricsTranslationBorderColor = MutableStateFlow(
+        prefs.getInt(KEY_LYRICS_TRANSLATION_BORDER, prefs.getInt(KEY_LYRICS_BORDER, 0xFF000000.toInt()))
+    )
+    val lyricsTranslationBorderColor: StateFlow<Int> = _lyricsTranslationBorderColor.asStateFlow()
+    fun setLyricsTranslationBorderColor(argb: Int) {
+        _lyricsTranslationBorderColor.value = argb
+        prefs.edit().putInt(KEY_LYRICS_TRANSLATION_BORDER, argb).apply()
+    }
+
+    private val _lyricsTranslationBorderWidth = MutableStateFlow(
+        prefs.getFloat(KEY_LYRICS_TRANSLATION_BORDER_W, prefs.getFloat(KEY_LYRICS_BORDER_W, 0f))
+    )
+    val lyricsTranslationBorderWidth: StateFlow<Float> = _lyricsTranslationBorderWidth.asStateFlow()
+    fun setLyricsTranslationBorderWidth(w: Float) {
+        val v = w.coerceIn(0f, 8f)
+        _lyricsTranslationBorderWidth.value = v
+        prefs.edit().putFloat(KEY_LYRICS_TRANSLATION_BORDER_W, v).apply()
     }
 
     private val _lyricsTranslationColor = MutableStateFlow(
@@ -3889,6 +4025,10 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("lyricsBackingSecondary", _lyricsBackingSecondaryColor.value)
         obj.put("lyricsBorder", _lyricsBorderColor.value)
         obj.put("lyricsBorderWidth", _lyricsBorderWidth.value.toDouble())
+        obj.put("lyricsBackingBorder", _lyricsBackingBorderColor.value)
+        obj.put("lyricsBackingBorderWidth", _lyricsBackingBorderWidth.value.toDouble())
+        obj.put("lyricsTranslationBorder", _lyricsTranslationBorderColor.value)
+        obj.put("lyricsTranslationBorderWidth", _lyricsTranslationBorderWidth.value.toDouble())
         obj.put("autoFetchLyrics", _autoFetchLyrics.value)
         obj.put("shuffleType", _shuffleType.value.name)
         obj.put("bitPerfect", _bitPerfect.value)
@@ -4108,6 +4248,10 @@ private val _firstPlayedAt = MutableStateFlow(
             if (obj.has("lyricsBackingSecondary")) setLyricsBackingSecondaryColor(obj.getInt("lyricsBackingSecondary"))
             if (obj.has("lyricsBorder")) setLyricsBorderColor(obj.getInt("lyricsBorder"))
             if (obj.has("lyricsBorderWidth")) setLyricsBorderWidth(obj.getDouble("lyricsBorderWidth").toFloat())
+            if (obj.has("lyricsBackingBorder")) setLyricsBackingBorderColor(obj.getInt("lyricsBackingBorder"))
+            if (obj.has("lyricsBackingBorderWidth")) setLyricsBackingBorderWidth(obj.getDouble("lyricsBackingBorderWidth").toFloat())
+            if (obj.has("lyricsTranslationBorder")) setLyricsTranslationBorderColor(obj.getInt("lyricsTranslationBorder"))
+            if (obj.has("lyricsTranslationBorderWidth")) setLyricsTranslationBorderWidth(obj.getDouble("lyricsTranslationBorderWidth").toFloat())
             if (obj.has("autoFetchLyrics")) setAutoFetchLyrics(obj.getBoolean("autoFetchLyrics"))
             if (obj.has("shuffleType")) {
                 try { setShuffleType(ShuffleType.valueOf(obj.getString("shuffleType"))) } catch (_: Exception) {}
@@ -4390,6 +4534,10 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_LYRICS_SECONDARY = "lyrics_secondary_color"
         const val KEY_LYRICS_BORDER = "lyrics_border_color"
         const val KEY_LYRICS_BORDER_W = "lyrics_border_width"
+        const val KEY_LYRICS_BACKING_BORDER = "lyrics_backing_border_color"
+        const val KEY_LYRICS_BACKING_BORDER_W = "lyrics_backing_border_width"
+        const val KEY_LYRICS_TRANSLATION_BORDER = "lyrics_translation_border_color"
+        const val KEY_LYRICS_TRANSLATION_BORDER_W = "lyrics_translation_border_width"
         const val KEY_LYRICS_TRANSLATION = "lyrics_translation_color"
         const val KEY_LYRICS_BACKING = "lyrics_backing_color"
         const val KEY_LYRICS_BACKING_SECONDARY = "lyrics_backing_secondary_color"

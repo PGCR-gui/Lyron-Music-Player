@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -30,10 +31,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -192,6 +195,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import coil.imageLoader
 import coil.request.ImageRequest
 import com.tolete.player.data.Album
 import com.tolete.player.data.Artist
@@ -297,6 +301,7 @@ fun TolereApp(
     }
     val scanCount by vm.scanCount.collectAsStateWithLifecycle()
     val queue by vm.queue.collectAsStateWithLifecycle()
+    val pinnedQueueIds by vm.pinnedQueueIds.collectAsStateWithLifecycle()
     val shuffle by vm.shuffle.collectAsStateWithLifecycle()
     val isSearching by vm.isSearching.collectAsStateWithLifecycle()
     val searchQuery by vm.searchQuery.collectAsStateWithLifecycle()
@@ -360,6 +365,10 @@ fun TolereApp(
     val lyricsSecondaryColor by vm.lyricsSecondaryColor.collectAsStateWithLifecycle()
     val lyricsBorderColor by vm.lyricsBorderColor.collectAsStateWithLifecycle()
     val lyricsBorderWidth by vm.lyricsBorderWidth.collectAsStateWithLifecycle()
+    val lyricsBackingBorderColor by vm.lyricsBackingBorderColor.collectAsStateWithLifecycle()
+    val lyricsBackingBorderWidth by vm.lyricsBackingBorderWidth.collectAsStateWithLifecycle()
+    val lyricsTranslationBorderColor by vm.lyricsTranslationBorderColor.collectAsStateWithLifecycle()
+    val lyricsTranslationBorderWidth by vm.lyricsTranslationBorderWidth.collectAsStateWithLifecycle()
     val lyricsTranslationColor by vm.lyricsTranslationColor.collectAsStateWithLifecycle()
     val lyricsBackingColor by vm.lyricsBackingColor.collectAsStateWithLifecycle()
     val lyricsBackingSecondaryColor by vm.lyricsBackingSecondaryColor.collectAsStateWithLifecycle()
@@ -885,15 +894,23 @@ fun TolereApp(
                                                     selectedTrackIds = if (track.id in selectedTrackIds)
                                                         selectedTrackIds - track.id else selectedTrackIds + track.id
                                                 } else {
+                                                    vm.commitSearchToHistory()
                                                     vm.playTracks(searchResults, index)
                                                 }
                                             },
                                             onTrackLongClick = { track ->
                                                 selectedTrackIds = selectedTrackIds + track.id
                                             },
-                                            onOpenArtist = { name -> vm.openArtist(name) },
-                                            onOpenAlbum = { name -> vm.openAlbum(name) },
+                                            onOpenArtist = { name ->
+                                                vm.commitSearchToHistory()
+                                                vm.openArtist(name)
+                                            },
+                                            onOpenAlbum = { name ->
+                                                vm.commitSearchToHistory()
+                                                vm.openAlbum(name)
+                                            },
                                             onOpenGenre = { name ->
+                                                vm.commitSearchToHistory()
                                                 vm.setTab(MusicViewModel.Tab.GENRES)
                                                 vm.openGroup(name)
                                             }
@@ -1590,6 +1607,14 @@ fun TolereApp(
                     onLyricsBorderColorChange = vm::setLyricsBorderColor,
                     lyricsBorderWidth = lyricsBorderWidth,
                     onLyricsBorderWidthChange = vm::setLyricsBorderWidth,
+                    lyricsBackingBorderColor = lyricsBackingBorderColor,
+                    onLyricsBackingBorderColorChange = vm::setLyricsBackingBorderColor,
+                    lyricsBackingBorderWidth = lyricsBackingBorderWidth,
+                    onLyricsBackingBorderWidthChange = vm::setLyricsBackingBorderWidth,
+                    lyricsTranslationBorderColor = lyricsTranslationBorderColor,
+                    onLyricsTranslationBorderColorChange = vm::setLyricsTranslationBorderColor,
+                    lyricsTranslationBorderWidth = lyricsTranslationBorderWidth,
+                    onLyricsTranslationBorderWidthChange = vm::setLyricsTranslationBorderWidth,
                     lyricsTranslationColor = lyricsTranslationColor,
                     onLyricsTranslationColorChange = vm::setLyricsTranslationColor,
                     lyricsBackingColor = lyricsBackingColor,
@@ -1660,6 +1685,32 @@ fun TolereApp(
                         onToggle = vm::togglePlayPause
                     )
                 }
+            }
+
+            AnimatedVisibility(
+                visible = showBatchTagEdit && batchTagTracks.isNotEmpty(),
+                enter = slideInVertically(tween(300)) { it } + fadeIn(tween(220)),
+                exit = slideOutVertically(tween(260)) { it } + fadeOut(tween(180))
+            ) {
+                val batchCtx = LocalContext.current
+                BatchTagEditorScreen(
+                    tracks = batchTagTracks,
+                    appColors = appColors,
+                    onClose = { showBatchTagEdit = false },
+                    onApply = { fields ->
+                        val ids = batchTagTracks.map { it.id }
+                        vm.batchUpdateTagsFull(ids, fields) { ok, fail ->
+                            android.widget.Toast.makeText(
+                                batchCtx,
+                                if (fail == 0) "Tags atualizadas em $ok faixas"
+                                else "Atualizadas: $ok · falhas: $fail",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        showBatchTagEdit = false
+                        selectedTrackIds = emptySet()
+                    }
+                )
             }
 
             if (showHelp) {
@@ -1854,6 +1905,8 @@ fun TolereApp(
                         onToggleFavoriteTrack = { t -> vm.toggleFavorite(t.id) },
                         onDeleteTrack = { t -> onDeleteTracks(listOf(t)) },
                         onPlayNextFromQueue = { t -> vm.playNext(t) },
+                        pinnedQueueIds = pinnedQueueIds,
+                        onTogglePinQueue = { t -> vm.togglePinQueueItem(t) },
                         isFavoriteCheck = { id -> vm.isFavorite(id) },
                         onToggleFavorite = { vm.toggleFavorite(current.id) },
                         onAddToPlaylist = { openAddToPlaylist(listOf(current)) },
@@ -1900,6 +1953,10 @@ fun TolereApp(
                         lyricsSecondaryColor = lyricsSecondaryColor,
                         lyricsBorderColor = lyricsBorderColor,
                         lyricsBorderWidth = lyricsBorderWidth,
+                        lyricsBackingBorderColor = lyricsBackingBorderColor,
+                        lyricsBackingBorderWidth = lyricsBackingBorderWidth,
+                        lyricsTranslationBorderColor = lyricsTranslationBorderColor,
+                        lyricsTranslationBorderWidth = lyricsTranslationBorderWidth,
                         lyricsTranslationColor = lyricsTranslationColor,
                         lyricsBackingColor = lyricsBackingColor,
                         lyricsBackingSecondaryColor = lyricsBackingSecondaryColor,
@@ -2042,31 +2099,6 @@ fun TolereApp(
                     onDelete = {
                         showSelectionActions = false
                         showDeleteConfirm = true
-                    }
-                )
-            }
-
-            if (showBatchTagEdit && batchTagTracks.isNotEmpty()) {
-                val batchCtx = LocalContext.current
-                BatchTagEditDialog(
-                    count = batchTagTracks.size,
-                    onDismiss = {
-                        showBatchTagEdit = false
-                        batchTagTracks = emptyList()
-                    },
-                    onConfirm = { artist, album, albumArtist, genre, year, trackTotal, discTotal ->
-                        val ids = batchTagTracks.map { it.id }
-                        vm.batchUpdateTags(ids, artist, album, albumArtist, genre, year, trackTotal, discTotal) { ok, fail ->
-                            android.widget.Toast.makeText(
-                                batchCtx,
-                                if (fail == 0) "Tags atualizadas em $ok faixas"
-                                else "Atualizadas: $ok · falhas: $fail",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                        showBatchTagEdit = false
-                        batchTagTracks = emptyList()
-                        selectedTrackIds = emptySet()
                     }
                 )
             }
@@ -2418,6 +2450,30 @@ private fun SearchResultsPanel(
     onOpenGenre: (String) -> Unit
 ) {
     val searchCtx = LocalContext.current
+    val revealed = remember(query) { mutableSetOf<Int>() }
+    // Pré-carrega as capas de TODOS os resultados (inclusive os fora da tela), com a mesma chave
+    // de cache do ArtImage, para não aparecerem vazias ao rolar.
+    val artPx = with(LocalDensity.current) { 48.dp.roundToPx() }
+    LaunchedEffect(tracks, artists, albums, genres, artPx) {
+        val paths = LinkedHashSet<String>()
+        artists.take(20).forEach { a ->
+            (ArtistMetaStore.cachedPhotoPath(a.name) ?: a.artPath)?.let { paths.add(it) }
+        }
+        albums.take(20).forEach { al -> al.artPath?.let { paths.add(it) } }
+        genres.take(20).forEach { g -> g.artPath?.let { paths.add(it) } }
+        tracks.forEach { t -> t.artPath?.let { paths.add(it) } }
+        val loader = searchCtx.imageLoader
+        for (path in paths.asSequence().filter { it.isNotBlank() }.take(SEARCH_PREFETCH_MAX)) {
+            loader.enqueue(
+                ImageRequest.Builder(searchCtx)
+                    .data(path)
+                    .size(artPx, artPx)
+                    .memoryCacheKey("$path@$artPx")
+                    .build()
+            )
+            kotlinx.coroutines.yield()
+        }
+    }
     if (query.isBlank()) {
         LazyColumn(contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding)) {
             item {
@@ -2445,7 +2501,7 @@ private fun SearchResultsPanel(
             if (searchHistory.isEmpty()) {
                 item {
                     Text(
-                        "Suas pesquisas concluídas aparecerão aqui.",
+                        "Os resultados em que você tocar aparecerão aqui.",
                         color = Color.White.copy(0.45f),
                         fontSize = 14.sp,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
@@ -2489,37 +2545,362 @@ private fun SearchResultsPanel(
         return
     }
     val hasGroups = artists.isNotEmpty() || albums.isNotEmpty() || genres.isNotEmpty()
-    if (!hasGroups) {
-        if (tracks.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    if (searchPending) "Pesquisando…" else "Nenhum resultado encontrado.",
-                    color = Color.White.copy(0.6f)
-                )
-            }
-            return
+    if (!hasGroups && tracks.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                if (searchPending) "Pesquisando…" else "Nenhum resultado encontrado.",
+                color = Color.White.copy(0.6f)
+            )
         }
-        TrackList(
-            tracks = tracks,
-            nowPlayingId = nowPlayingId,
-            bottomPadding = bottomPadding,
-            showTrackNumbers = false,
-            selectedIds = selectedIds,
-            selectionMode = selectionMode,
-            onClick = onTrackClick,
-            onLongClick = onTrackLongClick,
-            showAlphabetScroller = false,
-            staggerAppear = true,
-            staggerMs = staggerMs
-        )
         return
     }
-    val artistsLimited = artists.take(20)
-    val albumsLimited = albums.take(20)
-    val genresLimited = genres.take(20)
+    // Categorias de resultado (sem aba "Tudo"): só aparecem os tipos que têm resultado.
+    // Com mais de uma categoria, há uma barra com pílula arrastável e as páginas deslizam
+    // horizontalmente, como na navegação principal. Com uma só, mostra a lista direto.
+    val available = buildList {
+        if (tracks.isNotEmpty()) add(SearchTab.TRACKS)
+        if (artists.isNotEmpty()) add(SearchTab.ARTISTS)
+        if (albums.isNotEmpty()) add(SearchTab.ALBUMS)
+        if (genres.isNotEmpty()) add(SearchTab.GENRES)
+    }
+    val showTabs = available.size >= 2
+    val availableState = androidx.compose.runtime.rememberUpdatedState(available)
+    val pagerState = androidx.compose.foundation.pager.rememberPagerState(pageCount = { available.size })
+    // Guarda a categoria atual para mantê-la quando o conjunto de categorias muda durante a busca.
+    var lastTab by remember(query) { mutableStateOf(available.first()) }
+    LaunchedEffect(pagerState) {
+        androidx.compose.runtime.snapshotFlow { pagerState.settledPage }.collect { page ->
+            availableState.value.getOrNull(page)?.let { lastTab = it }
+        }
+    }
+    LaunchedEffect(available, query) {
+        val idx = available.indexOf(lastTab).takeIf { it >= 0 } ?: 0
+        if (idx != pagerState.currentPage) pagerState.scrollToPage(idx)
+    }
+    val counts = mapOf(
+        SearchTab.TRACKS to tracks.size,
+        SearchTab.ARTISTS to artists.size,
+        SearchTab.ALBUMS to albums.size,
+        SearchTab.GENRES to genres.size
+    )
+    val revealedByTab = remember(query) { mutableMapOf<SearchTab, MutableSet<Int>>() }
+    val tabScope = rememberCoroutineScope()
+    Column(Modifier.fillMaxSize()) {
+        if (showTabs) {
+            SearchTypeTabs(
+                tabs = available,
+                pagerState = pagerState,
+                counts = counts,
+                onSelect = { index -> tabScope.launch { pagerState.animateScrollToPage(index) } },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+        }
+        Box(Modifier.weight(1f)) {
+            androidx.compose.foundation.pager.HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                userScrollEnabled = showTabs && !selectionMode,
+                key = { page -> available.getOrNull(page)?.name ?: page }
+            ) { page ->
+                val tab = available.getOrNull(page)
+                if (tab != null) {
+                    val pageRevealed = revealedByTab.getOrPut(tab) { mutableSetOf() }
+                    if (tab == SearchTab.TRACKS) {
+                        TrackList(
+                            tracks = tracks,
+                            nowPlayingId = nowPlayingId,
+                            bottomPadding = bottomPadding,
+                            showTrackNumbers = false,
+                            selectedIds = selectedIds,
+                            selectionMode = selectionMode,
+                            onClick = onTrackClick,
+                            onLongClick = onTrackLongClick,
+                            showAlphabetScroller = false,
+                            staggerAppear = true,
+                            staggerMs = staggerMs,
+                            staggerRevealed = pageRevealed
+                        )
+                    } else {
+                        SearchGroupedList(
+                            // Sem barra (categoria única) o cabeçalho diz o que é; com barra, é redundante.
+                            showHeaders = !showTabs,
+                            limit = Int.MAX_VALUE,
+                            tracks = emptyList(),
+                            artists = if (tab == SearchTab.ARTISTS) artists else emptyList(),
+                            albums = if (tab == SearchTab.ALBUMS) albums else emptyList(),
+                            genres = if (tab == SearchTab.GENRES) genres else emptyList(),
+                            nowPlayingId = nowPlayingId,
+                            bottomPadding = bottomPadding,
+                            selectedIds = selectedIds,
+                            selectionMode = selectionMode,
+                            staggerMs = staggerMs,
+                            revealed = pageRevealed,
+                            onTrackClick = onTrackClick,
+                            onTrackLongClick = onTrackLongClick,
+                            onOpenArtist = onOpenArtist,
+                            onOpenAlbum = onOpenAlbum,
+                            onOpenGenre = onOpenGenre
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum class SearchTab(val label: String) {
+    TRACKS("Músicas"),
+    ARTISTS("Artistas"),
+    ALBUMS("Álbuns"),
+    GENRES("Gêneros")
+}
+
+/**
+ * Barra de categorias em estilo liquid glass, com uma pílula ARRASTÁVEL como a da navegação
+ * principal: segure a pílula e deslize para trocar de categoria (o conteúdo acompanha o dedo);
+ * ao soltar ela encaixa na categoria mais próxima, considerando a velocidade do gesto. Também
+ * acompanha o deslize horizontal da própria lista e rola a barra para manter a aba visível.
+ *
+ * ATENÇÃO: estas abas ficam DENTRO do conteúdo que o app grava como fundo do vidro (backdrop);
+ * um GlassSurface aqui desenharia a camada dentro dela mesma e derruba o app. Por isso o vidro
+ * é desenhado (fosco, com borda e brilho), como no índice alfabético.
+ */
+@Composable
+private fun SearchTypeTabs(
+    tabs: List<SearchTab>,
+    pagerState: androidx.compose.foundation.pager.PagerState,
+    counts: Map<SearchTab, Int>,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val n = tabs.size
+    val barShape = RoundedCornerShape(26.dp)
+    val tabShape = RoundedCornerShape(22.dp)
+    val density = LocalDensity.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
+    val padPx = with(density) { 4.dp.toPx() }
+    val growPx = with(density) { 8.dp.toPx() }
+
+    // Posição/tamanho de cada aba (px) medidos na raiz; relativos ao contêiner na hora de usar.
+    val lefts = remember(n) { mutableStateListOf<Float>().apply { repeat(n) { add(0f) } } }
+    val widths = remember(n) { mutableStateListOf<Float>().apply { repeat(n) { add(0f) } } }
+    var tabH by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var containerX by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var barW by remember { mutableStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    var dragFraction by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var pressed by remember { mutableStateOf(false) }
+    val pressAnim by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (pressed) 1f else 0f,
+        animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 450f),
+        label = "searchPillPress"
+    )
+
+    val maxFraction = (n - 1).coerceAtLeast(0).toFloat()
+    // Posição contínua (em "índice de aba"): do dedo enquanto arrasta; senão, da página.
+    val fraction = {
+        if (dragging) dragFraction
+        else (pagerState.currentPage + pagerState.currentPageOffsetFraction).coerceIn(0f, maxFraction)
+    }
+    fun relLeft(i: Int) = lefts[i] - containerX
+    val pillLeft = {
+        val f = fraction()
+        val i = f.toInt().coerceIn(0, n - 1)
+        val j = (i + 1).coerceAtMost(n - 1)
+        val t = f - i
+        androidx.compose.ui.util.lerp(relLeft(i), relLeft(j), t)
+    }
+    val pillBaseW = {
+        val f = fraction()
+        val i = f.toInt().coerceIn(0, n - 1)
+        val j = (i + 1).coerceAtMost(n - 1)
+        androidx.compose.ui.util.lerp(widths[i], widths[j], f - i)
+    }
+    // Distância entre os centros das abas vizinhas à posição f (usada para converter px em abas)
+    fun stepAt(f: Float): Float {
+        val i = f.toInt().coerceIn(0, n - 1)
+        val j = (i + 1).coerceAtMost(n - 1)
+        val ci = relLeft(i) + widths[i] / 2f
+        val cj = relLeft(j) + widths[j] / 2f
+        val s = cj - ci
+        return if (s > 1f) s else widths[i].coerceAtLeast(1f)
+    }
+
+    // Mantém a aba atual visível quando a barra rola
+    val selectedPage = pagerState.currentPage
+    LaunchedEffect(selectedPage, barW, widths.sum(), dragging) {
+        if (!dragging && barW > 0 && selectedPage in 0 until n && widths[selectedPage] > 0f) {
+            val center = padPx + relLeft(selectedPage) + widths[selectedPage] / 2f
+            val target = (center - barW / 2f).toInt().coerceIn(0, scrollState.maxValue)
+            scrollState.animateScrollTo(target)
+        }
+    }
+
+    Box(
+        modifier
+            .clip(barShape)
+            .background(ScrollerGlassFill)
+            .border(1.dp, ScrollerGlassRim, barShape)
+            .onSizeChanged { barW = it.width }
+    ) {
+        Box(Modifier.horizontalScroll(scrollState)) {
+            Box(
+                Modifier
+                    .padding(4.dp)
+                    .onGloballyPositioned { containerX = it.positionInRoot().x }
+                    .pointerInput(n) {
+                        val slop = viewConfiguration.touchSlop
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            // Só arrasta quando o dedo começa na pílula; fora dela a barra rola normalmente
+                            val pillCenter = pillLeft() + pillBaseW() / 2f
+                            val onPill = kotlin.math.abs(down.position.x - pillCenter) <= pillBaseW() / 2f + slop
+                            if (!onPill) return@awaitEachGesture
+                            val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+                            tracker.addPosition(down.uptimeMillis, down.position)
+                            pressed = true
+                            var started = false
+                            var cancelled = false
+                            var lastX = down.position.x
+                            var lastIdx = -1
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                if (change == null) { cancelled = true; break }
+                                if (!change.pressed) break
+                                tracker.addPosition(change.uptimeMillis, change.position)
+                                val x = change.position.x
+                                if (!started && kotlin.math.abs(x - down.position.x) > slop) {
+                                    started = true
+                                    dragFraction = fraction()
+                                    dragging = true
+                                    lastX = x
+                                    lastIdx = Math.round(dragFraction)
+                                }
+                                if (started) {
+                                    change.consume()
+                                    val step = stepAt(dragFraction)
+                                    dragFraction = (dragFraction + (x - lastX) / step).coerceIn(0f, maxFraction)
+                                    lastX = x
+                                    val f = dragFraction
+                                    val page = Math.round(f).coerceIn(0, n - 1)
+                                    // O conteúdo acompanha a pílula
+                                    scope.launch { pagerState.scrollToPage(page, (f - page).coerceIn(-0.5f, 0.5f)) }
+                                    if (page != lastIdx) {
+                                        haptic.performHapticFeedback(
+                                            androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove
+                                        )
+                                        lastIdx = page
+                                    }
+                                }
+                            }
+                            pressed = false
+                            if (started) {
+                                val vx = if (cancelled) 0f else tracker.calculateVelocity().x
+                                val f = dragFraction
+                                val idx = Math.round(f + vx * 0.10f / stepAt(f)).coerceIn(0, n - 1)
+                                dragging = false
+                                scope.launch { pagerState.animateScrollToPage(idx) }
+                            }
+                        }
+                    }
+            ) {
+                // Pílula de vidro (desenhada) que desliza sob as abas
+                Box(
+                    Modifier
+                        .offset {
+                            androidx.compose.ui.unit.IntOffset(
+                                (pillLeft() - growPx * pressAnim / 2f).toInt(), 0
+                            )
+                        }
+                        .layout { measurable, _ ->
+                            val w = (pillBaseW() + growPx * pressAnim).toInt().coerceAtLeast(0)
+                            val h = tabH.toInt().coerceAtLeast(0)
+                            val placeable = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(w, h))
+                            layout(w, h) { placeable.place(0, 0) }
+                        }
+                        .clip(tabShape)
+                        .background(Color.White.copy(alpha = 0.24f + 0.08f * pressAnim))
+                        .border(1.dp, Color.White.copy(alpha = 0.45f), tabShape)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    tabs.forEachIndexed { index, tab ->
+                        val isSel = index == selectedPage
+                        val textColor by animateColorAsState(
+                            targetValue = if (isSel) Color.White else Color.White.copy(alpha = 0.7f),
+                            animationSpec = tween(180),
+                            label = "searchTabText"
+                        )
+                        Row(
+                            Modifier
+                                .onGloballyPositioned { c ->
+                                    val x = c.positionInRoot().x
+                                    val w = c.size.width.toFloat()
+                                    if (index < lefts.size && lefts[index] != x) lefts[index] = x
+                                    if (index < widths.size && widths[index] != w) widths[index] = w
+                                    val h = c.size.height.toFloat()
+                                    if (tabH != h) tabH = h
+                                }
+                                .clip(tabShape)
+                                .clickable { onSelect(index) }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                tab.label,
+                                fontSize = 14.sp,
+                                fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Medium,
+                                color = textColor,
+                                maxLines = 1
+                            )
+                            val count = counts[tab] ?: 0
+                            if (count > 0) {
+                                Text(
+                                    "  $count",
+                                    fontSize = 12.sp,
+                                    color = Color.White.copy(alpha = if (isSel) 0.8f else 0.5f),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SearchGroupedList(
+    showHeaders: Boolean,
+    limit: Int,
+    tracks: List<Track>,
+    artists: List<Artist>,
+    albums: List<Album>,
+    genres: List<Genre>,
+    nowPlayingId: String?,
+    bottomPadding: Dp,
+    selectedIds: Set<String>,
+    selectionMode: Boolean,
+    staggerMs: Int,
+    revealed: MutableSet<Int>,
+    onTrackClick: (Int, Track) -> Unit,
+    onTrackLongClick: (Track) -> Unit,
+    onOpenArtist: (String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
+    onOpenGenre: (String) -> Unit
+) {
+    val artistsLimited = artists.take(limit)
+    val albumsLimited = albums.take(limit)
+    val genresLimited = genres.take(limit)
     LazyColumn(contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding)) {
         if (artistsLimited.isNotEmpty()) {
-            item {
+            if (showHeaders) item {
                 Text(
                     "Artistas",
                     fontSize = 13.sp,
@@ -2531,7 +2912,7 @@ private fun SearchResultsPanel(
             itemsIndexed(artistsLimited) { index, a ->
                 val metaImg = ArtistMetaStore.cachedPhotoPath(a.name)
                 val art = metaImg ?: a.artPath
-                StaggeredSearchItem(index = index, staggerMs = staggerMs) {
+                StaggeredSearchItem(index = index, staggerMs = staggerMs, revealed = revealed) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -2553,7 +2934,7 @@ private fun SearchResultsPanel(
             }
         }
         if (albumsLimited.isNotEmpty()) {
-            item {
+            if (showHeaders) item {
                 Text(
                     "Álbuns",
                     fontSize = 13.sp,
@@ -2563,7 +2944,7 @@ private fun SearchResultsPanel(
                 )
             }
             itemsIndexed(albumsLimited) { index, al ->
-                StaggeredSearchItem(index = artistsLimited.size + index, staggerMs = staggerMs) {
+                StaggeredSearchItem(index = artistsLimited.size + index, staggerMs = staggerMs, revealed = revealed) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -2587,7 +2968,7 @@ private fun SearchResultsPanel(
             }
         }
         if (genresLimited.isNotEmpty()) {
-            item {
+            if (showHeaders) item {
                 Text(
                     "Gêneros",
                     fontSize = 13.sp,
@@ -2597,7 +2978,7 @@ private fun SearchResultsPanel(
                 )
             }
             itemsIndexed(genresLimited) { index, g ->
-                StaggeredSearchItem(index = artistsLimited.size + albumsLimited.size + index, staggerMs = staggerMs) {
+                StaggeredSearchItem(index = artistsLimited.size + albumsLimited.size + index, staggerMs = staggerMs, revealed = revealed) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -2619,7 +3000,7 @@ private fun SearchResultsPanel(
             }
         }
         if (tracks.isNotEmpty()) {
-            item {
+            if (showHeaders) item {
                 Text(
                     "Faixas",
                     fontSize = 13.sp,
@@ -2632,7 +3013,7 @@ private fun SearchResultsPanel(
                 val itemIndex = artistsLimited.size + albumsLimited.size + genresLimited.size + index
                 val active = track.id == nowPlayingId
                 val selected = track.id in selectedIds
-                StaggeredSearchItem(index = itemIndex, staggerMs = staggerMs) {
+                StaggeredSearchItem(index = itemIndex, staggerMs = staggerMs, revealed = revealed) {
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -3944,7 +4325,8 @@ private fun TrackList(
     onLongClick: (Track) -> Unit,
     showAlphabetScroller: Boolean = true,
     staggerAppear: Boolean = false,
-    staggerMs: Int = 50
+    staggerMs: Int = 50,
+    staggerRevealed: MutableSet<Int>? = null
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -3970,7 +4352,7 @@ private fun TrackList(
             val dimmed = draggedLetter != null &&
                 AlphaSort.indexLetter(track.title, 0, firstLetterOrder) != draggedLetter
             if (staggerAppear) {
-                StaggeredSearchItem(index = index, staggerMs = staggerMs) {
+                StaggeredSearchItem(index = index, staggerMs = staggerMs, revealed = staggerRevealed) {
                     TrackListRow(
                         track = track,
                         active = active,
@@ -4013,20 +4395,33 @@ private fun TrackList(
     } // Box
 }
 
+/** Só os primeiros itens (os que cabem na tela ao abrir a pesquisa) entram em cascata. */
+private const val SEARCH_STAGGER_MAX_ITEMS = 10
+private const val SEARCH_PREFETCH_MAX = 400
+
+/**
+ * Entrada em cascata dos resultados da pesquisa.
+ * Antes, cada item esperava `index * staggerMs` ao ser composto: um item lá embaixo na lista
+ * (índice 80 = 4 s) aparecia vazio ao rolar até ele. Agora só os primeiros itens animam, e
+ * os demais (ou os já revelados, ao voltar a rolar) aparecem na hora.
+ */
 @Composable
 private fun StaggeredSearchItem(
     index: Int,
     staggerMs: Int = 50,
+    revealed: MutableSet<Int>? = null,
     content: @Composable () -> Unit
 ) {
-    var visible by remember { mutableStateOf(false) }
+    val showNow = staggerMs <= 0 ||
+        index >= SEARCH_STAGGER_MAX_ITEMS ||
+        revealed?.contains(index) == true
+    var visible by remember { mutableStateOf(showNow) }
     LaunchedEffect(staggerMs) {
-        if (staggerMs <= 0) {
-            visible = true
-        } else {
+        if (!visible) {
             delay(index * staggerMs.toLong())
             visible = true
         }
+        revealed?.add(index)
     }
     AnimatedVisibility(
         visible = visible,
@@ -4598,6 +4993,8 @@ private fun ArtistDetailScreen(
     }
     var manualSearching by remember { mutableStateOf(false) }
     var manualError by remember { mutableStateOf<String?>(null) }
+    var manualSourceFilter by remember { mutableStateOf<String?>(null) }
+    var manualSortByRes by remember { mutableStateOf(false) }
     fun runManualSearch(q: String) {
         manualSearching = true
         manualError = null
@@ -5250,9 +5647,34 @@ private fun ArtistDetailScreen(
                         Text(manualError!!, color = Color(0xFFFF8A80))
                     }
                     else -> {
+                        val candSources = manualCandidates.map { it.source }.distinct()
+                        val candCounts = manualCandidates.groupingBy { it.source }.eachCount()
+                        val activeCandSource = manualSourceFilter?.takeIf { it in candSources }
+                        val candResolutions = rememberImageResolutions(
+                            manualCandidates.mapNotNull { it.imageUrl?.takeIf { u -> u.isNotBlank() } }
+                        )
+                        val shownCandidates = manualCandidates
+                            .filter { activeCandSource == null || it.source == activeCandSource }
+                            .let { list ->
+                                if (manualSortByRes) list.sortedByDescending { c ->
+                                    resolutionPixels(c.imageUrl?.let { u -> candResolutions[u] })
+                                } else list
+                            }
+                        Column(Modifier.weight(1f)) {
+                        SourceFilterChips(
+                            sources = candSources,
+                            counts = candCounts,
+                            selected = activeCandSource,
+                            onSelect = { manualSourceFilter = it },
+                            accent = Color(0xFF82B1FF),
+                            contentColor = Color.White,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                            sortByResolution = manualSortByRes,
+                            onToggleSort = { manualSortByRes = !manualSortByRes }
+                        )
                         androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f)) {
-                            items(manualCandidates.size) { idx ->
-                                val c = manualCandidates[idx]
+                            items(shownCandidates.size) { idx ->
+                                val c = shownCandidates[idx]
                                 Row(
                                     Modifier
                                         .fillMaxWidth()
@@ -5296,8 +5718,9 @@ private fun ArtistDetailScreen(
                                         Spacer(Modifier.width(10.dp))
                                     }
                                     Column(Modifier.weight(1f)) {
+                                        val candRes = c.imageUrl?.let { u -> candResolutions[u] }
                                         Text(
-                                            c.source,
+                                            if (candRes != null) "${c.source} · ${resolutionLabel(candRes)}" else c.source,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold,
                                             color = Color(0xFF82B1FF)
@@ -5321,6 +5744,7 @@ private fun ArtistDetailScreen(
                                 }
                             }
                         }
+                        } // Column
                     }
                 }
             }
@@ -5824,105 +6248,6 @@ private fun AlbumDetailScreen(
     }
     } // PullToRefreshBox
 }
-
-@Composable
-private fun BatchTagEditDialog(
-    count: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (artist: String?, album: String?, albumArtist: String?, genre: String?, year: String?, trackTotal: String?, discTotal: String?) -> Unit
-) {
-    var artist by remember { mutableStateOf("") }
-    var album by remember { mutableStateOf("") }
-    var albumArtist by remember { mutableStateOf("") }
-    var genre by remember { mutableStateOf("") }
-    var year by remember { mutableStateOf("") }
-    var trackTotal by remember { mutableStateOf("") }
-    var discTotal by remember { mutableStateOf("") }
-    AppAlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Editar tags em lote ($count faixas)") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    "Deixe em branco os campos que não quiser alterar.",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(0.6f),
-                    modifier = Modifier.padding(bottom = 12.dp)
-                )
-                OutlinedTextField(
-                    value = artist,
-                    onValueChange = { artist = it },
-                    label = { Text("Artista") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = album,
-                    onValueChange = { album = it },
-                    label = { Text("Álbum") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = albumArtist,
-                    onValueChange = { albumArtist = it },
-                    label = { Text("Artista do Álbum") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = genre,
-                    onValueChange = { genre = it },
-                    label = { Text("Gênero") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = year,
-                    onValueChange = { year = it },
-                    label = { Text("Ano") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = trackTotal,
-                    onValueChange = { trackTotal = it },
-                    label = { Text("Total de Faixas") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-                OutlinedTextField(
-                    value = discTotal,
-                    onValueChange = { discTotal = it },
-                    label = { Text("Total de discos") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            val canApply = artist.isNotBlank() || album.isNotBlank() || albumArtist.isNotBlank() || genre.isNotBlank() || year.isNotBlank() || trackTotal.isNotBlank() || discTotal.isNotBlank()
-            TextButton(
-                onClick = {
-                    onConfirm(
-                        artist.takeIf { it.isNotBlank() },
-                        album.takeIf { it.isNotBlank() },
-                        albumArtist.takeIf { it.isNotBlank() },
-                        genre.takeIf { it.isNotBlank() },
-                        year.takeIf { it.isNotBlank() },
-                        trackTotal.takeIf { it.isNotBlank() },
-                        discTotal.takeIf { it.isNotBlank() }
-                    )
-                },
-                enabled = canApply
-            ) { Text("Aplicar") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancelar") }
-        }
-    )
-}
-
 
 private val DEFAULT_RENAME_PATTERNS = listOf(
     "%ARTIST% - %TITLE%",

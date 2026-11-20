@@ -804,10 +804,6 @@ class PlaybackService : MediaSessionService() {
             player.playbackParameters = androidx.media3.common.PlaybackParameters.DEFAULT
         }
 
-        // Watchdog: alguns FLAC reportam duração maior que o áudio real e o player
-        // fica “tocando” silêncio nos últimos segundos sem emitir STATE_ENDED.
-        startEndOfTrackWatchdog(player)
-
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) consecutiveErrors = 0
@@ -1259,6 +1255,8 @@ class PlaybackService : MediaSessionService() {
                             val bgTf = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_backing_font_path", null))
                                 ?: mainTf
 
+                            val mainBorderColor = prefs.getInt("lyrics_border_color", 0xFF000000.toInt())
+                            val mainBorderWidth = prefs.getFloat("lyrics_border_width", 0f)
                             LyricsPopupOverlay.show(applicationContext)
                             LyricsPopupOverlay.applyChrome(applicationContext)
                             LyricsPopupOverlay.updateFrame(
@@ -1282,7 +1280,13 @@ class PlaybackService : MediaSessionService() {
                                     fontSizeSp = fontSize.coerceAtMost(32f),
                                     mainTypeface = mainTf,
                                     translationTypeface = trTf,
-                                    backingTypeface = bgTf
+                                    backingTypeface = bgTf,
+                                    borderColor = mainBorderColor,
+                                    borderWidthDp = mainBorderWidth,
+                                    backingBorderColor = prefs.getInt("lyrics_backing_border_color", mainBorderColor),
+                                    backingBorderWidthDp = prefs.getFloat("lyrics_backing_border_width", mainBorderWidth),
+                                    translationBorderColor = prefs.getInt("lyrics_translation_border_color", mainBorderColor),
+                                    translationBorderWidthDp = prefs.getFloat("lyrics_translation_border_width", mainBorderWidth)
                                 )
                             )
                             if (!lastNotifShown) {
@@ -1406,63 +1410,6 @@ class PlaybackService : MediaSessionService() {
                     player.pause()
                     player.seekTo(0L)
                 }
-            }
-        }
-    }
-
-    /**
-     * Detecta “silêncio no final”: posição presa perto do fim com playWhenReady=true
-     * sem STATE_ENDED (comum em alguns FLAC com duração de cabeçalho maior que o PCM).
-     */
-    private var endWatchdogJob: Job? = null
-    private fun startEndOfTrackWatchdog(player: ExoPlayer) {
-        endWatchdogJob?.cancel()
-        endWatchdogJob = scope.launch {
-            var stuckNearEndMs = 0L
-            var lastPos = -1L
-            var lastMediaId: String? = null
-            while (isActive) {
-                delay(250)
-                try {
-                    if (!player.playWhenReady) {
-                        stuckNearEndMs = 0L
-                        continue
-                    }
-                    val dur = player.duration
-                    val pos = player.currentPosition
-                    val id = player.currentMediaItem?.mediaId
-                    if (id != lastMediaId) {
-                        lastMediaId = id
-                        stuckNearEndMs = 0L
-                        lastPos = -1L
-                    }
-                    if (dur <= 0L || pos < 0L) {
-                        stuckNearEndMs = 0L
-                        continue
-                    }
-                    val remaining = dur - pos
-                    // Perto do fim e posição não avança de forma relevante
-                    if (remaining in 0L..1_200L) {
-                        if (lastPos >= 0L && kotlin.math.abs(pos - lastPos) < 40L) {
-                            stuckNearEndMs += 250L
-                        } else {
-                            stuckNearEndMs = 0L
-                        }
-                        lastPos = pos
-                        // ~900 ms parado no final → força o fim
-                        if (stuckNearEndMs >= 900L) {
-                            android.util.Log.w(
-                                "PlaybackService",
-                                "Watchdog fim de faixa: pos=$pos dur=$dur id=$id — avançando"
-                            )
-                            stuckNearEndMs = 0L
-                            handleTrackEnded(player)
-                        }
-                    } else {
-                        stuckNearEndMs = 0L
-                        lastPos = pos
-                    }
-                } catch (_: Throwable) { }
             }
         }
     }

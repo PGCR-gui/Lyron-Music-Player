@@ -46,6 +46,15 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -75,6 +84,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -128,6 +138,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -199,6 +217,156 @@ import java.util.Locale
  * Até 2 linhas de letra; reduz a fonte automaticamente até o texto caber
  * na largura disponível (quebra suave na 2ª linha se necessário).
  */
+/**
+ * Contorno das letras desenhado com o MESMO método do popup de letras: Paint nativo em modo
+ * STROKE (junta arredondada) por baixo e o preenchimento por cima. A largura do traço é dobrada
+ * porque metade fica escondida sob o preenchimento: a borda visível tem [borderWidthDp] dp.
+ */
+@Composable
+private fun rememberLyricTypeface(
+    family: FontFamily?,
+    weight: FontWeight,
+    italic: Boolean
+): android.graphics.Typeface {
+    val resolver = androidx.compose.ui.platform.LocalFontFamilyResolver.current
+    val state = remember(family, weight, italic) {
+        resolver.resolve(
+            family,
+            weight,
+            if (italic) androidx.compose.ui.text.font.FontStyle.Italic
+            else androidx.compose.ui.text.font.FontStyle.Normal,
+            androidx.compose.ui.text.font.FontSynthesis.All
+        )
+    }
+    return (state.value as? android.graphics.Typeface) ?: android.graphics.Typeface.DEFAULT
+}
+
+private class LyricLayoutHolder {
+    var layout: android.text.StaticLayout? = null
+    var baseline = 0f
+}
+
+/** Texto de várias linhas, centralizado, com contorno (linhas simples / sem karaokê). */
+@Composable
+private fun OutlinedLyricText(
+    text: String,
+    color: Color,
+    borderColor: Color,
+    borderWidthDp: Float,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    fontFamily: FontFamily?,
+    fontWeight: FontWeight,
+    italic: Boolean,
+    lineHeightMul: Float,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE
+) {
+    val tf = rememberLyricTypeface(fontFamily, fontWeight, italic)
+    val density = LocalDensity.current
+    val sizePx = with(density) { fontSize.toPx() }
+    val strokePx = borderWidthDp * 2f * density.density
+    val paint = remember { android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG) }
+    val holder = remember { LyricLayoutHolder() }
+    androidx.compose.ui.layout.Layout(
+        content = {},
+        modifier = modifier.drawBehind {
+            val sl = holder.layout ?: return@drawBehind
+            drawIntoCanvas { c ->
+                val nc = c.nativeCanvas
+                if (strokePx > 0f) {
+                    paint.style = android.graphics.Paint.Style.STROKE
+                    paint.strokeWidth = strokePx
+                    paint.strokeJoin = android.graphics.Paint.Join.ROUND
+                    paint.color = borderColor.copy(alpha = borderColor.alpha * color.alpha).toArgb()
+                    sl.draw(nc)
+                }
+                paint.style = android.graphics.Paint.Style.FILL
+                paint.strokeWidth = 0f
+                paint.color = color.toArgb()
+                sl.draw(nc)
+            }
+        },
+        measurePolicy = { _, constraints ->
+            paint.textSize = sizePx
+            paint.typeface = tf
+            val w = if (constraints.hasBoundedWidth) constraints.maxWidth
+            else paint.measureText(text).toInt().coerceAtLeast(1)
+            val natural = paint.fontMetricsInt.let { it.descent - it.ascent }
+            val sl = android.text.StaticLayout.Builder
+                .obtain(text, 0, text.length, paint, w.coerceAtLeast(1))
+                .setAlignment(android.text.Layout.Alignment.ALIGN_CENTER)
+                .setIncludePad(false)
+                .setLineSpacing((lineHeightMul * sizePx - natural).coerceAtLeast(0f), 1f)
+                .setMaxLines(maxLines)
+                .setEllipsize(android.text.TextUtils.TruncateAt.END)
+                .build()
+            holder.layout = sl
+            layout(constraints.constrainWidth(w), constraints.constrainHeight(sl.height)) {}
+        }
+    )
+}
+
+/** Uma palavra do karaokê com contorno (mesmo Paint STROKE + FILL do popup). */
+@Composable
+private fun OutlinedWordText(
+    text: String,
+    color: Color,
+    borderColor: Color,
+    borderWidthDp: Float,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    fontFamily: FontFamily?,
+    fontWeight: FontWeight,
+    italic: Boolean,
+    lineHeightMul: Float,
+    shadow: androidx.compose.ui.graphics.Shadow?,
+    modifier: Modifier = Modifier
+) {
+    val tf = rememberLyricTypeface(fontFamily, fontWeight, italic)
+    val density = LocalDensity.current
+    val sizePx = with(density) { fontSize.toPx() }
+    val strokePx = borderWidthDp * 2f * density.density
+    val paint = remember { android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG) }
+    val holder = remember { LyricLayoutHolder() }
+    androidx.compose.ui.layout.Layout(
+        content = {},
+        modifier = modifier.drawBehind {
+            drawIntoCanvas { c ->
+                val nc = c.nativeCanvas
+                paint.textSize = sizePx
+                paint.typeface = tf
+                if (strokePx > 0f) {
+                    paint.style = android.graphics.Paint.Style.STROKE
+                    paint.strokeWidth = strokePx
+                    paint.strokeJoin = android.graphics.Paint.Join.ROUND
+                    paint.color = borderColor.copy(alpha = borderColor.alpha * color.alpha).toArgb()
+                    nc.drawText(text, 0f, holder.baseline, paint)
+                }
+                paint.style = android.graphics.Paint.Style.FILL
+                paint.strokeWidth = 0f
+                paint.color = color.toArgb()
+                if (shadow != null) {
+                    paint.setShadowLayer(shadow.blurRadius, shadow.offset.x, shadow.offset.y, shadow.color.toArgb())
+                }
+                nc.drawText(text, 0f, holder.baseline, paint)
+                if (shadow != null) paint.clearShadowLayer()
+            }
+        },
+        measurePolicy = { _, constraints ->
+            paint.textSize = sizePx
+            paint.typeface = tf
+            val fm = paint.fontMetrics
+            val asc = -fm.ascent
+            val desc = fm.descent
+            val w = Math.ceil(paint.measureText(text).toDouble()).toInt().coerceAtLeast(1)
+            val h = Math.ceil((lineHeightMul * sizePx).toDouble()).toInt().coerceAtLeast(1)
+            // Entrelinha distribuída de forma proporcional ao ascent/descent (como o Text do Compose).
+            val extra = (h - (asc + desc)).coerceAtLeast(0f)
+            holder.baseline = extra * asc / (asc + desc) + asc
+            layout(constraints.constrainWidth(w), constraints.constrainHeight(h)) {}
+        }
+    )
+}
+
 @Composable
 private fun AutoSizeSingleLineLyric(
     text: String,
@@ -207,7 +375,9 @@ private fun AutoSizeSingleLineLyric(
     color: Color,
     modifier: Modifier = Modifier,
     minFontSizeSp: Float = 11f,
-    maxLines: Int = 2
+    maxLines: Int = 2,
+    borderColor: Color = Color.Black,
+    borderWidth: Float = 0f
 ) {
     val textMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
     BoxWithConstraints(modifier = modifier) {
@@ -248,19 +418,35 @@ private fun AutoSizeSingleLineLyric(
                 best
             }
         }
-        Text(
-            text = text,
-            textAlign = TextAlign.Center,
-            fontSize = fontSizeSp.sp,
-            fontWeight = FontWeight.Medium,
-            color = color,
-            maxLines = maxLines,
-            softWrap = true,
-            overflow = TextOverflow.Ellipsis,
-            fontFamily = fontFamily,
-            lineHeight = (fontSizeSp * 1.25f).sp,
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (borderWidth > 0f) {
+            OutlinedLyricText(
+                text = text,
+                color = color,
+                borderColor = borderColor,
+                borderWidthDp = borderWidth,
+                fontSize = fontSizeSp.sp,
+                fontFamily = fontFamily,
+                fontWeight = FontWeight.Medium,
+                italic = false,
+                lineHeightMul = 1.25f,
+                maxLines = maxLines,
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            Text(
+                text = text,
+                textAlign = TextAlign.Center,
+                fontSize = fontSizeSp.sp,
+                fontWeight = FontWeight.Medium,
+                color = color,
+                maxLines = maxLines,
+                softWrap = true,
+                overflow = TextOverflow.Ellipsis,
+                fontFamily = fontFamily,
+                lineHeight = (fontSizeSp * 1.25f).sp,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 
@@ -360,6 +546,8 @@ fun NowPlayingScreen(
     onToggleFavoriteTrack: (Track) -> Unit = {},
     onDeleteTrack: (Track) -> Unit = {},
     onPlayNextFromQueue: (Track) -> Unit = {},
+    pinnedQueueIds: Set<String> = emptySet(),
+    onTogglePinQueue: (Track) -> Unit = {},
     isFavoriteCheck: (String) -> Boolean = { false },
     onToggleFavorite: () -> Unit,
     onAddToPlaylist: () -> Unit,
@@ -385,6 +573,10 @@ fun NowPlayingScreen(
     lyricsSecondaryColor: Int = 0x66FFFFFF,
     lyricsBorderColor: Int = 0xFF000000.toInt(),
     lyricsBorderWidth: Float = 0f,
+    lyricsBackingBorderColor: Int = lyricsBorderColor,
+    lyricsBackingBorderWidth: Float = lyricsBorderWidth,
+    lyricsTranslationBorderColor: Int = lyricsBorderColor,
+    lyricsTranslationBorderWidth: Float = lyricsBorderWidth,
     lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
     lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
     lyricsBackingSecondaryColor: Int = 0x99CE93D8.toInt(),
@@ -435,6 +627,7 @@ fun NowPlayingScreen(
     var showPresetPicker by remember { mutableStateOf(false) }
     var position by remember { mutableLongStateOf(getPosition()) }
     var dragFraction by remember { mutableStateOf<Float?>(null) }
+    var showExactJump by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showTechDetails by remember { mutableStateOf(false) }
@@ -1330,6 +1523,8 @@ fun NowPlayingScreen(
                                         baseFontSize = lyricsFontSize.sp,
                                         fontFamily = lyricsFont,
                                         color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
+                                        borderColor = Color(lyricsBorderColor),
+                                        borderWidth = lyricsBorderWidth,
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                 }
@@ -1345,23 +1540,40 @@ fun NowPlayingScreen(
                                         fontFamily = lyricsTranslationFont ?: lyricsFont,
                                         primary = Color(lyricsTranslationColor).copy(alpha = 0.95f),
                                         secondary = Color(lyricsTranslationColor).copy(alpha = 0.55f),
-                                        borderColor = Color(lyricsBorderColor),
-                                        borderWidth = lyricsBorderWidth,
+                                        borderColor = Color(lyricsTranslationBorderColor),
+                                        borderWidth = lyricsTranslationBorderWidth,
                                         emphasisFont = lyricsEmphasisFont,
                                         isTranslation = true,
                                         modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
                                     )
                                 } else {
-                                    Text(
-                                        trLine.text,
-                                        color = Color(lyricsTranslationColor).copy(alpha = 0.9f),
-                                        fontSize = (lyricsFontSize - 3f).coerceAtLeast(12f).sp,
-                                        fontFamily = lyricsTranslationFont ?: lyricsFont,
-                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                        textAlign = TextAlign.Center,
-                                        maxLines = 2,
-                                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
-                                    )
+                                    val trFill = Color(lyricsTranslationColor).copy(alpha = 0.9f)
+                                    if (lyricsTranslationBorderWidth > 0f) {
+                                        OutlinedLyricText(
+                                            text = trLine.text,
+                                            color = trFill,
+                                            borderColor = Color(lyricsTranslationBorderColor),
+                                            borderWidthDp = lyricsTranslationBorderWidth,
+                                            fontSize = (lyricsFontSize - 3f).coerceAtLeast(12f).sp,
+                                            fontFamily = lyricsTranslationFont ?: lyricsFont,
+                                            fontWeight = FontWeight.Normal,
+                                            italic = true,
+                                            lineHeightMul = 1.2f,
+                                            maxLines = 2,
+                                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            trLine.text,
+                                            color = trFill,
+                                            fontSize = (lyricsFontSize - 3f).coerceAtLeast(12f).sp,
+                                            fontFamily = lyricsTranslationFont ?: lyricsFont,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            textAlign = TextAlign.Center,
+                                            maxLines = 2,
+                                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                                        )
+                                    }
                                 }
                             }
                             activeBgLine?.takeIf { it.text.isNotBlank() }?.let { bgLine ->
@@ -1373,23 +1585,40 @@ fun NowPlayingScreen(
                                         fontFamily = lyricsBackingFont ?: lyricsFont,
                                         primary = Color(lyricsBackingColor).copy(alpha = 0.95f),
                                         secondary = Color(lyricsBackingSecondaryColor),
-                                        borderColor = Color(lyricsBorderColor),
-                                        borderWidth = lyricsBorderWidth,
+                                        borderColor = Color(lyricsBackingBorderColor),
+                                        borderWidth = lyricsBackingBorderWidth,
                                         emphasisFont = lyricsEmphasisFont,
                                         isBackground = true,
                                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
                                     )
                                 } else {
-                                    Text(
-                                        bgLine.text,
-                                        color = Color(lyricsBackingColor).copy(alpha = 0.85f),
-                                        fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
-                                        fontFamily = lyricsBackingFont ?: lyricsFont,
-                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                        textAlign = TextAlign.Center,
-                                        maxLines = 2,
-                                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-                                    )
+                                    val bgFill = Color(lyricsBackingColor).copy(alpha = 0.85f)
+                                    if (lyricsBackingBorderWidth > 0f) {
+                                        OutlinedLyricText(
+                                            text = bgLine.text,
+                                            color = bgFill,
+                                            borderColor = Color(lyricsBackingBorderColor),
+                                            borderWidthDp = lyricsBackingBorderWidth,
+                                            fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
+                                            fontFamily = lyricsBackingFont ?: lyricsFont,
+                                            fontWeight = FontWeight.Normal,
+                                            italic = true,
+                                            lineHeightMul = 1.2f,
+                                            maxLines = 2,
+                                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            bgLine.text,
+                                            color = bgFill,
+                                            fontSize = (lyricsFontSize - 4f).coerceAtLeast(11f).sp,
+                                            fontFamily = lyricsBackingFont ?: lyricsFont,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            textAlign = TextAlign.Center,
+                                            maxLines = 2,
+                                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                                        )
+                                    }
                                 }
                             }
                             } // Column
@@ -1402,6 +1631,8 @@ fun NowPlayingScreen(
                                     baseFontSize = lyricsFontSize.sp,
                                     fontFamily = lyricsFont,
                                     color = Color(lyricsPrimaryColor).copy(alpha = 0.95f),
+                                    borderColor = Color(lyricsBorderColor),
+                                    borderWidth = lyricsBorderWidth,
                                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                 )
                             }
@@ -1510,6 +1741,8 @@ fun NowPlayingScreen(
                 peaks = seekPeaks,
                 peaksFailed = seekPeaksFailed,
                 waveformTheme = seekWaveformTheme,
+                durationMs = duration,
+                onRequestExactJump = { showExactJump = true },
                 onDrag = {
                     isDraggingSeek = true
                     dragFraction = it
@@ -1527,6 +1760,20 @@ fun NowPlayingScreen(
                     isDraggingSeek = false
                 }
             )
+            if (showExactJump) {
+                ExactJumpDialog(
+                    durationMs = duration,
+                    initialMs = position,
+                    onDismiss = { showExactJump = false },
+                    onConfirm = { ms ->
+                        val target = ms.coerceIn(0L, duration)
+                        showExactJump = false
+                        position = target
+                        pendingSeekMs = target
+                        onSeek(target)
+                    }
+                )
+            }
 
             // Tempos
             Row(
@@ -1769,6 +2016,8 @@ fun NowPlayingScreen(
                 onDelete = { t -> pendingDeleteTrack = t },
                 onPlayNext = onPlayNextFromQueue,
                 isFavorite = isFavoriteCheck,
+                pinnedIds = pinnedQueueIds,
+                onTogglePin = onTogglePinQueue,
             )
         }
 
@@ -1858,6 +2107,10 @@ fun NowPlayingScreen(
                 backingSecondaryColor = Color(lyricsBackingSecondaryColor),
                 borderColor = Color(lyricsBorderColor),
                 borderWidth = lyricsBorderWidth,
+                backingBorderColor = Color(lyricsBackingBorderColor),
+                backingBorderWidth = lyricsBackingBorderWidth,
+                translationBorderColor = Color(lyricsTranslationBorderColor),
+                translationBorderWidth = lyricsTranslationBorderWidth,
                 onSeek = { ms ->
                     onSeek(ms)
                     position = ms
@@ -2137,6 +2390,145 @@ internal fun HdBadge(modifier: Modifier = Modifier) {
     )
 }
 
+// Medidas do gesto "deslizar para cima" da seekbar (coordenadas locais; y negativo = acima da barra).
+private val SeekJumpArmDistance = 28.dp
+private val SeekJumpBtnW = 132.dp
+private val SeekJumpBtnH = 44.dp
+private val SeekJumpBtnGap = 10.dp
+private val SeekJumpBtnCenterY = (-84).dp
+private val SeekBubbleW = 84.dp
+private val SeekBubbleH = 34.dp
+
+/** m:ss, ou h:mm:ss a partir de 1 hora. */
+private fun formatExactTime(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val sec = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+}
+
+@Composable
+private fun SeekTimeBubble(text: String, accent: Color, armed: Boolean) {
+    Box(
+        Modifier
+            .size(SeekBubbleW, SeekBubbleH)
+            .clip(RoundedCornerShape(17.dp))
+            .background(Color.Black.copy(alpha = 0.80f))
+            .border(1.dp, accent.copy(alpha = if (armed) 0.95f else 0.55f), RoundedCornerShape(17.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SeekJumpButtons(hover: Int, accent: Color) {
+    Row(
+        Modifier.width(SeekJumpBtnW * 2 + SeekJumpBtnGap),
+        horizontalArrangement = Arrangement.spacedBy(SeekJumpBtnGap)
+    ) {
+        SeekJumpPill("Ir para…", hover == 1, accent)
+        SeekJumpPill("Cancelar", hover == 2, accent)
+    }
+}
+
+@Composable
+private fun SeekJumpPill(label: String, selected: Boolean, accent: Color) {
+    val scale by animateFloatAsState(
+        targetValue = if (selected) 1.07f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMedium),
+        label = "jumpPillScale"
+    )
+    val shape = RoundedCornerShape(22.dp)
+    Box(
+        Modifier
+            .size(SeekJumpBtnW, SeekJumpBtnH)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(shape)
+            .background(if (selected) accent else Color.Black.copy(alpha = 0.80f))
+            .border(1.dp, if (selected) accent else Color.White.copy(alpha = 0.28f), shape),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.Black else Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
+    }
+}
+
+/** Diálogo "Vamos para": o usuário digita hh:mm:ss exatos. */
+@Composable
+private fun ExactJumpDialog(
+    durationMs: Long,
+    initialMs: Long,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit
+) {
+    val maxSec = (durationMs / 1000).coerceAtLeast(0)
+    val hasHours = maxSec >= 3600
+    val init = (initialMs / 1000).coerceIn(0, maxSec)
+    var hh by remember { mutableStateOf((init / 3600).toString()) }
+    var mm by remember { mutableStateOf(((init % 3600) / 60).toString()) }
+    var ss by remember { mutableStateOf((init % 60).toString()) }
+    val h = hh.toLongOrNull() ?: 0L
+    val m = mm.toLongOrNull() ?: 0L
+    val sec = ss.toLongOrNull() ?: 0L
+    val target = h * 3600 + m * 60 + sec
+    val valid = sec < 60 && (!hasHours || m < 60) && target <= maxSec
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+
+    @Composable
+    fun field(value: String, label: String, enabled: Boolean, mod: Modifier, onChange: (String) -> Unit) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { v -> onChange(v.filter { it.isDigit() }.take(2)) },
+            label = { Text(label, fontSize = 10.sp) },
+            enabled = enabled,
+            singleLine = true,
+            isError = !valid && enabled,
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 20.sp, textAlign = TextAlign.Center),
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                imeAction = androidx.compose.ui.text.input.ImeAction.Done
+            ),
+            modifier = mod.width(72.dp)
+        )
+    }
+
+    AppAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Vamos para") },
+        text = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    field(hh, "hh", hasHours, Modifier) { hh = it }
+                    Text(" : ", fontSize = 20.sp)
+                    field(mm, "mm", true, Modifier.focusRequester(focus)) { mm = it }
+                    Text(" : ", fontSize = 20.sp)
+                    field(ss, "ss", true, Modifier) { ss = it }
+                }
+                if (!valid) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Tempo inválido (máximo ${formatExactTime(durationMs)})",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(target * 1000L) }, enabled = valid) { Text("OK") }
+        }
+    )
+}
+
 /** Estilos da barra de progresso (seekbar) do Now Playing. */
 enum class SeekBarStyle {
     Normal,    // barra fina, thumb discreto
@@ -2185,6 +2577,8 @@ private fun SeekBar(
     peaks: FloatArray? = null,
     peaksFailed: Boolean = false,
     waveformTheme: WaveformTheme = WaveformTheme.BARS,
+    durationMs: Long = 0L,
+    onRequestExactJump: () -> Unit = {},
     onDrag: (Float) -> Unit,
     onDragEnd: (Float) -> Unit,
     onDragCancel: () -> Unit
@@ -2192,6 +2586,15 @@ private fun SeekBar(
     var barWidth by remember { mutableFloatStateOf(1f) }
     var lastDragFraction by remember { mutableFloatStateOf(fraction) }
     var dragging by remember { mutableStateOf(false) }
+    // Deslizar para cima durante o arrasto: mostra "Ir para…" / "Cancelar".
+    var jumpArmed by remember { mutableStateOf(false) }
+    var jumpHover by remember { mutableIntStateOf(0) } // 0 nenhum · 1 Ir para · 2 Cancelar
+    val haptics = LocalHapticFeedback.current
+    // O pointerInput(Unit) nunca reinicia: sempre chama a versão mais recente dos callbacks.
+    val curOnDrag by rememberUpdatedState(onDrag)
+    val curOnDragEnd by rememberUpdatedState(onDragEnd)
+    val curOnDragCancel by rememberUpdatedState(onDragCancel)
+    val curOnJump by rememberUpdatedState(onRequestExactJump)
     val density = LocalDensity.current.density
     val trackHeight = when (style) {
         SeekBarStyle.Thick -> 10.dp
@@ -2281,35 +2684,111 @@ private fun SeekBar(
                 }
             }
             .pointerInput(Unit) {
-                detectHorizontalDragGestures(
-                    onDragStart = { o ->
-                        val w = size.width.toFloat().coerceAtLeast(1f)
-                        barWidth = w
-                        val f = (o.x / w).coerceIn(0f, 1f)
-                        lastDragFraction = f
-                        dragging = true
-                        onDrag(f)
-                    },
-                    onHorizontalDrag = { change, _ ->
+                val armY = -SeekJumpArmDistance.toPx()
+                val disarmY = armY * 0.45f
+                val btnW = SeekJumpBtnW.toPx()
+                val btnH = SeekJumpBtnH.toPx()
+                val gap = SeekJumpBtnGap.toPx()
+                val cy = SeekJumpBtnCenterY.toPx()
+                val tol = 14.dp.toPx()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val slop = awaitHorizontalTouchSlopOrCancellation(down.id) { change, _ ->
                         change.consume()
-                        val w = size.width.toFloat().coerceAtLeast(1f)
-                        barWidth = w
-                        val f = (change.position.x / w).coerceIn(0f, 1f)
-                        lastDragFraction = f
-                        onDrag(f)
-                    },
-                    onDragEnd = {
-                        dragging = false
-                        onDragEnd(lastDragFraction)
-                    },
-                    onDragCancel = {
-                        dragging = false
-                        onDragCancel()
+                    } ?: return@awaitEachGesture
+                    val w = size.width.toFloat().coerceAtLeast(1f)
+                    barWidth = w
+                    lastDragFraction = (down.position.x / w).coerceIn(0f, 1f)
+                    dragging = true
+                    curOnDrag(lastDragFraction)
+
+                    var armed = false
+                    var hover = 0
+                    val left = androidx.compose.ui.geometry.Rect(
+                        w / 2f - gap / 2f - btnW, cy - btnH / 2f - tol, w / 2f - gap / 2f, cy + btnH / 2f + tol
+                    )
+                    val right = androidx.compose.ui.geometry.Rect(
+                        w / 2f + gap / 2f, cy - btnH / 2f - tol, w / 2f + gap / 2f + btnW, cy + btnH / 2f + tol
+                    )
+                    val completed = drag(slop.id) { change ->
+                        change.consume()
+                        val pos = change.position
+                        if (!armed && pos.y < armY) {
+                            armed = true
+                            jumpArmed = true
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        } else if (armed && pos.y > disarmY) {
+                            armed = false
+                            hover = 0
+                            jumpArmed = false
+                            jumpHover = 0
+                        }
+                        if (armed) {
+                            // Valor congelado: só escolhe entre os botões
+                            val h = when {
+                                left.contains(pos) -> 1
+                                right.contains(pos) -> 2
+                                else -> 0
+                            }
+                            if (h != hover) {
+                                hover = h
+                                jumpHover = h
+                                if (h != 0) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                        } else {
+                            val f = (pos.x / w).coerceIn(0f, 1f)
+                            lastDragFraction = f
+                            curOnDrag(f)
+                        }
                     }
-                )
+                    val wasArmed = armed
+                    val finalHover = hover
+                    dragging = false
+                    jumpArmed = false
+                    jumpHover = 0
+                    when {
+                        !completed -> curOnDragCancel()
+                        wasArmed -> {
+                            // Soltou com os botões visíveis: nada é movido; só "Ir para" abre o diálogo.
+                            curOnDragCancel()
+                            if (finalHover == 1) curOnJump()
+                        }
+                        else -> curOnDragEnd(lastDragFraction)
+                    }
+                }
             },
         contentAlignment = Alignment.Center
     ) {
+        if (dragging && durationMs > 1L) {
+            val dens = LocalDensity.current
+            val bubbleW = with(dens) { SeekBubbleW.roundToPx() }
+            val thumbX = lastDragFraction.coerceIn(0f, 1f) * barWidth
+            val bx = (thumbX - bubbleW / 2f).coerceIn(0f, (barWidth - bubbleW).coerceAtLeast(0f)).toInt()
+            val by = -with(dens) { (SeekBubbleH + 8.dp).roundToPx() }
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(bx, by),
+                properties = PopupProperties(focusable = false, clippingEnabled = false)
+            ) {
+                SeekTimeBubble(
+                    text = formatExactTime((lastDragFraction.coerceIn(0f, 1f) * durationMs).toLong()),
+                    accent = accentColor,
+                    armed = jumpArmed
+                )
+            }
+            if (jumpArmed) {
+                val rowW = with(dens) { (SeekJumpBtnW * 2 + SeekJumpBtnGap).roundToPx() }
+                val rx = ((barWidth - rowW) / 2f).toInt()
+                val ry = with(dens) { (SeekJumpBtnCenterY - SeekJumpBtnH / 2).roundToPx() }
+                Popup(
+                    alignment = Alignment.TopStart,
+                    offset = IntOffset(rx, ry),
+                    properties = PopupProperties(focusable = false, clippingEnabled = false)
+                ) {
+                    SeekJumpButtons(hover = jumpHover, accent = accentColor)
+                }
+            }
+        }
         Canvas(
             Modifier
                 .fillMaxWidth()
@@ -2651,6 +3130,8 @@ internal fun QueueSheet(
     onDelete: (Track) -> Unit = {},
     onPlayNext: (Track) -> Unit = {},
     isFavorite: (String) -> Boolean = { false },
+    pinnedIds: Set<String> = emptySet(),
+    onTogglePin: (Track) -> Unit = {},
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val order = remember { mutableStateListOf<Track>().apply { addAll(queue) } }
@@ -2923,6 +3404,14 @@ internal fun QueueSheet(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        if (track.id in pinnedIds) {
+                            Icon(
+                                Icons.Rounded.PushPin,
+                                contentDescription = "Fixada",
+                                tint = appColors.accent,
+                                modifier = Modifier.padding(end = 6.dp).size(18.dp)
+                            )
+                        }
                         if (!selectionMode) {
                             Icon(
                                 Icons.Rounded.DragHandle,
@@ -2998,6 +3487,18 @@ internal fun QueueSheet(
                                 menuForIndex = null
                                 selectedIds = emptySet()
                                 onRemoveFromQueue(realIndex)
+                            }
+                        )
+                        val pinned = track.id in pinnedIds
+                        LensMenuItem(
+                            text = { Text(if (pinned) "Desafixar" else "Fixar", color = MaterialTheme.colorScheme.onSurface) },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.PushPin, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+                            },
+                            onClick = {
+                                menuForIndex = null
+                                selectedIds = emptySet()
+                                onTogglePin(track)
                             }
                         )
                         LensMenuItem(
@@ -3424,6 +3925,10 @@ internal fun FullscreenLyrics(
     backingSecondaryColor: Color = Color(0x99CE93D8),
     borderColor: Color = Color.Black,
     borderWidth: Float = 0f,
+    backingBorderColor: Color = borderColor,
+    backingBorderWidth: Float = borderWidth,
+    translationBorderColor: Color = borderColor,
+    translationBorderWidth: Float = borderWidth,
     onSeek: (Long) -> Unit,
     onClose: () -> Unit
 ) {
@@ -3702,49 +4207,62 @@ internal fun FullscreenLyrics(
                                     isBg -> backingSecondaryColor
                                     else -> secondaryColor
                                 },
-                                borderColor = borderColor,
-                                borderWidth = borderWidth,
+                                borderColor = when { isTr -> translationBorderColor; isBg -> backingBorderColor; else -> borderColor },
+                                borderWidth = when { isTr -> translationBorderWidth; isBg -> backingBorderWidth; else -> borderWidth },
                                 emphasisFont = emphasisFont,
                                 isTranslation = isTr,
                                 isBackground = isBg,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         } else {
-                            Text(
-                                line.text,
-                                modifier = Modifier.fillMaxWidth(),
-                                textAlign = TextAlign.Center,
-                                fontSize = baseSize,
-                                lineHeight = (baseSize.value * 1.32f).sp,
-                                fontWeight = when {
-                                    isMainActive -> FontWeight.Bold
-                                    isBgActive -> FontWeight.SemiBold
-                                    else -> FontWeight.Normal
-                                },
-                                color = when {
-                                    isMainActive -> primaryColor
-                                    isBgActive -> backingColor.copy(alpha = 0.95f)
-                                    isTrActive -> translationColor.copy(alpha = 0.95f)
-                                    isBg -> backingSecondaryColor
-                                    isTr -> secondaryColor  // fora do timestamp: secundária
-                                    else -> secondaryColor
-                                },
-                                fontFamily = when {
-                                    isTr -> translationFont ?: lyricsFont
-                                    isBg -> backingFont ?: lyricsFont
-                                    else -> lyricsFont
-                                },
-                                fontStyle = if (isBg || isTr) androidx.compose.ui.text.font.FontStyle.Italic
-                                else androidx.compose.ui.text.font.FontStyle.Normal,
-                                style = if (borderWidth > 0f && isActive) {
-                                    androidx.compose.ui.text.TextStyle(
-                                        shadow = androidx.compose.ui.graphics.Shadow(
-                                            color = borderColor,
-                                            blurRadius = borderWidth * 2f
-                                        )
-                                    )
-                                } else androidx.compose.ui.text.TextStyle.Default
-                            )
+                            val lyColor = when {
+                                isMainActive -> primaryColor
+                                isBgActive -> backingColor.copy(alpha = 0.95f)
+                                isTrActive -> translationColor.copy(alpha = 0.95f)
+                                isBg -> backingSecondaryColor
+                                isTr -> secondaryColor  // fora do timestamp: secundária
+                                else -> secondaryColor
+                            }
+                            val lyFont = when {
+                                isTr -> translationFont ?: lyricsFont
+                                isBg -> backingFont ?: lyricsFont
+                                else -> lyricsFont
+                            }
+                            val lyWeight = when {
+                                isMainActive -> FontWeight.Bold
+                                isBgActive -> FontWeight.SemiBold
+                                else -> FontWeight.Normal
+                            }
+                            val lyItalic = if (isBg || isTr) androidx.compose.ui.text.font.FontStyle.Italic
+                            else androidx.compose.ui.text.font.FontStyle.Normal
+                            val lyBorderColor = when { isTr -> translationBorderColor; isBg -> backingBorderColor; else -> borderColor }
+                            val lyBorderWidth = when { isTr -> translationBorderWidth; isBg -> backingBorderWidth; else -> borderWidth }
+                            if (lyBorderWidth > 0f) {
+                                OutlinedLyricText(
+                                    text = line.text,
+                                    color = lyColor,
+                                    borderColor = lyBorderColor,
+                                    borderWidthDp = lyBorderWidth,
+                                    fontSize = baseSize,
+                                    fontFamily = lyFont,
+                                    fontWeight = lyWeight,
+                                    italic = isBg || isTr,
+                                    lineHeightMul = 1.32f,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                Text(
+                                    line.text,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    textAlign = TextAlign.Center,
+                                    fontSize = baseSize,
+                                    lineHeight = (baseSize.value * 1.32f).sp,
+                                    fontWeight = lyWeight,
+                                    color = lyColor,
+                                    fontFamily = lyFont,
+                                    fontStyle = lyItalic
+                                )
+                            }
                         }
                     }
                 }
@@ -3932,15 +4450,41 @@ private fun SyllableLine(
                         )
                     )
                 }
-                borderWidth > 0f && (fullyActive || isCurrent || (word.animation == LyricAnimation.FRZ && effectStarted)) ->
-                    androidx.compose.ui.text.TextStyle(
-                        shadow = androidx.compose.ui.graphics.Shadow(
-                            color = borderColor.copy(alpha = 0.7f),
-                            blurRadius = borderWidth * 1.8f
-                        )
-                    )
                 else -> androidx.compose.ui.text.TextStyle.Default
             }
+
+            val wordLayer = Modifier.graphicsLayer {
+                alpha = dedAlpha
+                scaleX = zoomScale
+                scaleY = zoomScale
+                var ty = slideY.dp.toPx()
+                if (isWav) {
+                    ty += (sin((animElapsedF / 160f) * 2f * Math.PI.toFloat()) * 2.8f).dp.toPx()
+                }
+                if (isShaking) {
+                    val phase = shakePhase * 2f * Math.PI.toFloat()
+                    translationX = (sin(phase) * 2.4f).dp.toPx()
+                    ty += (sin(phase * 2f) * 1.1f).dp.toPx()
+                } else if (isVib) {
+                    val phase = shakePhase * 2f * Math.PI.toFloat()
+                    translationX = (sin(phase) * 1.1f).dp.toPx()
+                    ty += (sin(phase * 1.7f) * 0.7f).dp.toPx()
+                } else {
+                    translationX = 0f
+                }
+                translationY = ty
+            }
+            val wordWeight = when {
+                word.animation == LyricAnimation.FRZ && effectStarted ->
+                    if (isBackground) FontWeight.SemiBold else FontWeight.Bold
+                fullyActive || (isCurrent && wordProgress > 0.15f) ->
+                    if (isBackground) FontWeight.SemiBold else FontWeight.Bold
+                else -> FontWeight.Normal
+            }
+            val wordFamily = if (isDes) emphasisFont ?: fontFamily else fontFamily
+            val wordItalic = if (isBackground || isTranslation)
+                androidx.compose.ui.text.font.FontStyle.Italic
+            else androidx.compose.ui.text.font.FontStyle.Normal
 
             // Box: eco sobrepõe sem ocupar espaço extra no FlowRow
             Box {
@@ -3966,46 +4510,34 @@ private fun SyllableLine(
                         textAlign = TextAlign.Center
                     )
                 }
-                Text(
-                    text = leadingSpace + displayText,
-                    modifier = Modifier.graphicsLayer {
-                        alpha = dedAlpha
-                        scaleX = zoomScale
-                        scaleY = zoomScale
-                        var ty = slideY.dp.toPx()
-                        if (isWav) {
-                            ty += (sin((animElapsedF / 160f) * 2f * Math.PI.toFloat()) * 2.8f).dp.toPx()
-                        }
-                        if (isShaking) {
-                            val phase = shakePhase * 2f * Math.PI.toFloat()
-                            translationX = (sin(phase) * 2.4f).dp.toPx()
-                            ty += (sin(phase * 2f) * 1.1f).dp.toPx()
-                        } else if (isVib) {
-                            val phase = shakePhase * 2f * Math.PI.toFloat()
-                            translationX = (sin(phase) * 1.1f).dp.toPx()
-                            ty += (sin(phase * 1.7f) * 0.7f).dp.toPx()
-                        } else {
-                            translationX = 0f
-                        }
-                        translationY = ty
-                    },
-                    color = color,
-                    fontSize = fontSize * desFontMul,
-                    fontWeight = when {
-                        word.animation == LyricAnimation.FRZ && effectStarted ->
-                            if (isBackground) FontWeight.SemiBold else FontWeight.Bold
-                        fullyActive || (isCurrent && wordProgress > 0.15f) ->
-                            if (isBackground) FontWeight.SemiBold else FontWeight.Bold
-                        else -> FontWeight.Normal
-                    },
-                    fontFamily = if (isDes) emphasisFont ?: fontFamily else fontFamily,
-                    fontStyle = if (isBackground || isTranslation)
-                        androidx.compose.ui.text.font.FontStyle.Italic
-                    else androidx.compose.ui.text.font.FontStyle.Normal,
-                    lineHeight = (fontSize.value * 1.32f * desFontMul).sp,
-                    textAlign = TextAlign.Center,
-                    style = shadowStyle
-                )
+                if (borderWidth > 0f) {
+                    OutlinedWordText(
+                        text = leadingSpace + displayText,
+                        color = color,
+                        borderColor = borderColor,
+                        borderWidthDp = borderWidth,
+                        fontSize = fontSize * desFontMul,
+                        fontFamily = wordFamily,
+                        fontWeight = wordWeight,
+                        italic = isBackground || isTranslation,
+                        lineHeightMul = 1.32f,
+                        shadow = shadowStyle.shadow,
+                        modifier = wordLayer
+                    )
+                } else {
+                    Text(
+                        text = leadingSpace + displayText,
+                        modifier = wordLayer,
+                        color = color,
+                        fontSize = fontSize * desFontMul,
+                        fontWeight = wordWeight,
+                        fontFamily = wordFamily,
+                        fontStyle = wordItalic,
+                        lineHeight = (fontSize.value * 1.32f * desFontMul).sp,
+                        textAlign = TextAlign.Center,
+                        style = shadowStyle
+                    )
+                }
             }
         }
     }

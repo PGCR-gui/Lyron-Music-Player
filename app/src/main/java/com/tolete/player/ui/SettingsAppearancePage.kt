@@ -760,6 +760,42 @@ internal fun AppearancePage(
 
 
 @Composable
+private fun LyricsBorderGroup(
+    title: String,
+    color: Int,
+    width: Float,
+    onColorChange: (Int) -> Unit,
+    onWidthChange: (Float) -> Unit
+) {
+    Spacer(Modifier.height(20.dp))
+    ColorPickerButton(
+        color = color,
+        onColorChange = onColorChange,
+        showAlpha = true,
+        label = "Cor — $title",
+        modifier = Modifier.fillMaxWidth()
+    )
+    Spacer(Modifier.height(12.dp))
+    Text(
+        "$title: ${"%.1f".format(width)} dp",
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = Color.White.copy(0.55f),
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("0", fontSize = 12.sp, color = Color.White.copy(0.5f))
+        androidx.compose.material3.Slider(
+            value = width,
+            onValueChange = onWidthChange,
+            valueRange = 0f..8f,
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+        )
+        Text("8", fontSize = 12.sp, color = Color.White.copy(0.5f))
+    }
+}
+
+@Composable
 internal fun LyricsViewerPage(
     lyricsFontPath: String?,
     lyricsTranslationFontPath: String? = null,
@@ -769,6 +805,10 @@ internal fun LyricsViewerPage(
     lyricsSecondaryColor: Int,
     lyricsBorderColor: Int,
     lyricsBorderWidth: Float,
+    lyricsBackingBorderColor: Int = lyricsBorderColor,
+    lyricsBackingBorderWidth: Float = lyricsBorderWidth,
+    lyricsTranslationBorderColor: Int = lyricsBorderColor,
+    lyricsTranslationBorderWidth: Float = lyricsBorderWidth,
     lyricsTranslationColor: Int = 0xFFB0BEC5.toInt(),
     lyricsBackingColor: Int = 0xFFCE93D8.toInt(),
     lyricsBackingSecondaryColor: Int = 0x99CE93D8.toInt(),
@@ -786,6 +826,10 @@ internal fun LyricsViewerPage(
     onSecondaryColorChange: (Int) -> Unit,
     onBorderColorChange: (Int) -> Unit,
     onBorderWidthChange: (Float) -> Unit,
+    onBackingBorderColorChange: (Int) -> Unit = {},
+    onBackingBorderWidthChange: (Float) -> Unit = {},
+    onTranslationBorderColorChange: (Int) -> Unit = {},
+    onTranslationBorderWidthChange: (Float) -> Unit = {},
     onTranslationColorChange: (Int) -> Unit = {},
     onBackingColorChange: (Int) -> Unit = {},
     onBackingSecondaryColorChange: (Int) -> Unit = {},
@@ -952,7 +996,7 @@ internal fun LyricsViewerPage(
 
         Spacer(Modifier.height(16.dp))
         Text(
-            "Grossura da borda: ${"%.1f".format(lyricsBorderWidth)} px",
+            "Grossura da borda: ${"%.1f".format(lyricsBorderWidth)} dp",
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             color = Color.White.copy(0.55f),
@@ -968,6 +1012,20 @@ internal fun LyricsViewerPage(
             )
             Text("8", fontSize = 12.sp, color = Color.White.copy(0.5f))
         }
+        LyricsBorderGroup(
+            title = "Contorno do backing vocal",
+            color = lyricsBackingBorderColor,
+            width = lyricsBackingBorderWidth,
+            onColorChange = onBackingBorderColorChange,
+            onWidthChange = onBackingBorderWidthChange
+        )
+        LyricsBorderGroup(
+            title = "Contorno da tradução",
+            color = lyricsTranslationBorderColor,
+            width = lyricsTranslationBorderWidth,
+            onColorChange = onTranslationBorderColorChange,
+            onWidthChange = onTranslationBorderWidthChange
+        )
         Text(
             "Suporte a sincronização silábica (eLRC e TTML).",
             fontSize = 12.sp,

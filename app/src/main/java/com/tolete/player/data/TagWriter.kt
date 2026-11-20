@@ -110,6 +110,67 @@ object TagWriter {
         }
     }
 
+    /**
+     * Campos da edição em lote. null = não mexe no campo; "" = apaga a tag; qualquer outro
+     * valor substitui. Só inclui campos que fazem sentido para várias faixas ao mesmo tempo.
+     */
+    data class BatchFields(
+        val artist: String? = null,
+        val album: String? = null,
+        val albumArtist: String? = null,
+        val genre: String? = null,
+        val year: String? = null,
+        val trackTotal: String? = null,
+        val disc: String? = null,
+        val discTotal: String? = null,
+        val composer: String? = null,
+        val lyricist: String? = null,
+        val comment: String? = null,
+        val publisher: String? = null,
+        val copyright: String? = null,
+        val originalArtist: String? = null,
+        val originalYear: String? = null,
+        /** Nova capa (JPEG) para todas as faixas; null = manter. */
+        val cover: ByteArray? = null
+    ) {
+        val hasChanges: Boolean
+            get() = cover != null || listOf(
+                artist, album, albumArtist, genre, year, trackTotal, disc, discTotal, composer,
+                lyricist, comment, publisher, copyright, originalArtist, originalYear
+            ).any { it != null }
+    }
+
+    /** Grava só os campos de [f] que não são nulos (com fallback SAF, como as demais edições). */
+    fun writeBatch(context: Context, track: Track, f: BatchFields): Result {
+        if (!f.hasChanges) return Result(true, "Nada a alterar")
+        return editFile(context, track, { name -> "Tags gravadas em $name" }) { audio ->
+            val tag = audio.tagOrCreateAndSetDefault
+            fun set(key: FieldKey, value: String?) {
+                if (value == null) return
+                val v = value.trim()
+                try {
+                    if (v.isEmpty()) tag.deleteField(key) else tag.setField(key, v)
+                } catch (_: Exception) { }
+            }
+            set(FieldKey.ARTIST, f.artist)
+            set(FieldKey.ALBUM, f.album)
+            set(FieldKey.ALBUM_ARTIST, f.albumArtist)
+            set(FieldKey.GENRE, f.genre)
+            set(FieldKey.YEAR, f.year)
+            set(FieldKey.TRACK_TOTAL, f.trackTotal)
+            set(FieldKey.DISC_NO, f.disc)
+            set(FieldKey.DISC_TOTAL, f.discTotal)
+            set(FieldKey.COMPOSER, f.composer)
+            set(FieldKey.LYRICIST, f.lyricist)
+            set(FieldKey.COMMENT, f.comment)
+            set(FieldKey.RECORD_LABEL, f.publisher)
+            set(FieldKey.COPYRIGHT, f.copyright)
+            set(FieldKey.ORIGINAL_ARTIST, f.originalArtist)
+            set(FieldKey.ORIGINAL_YEAR, f.originalYear)
+            f.cover?.let { setCover(tag, it, "image/jpeg") }
+        }
+    }
+
     /** Grava apenas o campo de letras (LYRICS), sem alterar outras tags. */
     fun writeLyricsOnly(context: Context, track: Track, lyrics: String): Result =
         editFile(context, track, { name -> "Letras gravadas em $name" }) { audio ->

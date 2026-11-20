@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,6 +43,9 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -183,6 +187,17 @@ fun TagEditorScreen(
     var onlineLoading by remember { mutableStateOf(false) }
     var onlineResults by remember { mutableStateOf<List<com.tolete.player.data.TagLookupClient.Result>>(emptyList()) }
     var onlineError by remember { mutableStateOf<String?>(null) }
+    var onlineSourceFilter by remember { mutableStateOf<String?>(null) }
+    var onlineSortByRes by remember { mutableStateOf(false) }
+
+    // Seletor só de capas ("Buscar apenas a capa do álbum"): o usuário escolhe, nada é aplicado sozinho.
+    var showCoverPicker by remember { mutableStateOf(false) }
+    var coverPickerLoading by remember { mutableStateOf(false) }
+    var coverPickerError by remember { mutableStateOf<String?>(null) }
+    var coverPickerResults by remember { mutableStateOf<List<com.tolete.player.data.TagLookupClient.Result>>(emptyList()) }
+    var coverPickerSource by remember { mutableStateOf<String?>(null) }
+    var coverPickerSortByRes by remember { mutableStateOf(true) }
+    var coverPickerApplying by remember { mutableStateOf(false) }
 
     val pickCoverLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
@@ -540,8 +555,11 @@ fun TagEditorScreen(
                     Spacer(Modifier.height(6.dp))
                     Button(
                         onClick = {
-                            onlineLoading = true
-                            onlineError = null
+                            showCoverPicker = true
+                            coverPickerLoading = true
+                            coverPickerError = null
+                            coverPickerResults = emptyList()
+                            coverPickerSource = null
                             scope.launch {
                                 try {
                                     val results = com.tolete.player.data.TagLookupClient.search(
@@ -549,34 +567,20 @@ fun TagEditorScreen(
                                         artist = artist,
                                         album = album
                                     )
-                                    val withCover = results.firstOrNull { !it.coverUrl.isNullOrBlank() }
-                                    if (withCover == null) {
-                                        onlineError = "Nenhuma capa encontrada"
-                                        Toast.makeText(context, onlineError, Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        val bytes = withContext(Dispatchers.IO) {
-                                            com.tolete.player.data.TagLookupClient.downloadCover(withCover.coverUrl!!)
-                                        }
-                                        if (bytes != null) {
-                                            pendingCover = bytes
-                                            localArtPath = withContext(Dispatchers.IO) {
-                                                com.tolete.player.data.TagWriter.saveCoverPreview(context, bytes, "image/jpeg")
-                                            }
-                                            Toast.makeText(context, "Capa aplicada no formulário. Salve para gravar.", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            Toast.makeText(context, "Falha ao baixar a capa", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
+                                    // Uma entrada por capa (várias faixas do mesmo álbum repetem a mesma URL)
+                                    coverPickerResults = results
+                                        .filter { !it.coverUrl.isNullOrBlank() }
+                                        .distinctBy { it.coverUrl }
+                                    if (coverPickerResults.isEmpty()) coverPickerError = "Nenhuma capa encontrada"
                                 } catch (e: Exception) {
-                                    onlineError = e.message ?: "Falha na busca de capa"
-                                    Toast.makeText(context, onlineError, Toast.LENGTH_SHORT).show()
+                                    coverPickerError = e.message ?: "Falha na busca de capa"
                                 } finally {
-                                    onlineLoading = false
+                                    coverPickerLoading = false
                                 }
                             }
                         },
-                        enabled = !savingArt && !onlineLoading,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(0.12f))
+                        enabled = !savingArt && !onlineLoading && !coverPickerLoading,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.12f))
                     ) {
                         Text("Buscar apenas a capa do álbum", color = Color.White)
                     }
@@ -675,20 +679,45 @@ fun TagEditorScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 CircularProgressIndicator(modifier = Modifier.size(22.dp), color = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
-                                Text("Buscando no Deezer e Last.fm…")
+                                Text("Buscando no Deezer, Last.fm, NetEase, KuGou e QQ Music…")
                             }
                         }
                         onlineError != null && onlineResults.isEmpty() -> {
                             Text(onlineError ?: "Sem resultados")
                         }
                         else -> {
+                            val sources = onlineResults.map { it.source }.distinct()
+                            val sourceCounts = onlineResults.groupingBy { it.source }.eachCount()
+                            val activeSource = onlineSourceFilter?.takeIf { it in sources }
+                            val resolutions = rememberImageResolutions(
+                                onlineResults.mapNotNull { it.coverUrl?.takeIf { u -> u.isNotBlank() } }
+                            )
+                            val shownResults = onlineResults
+                                .filter { activeSource == null || it.source == activeSource }
+                                .let { list ->
+                                    if (onlineSortByRes) list.sortedByDescending { r ->
+                                        resolutionPixels(r.coverUrl?.let { u -> resolutions[u] })
+                                    } else list
+                                }
+                            Column {
+                            SourceFilterChips(
+                                sources = sources,
+                                counts = sourceCounts,
+                                selected = activeSource,
+                                onSelect = { onlineSourceFilter = it },
+                                accent = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                sortByResolution = onlineSortByRes,
+                                onToggleSort = { onlineSortByRes = !onlineSortByRes }
+                            )
+                            Spacer(Modifier.height(8.dp))
                             LazyColumn(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(360.dp),
+                                    .height(320.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(onlineResults) { r ->
+                                items(shownResults) { r ->
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
@@ -777,8 +806,145 @@ fun TagEditorScreen(
                                                 color = MaterialTheme.colorScheme.onSurface.copy(0.7f),
                                                 maxLines = 2
                                             )
-                                            Text(r.source, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary.copy(0.9f))
+                                            val resLabel = r.coverUrl?.let { u -> resolutions[u] }?.let { resolutionLabel(it) }
+                                            Text(
+                                                listOfNotNull(r.source, resLabel).joinToString(" · "),
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.primary.copy(0.9f)
+                                            )
                                         }
+                                    }
+                                }
+                            }
+                            } // Column
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showOnlineLookup = false }, enabled = !onlineLoading) {
+                        Text("Fechar")
+                    }
+                }
+            )
+        }
+
+        if (showCoverPicker) {
+            AppAlertDialog(
+                onDismissRequest = { if (!coverPickerApplying) showCoverPicker = false },
+                title = { Text("Escolher capa") },
+                text = {
+                    when {
+                        coverPickerLoading -> {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(modifier = Modifier.size(22.dp), color = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(12.dp))
+                                Text("Buscando capas…")
+                            }
+                        }
+                        coverPickerResults.isEmpty() -> Text(coverPickerError ?: "Nenhuma capa encontrada")
+                        else -> {
+                            val sources = coverPickerResults.map { it.source }.distinct()
+                            val sourceCounts = coverPickerResults.groupingBy { it.source }.eachCount()
+                            val activeSource = coverPickerSource?.takeIf { it in sources }
+                            val resolutions = rememberImageResolutions(
+                                coverPickerResults.mapNotNull { it.coverUrl }
+                            )
+                            val shown = coverPickerResults
+                                .filter { activeSource == null || it.source == activeSource }
+                                .let { list ->
+                                    if (coverPickerSortByRes) list.sortedByDescending { r ->
+                                        resolutionPixels(r.coverUrl?.let { u -> resolutions[u] })
+                                    } else list
+                                }
+                            Column {
+                                SourceFilterChips(
+                                    sources = sources,
+                                    counts = sourceCounts,
+                                    selected = activeSource,
+                                    onSelect = { coverPickerSource = it },
+                                    accent = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onSurface,
+                                    sortByResolution = coverPickerSortByRes,
+                                    onToggleSort = { coverPickerSortByRes = !coverPickerSortByRes }
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Box(Modifier.fillMaxWidth().height(380.dp)) {
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(2),
+                                        modifier = Modifier.fillMaxSize(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        gridItems(shown, key = { it.coverUrl ?: it.hashCode().toString() }) { r ->
+                                            val url = r.coverUrl.orEmpty()
+                                            val res = resolutions[url]
+                                            Column(
+                                                Modifier
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(MaterialTheme.colorScheme.onSurface.copy(0.08f))
+                                                    .clickable(enabled = !coverPickerApplying) {
+                                                        coverPickerApplying = true
+                                                        savingArt = true
+                                                        scope.launch {
+                                                            try {
+                                                                val bytes = withContext(Dispatchers.IO) {
+                                                                    com.tolete.player.data.TagLookupClient.downloadCover(url)
+                                                                }
+                                                                if (bytes != null) {
+                                                                    pendingCover = bytes
+                                                                    localArtPath = withContext(Dispatchers.IO) {
+                                                                        com.tolete.player.data.TagWriter.saveCoverPreview(
+                                                                            context, bytes, "image/jpeg"
+                                                                        )
+                                                                    }
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "Capa aplicada no formulário. Toque em Salvar para gravar.",
+                                                                        Toast.LENGTH_SHORT
+                                                                    ).show()
+                                                                    showCoverPicker = false
+                                                                } else {
+                                                                    Toast.makeText(context, "Falha ao baixar a capa", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            } finally {
+                                                                savingArt = false
+                                                                coverPickerApplying = false
+                                                            }
+                                                        }
+                                                    }
+                                                    .padding(6.dp)
+                                            ) {
+                                                AsyncImage(
+                                                    model = url,
+                                                    contentDescription = null,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .aspectRatio(1f)
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .background(MaterialTheme.colorScheme.onSurface.copy(0.1f))
+                                                )
+                                                Spacer(Modifier.height(4.dp))
+                                                Text(
+                                                    if (res != null) resolutionLabel(res) else "medindo…",
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Text(
+                                                    listOf(r.source, r.album).filter { it.isNotBlank() }.joinToString(" · "),
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(0.7f)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (coverPickerApplying) {
+                                        Box(
+                                            Modifier.fillMaxSize().background(Color.Black.copy(0.35f)),
+                                            contentAlignment = Alignment.Center
+                                        ) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
                                     }
                                 }
                             }
@@ -786,7 +952,7 @@ fun TagEditorScreen(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showOnlineLookup = false }, enabled = !onlineLoading) {
+                    TextButton(onClick = { showCoverPicker = false }, enabled = !coverPickerApplying) {
                         Text("Fechar")
                     }
                 }

@@ -286,7 +286,14 @@ internal object LyricsPopupOverlay {
         val fontSizeSp: Float,
         val mainTypeface: Typeface? = null,
         val translationTypeface: Typeface? = null,
-        val backingTypeface: Typeface? = null
+        val backingTypeface: Typeface? = null,
+        /** Contorno das letras (configurado em Aparência). Largura em dp; 0 = sem contorno. */
+        val borderColor: Int = 0xFF000000.toInt(),
+        val borderWidthDp: Float = 0f,
+        val backingBorderColor: Int = borderColor,
+        val backingBorderWidthDp: Float = borderWidthDp,
+        val translationBorderColor: Int = borderColor,
+        val translationBorderWidthDp: Float = borderWidthDp
     )
 
     fun updateFrame(frame: PopupFrame) {
@@ -471,15 +478,15 @@ internal object LyricsPopupOverlay {
             val bgSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, (f.fontSizeSp - 4f).coerceAtLeast(11f), resources.displayMetrics)
             var top = paddingTop.toFloat()
             f.backing?.takeIf { it.text.isNotBlank() }?.let { line ->
-                top += drawLine(canvas, line, f.positionMs, f.backingColor, Color.argb(120, 255, 255, 255), bgSize, f.backingTypeface, width / 2f, top, maxTextWidth)
+                top += drawLine(canvas, line, f.positionMs, f.backingColor, Color.argb(120, 255, 255, 255), bgSize, f.backingTypeface, width / 2f, top, maxTextWidth, f.backingBorderColor, f.backingBorderWidthDp)
                 if (f.main?.text?.isNotBlank() == true) top += bgSize * 0.35f
             }
             f.main?.takeIf { it.text.isNotBlank() }?.let { line ->
-                top += drawLine(canvas, line, f.positionMs, f.primaryColor, f.secondaryColor, mainSize, f.mainTypeface, width / 2f, top, maxTextWidth)
+                top += drawLine(canvas, line, f.positionMs, f.primaryColor, f.secondaryColor, mainSize, f.mainTypeface, width / 2f, top, maxTextWidth, f.borderColor, f.borderWidthDp)
                 if (f.translation?.text?.isNotBlank() == true) top += mainSize * 0.4f
             }
             f.translation?.takeIf { it.text.isNotBlank() }?.let { line ->
-                drawLine(canvas, line, f.positionMs, f.translationColor, Color.argb(100, Color.red(f.translationColor), Color.green(f.translationColor), Color.blue(f.translationColor)), trSize, f.translationTypeface, width / 2f, top, maxTextWidth)
+                drawLine(canvas, line, f.positionMs, f.translationColor, Color.argb(100, Color.red(f.translationColor), Color.green(f.translationColor), Color.blue(f.translationColor)), trSize, f.translationTypeface, width / 2f, top, maxTextWidth, f.translationBorderColor, f.translationBorderWidthDp)
             }
         }
 
@@ -493,8 +500,12 @@ internal object LyricsPopupOverlay {
             typeface: Typeface?,
             centerX: Float,
             top: Float,
-            maxWidth: Float
+            maxWidth: Float,
+            outlineColor: Int,
+            outlineDp: Float
         ): Float {
+            val strokeColor = outlineColor
+            val strokePx = outlineDp * resources.displayMetrics.density * 2f
             paint.textSize = textSizePx
             paint.typeface = typeface ?: Typeface.DEFAULT
             paint.style = Paint.Style.FILL
@@ -505,6 +516,16 @@ internal object LyricsPopupOverlay {
                 val layout = makeTextLayout(line.text, maxWidth.toInt(), textSizePx, typeface, primary)
                 canvas.save()
                 canvas.translate(centerX - layout.width / 2f, top)
+                if (strokePx > 0f) {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = strokePx
+                    paint.strokeJoin = Paint.Join.ROUND
+                    paint.color = strokeColor
+                    layout.draw(canvas)
+                    paint.style = Paint.Style.FILL
+                    paint.strokeWidth = 0f
+                    paint.color = primary
+                }
                 layout.draw(canvas)
                 canvas.restore()
                 paint.textAlign = Paint.Align.CENTER
@@ -528,6 +549,7 @@ internal object LyricsPopupOverlay {
                     var scale = 1f
                     var alpha = 255
                     var color = part.color
+                    var shadowOn = false
                     if (started) {
                         when (word.animation) {
                             LyricAnimation.POP -> { val k = (elapsed / 280f).coerceIn(0f, 1f); scale = 1f + 0.35f * sin((1f - k) * Math.PI).toFloat() }
@@ -540,13 +562,27 @@ internal object LyricsPopupOverlay {
                             LyricAnimation.GLO -> { val k = ((elapsed / 600f) % 2f).let { if (it > 1f) 2f - it else it }; color = lerpColor(primary, secondary, k) }
                             LyricAnimation.RNB -> { val hue = ((nowAnim / 12L) + word.timeMs / 10L) % 360L; color = Color.HSVToColor(floatArrayOf(hue.toFloat(), 0.75f, 1f)) }
                             LyricAnimation.FLA -> if (elapsed < 220f) color = lerpColor(primary, Color.WHITE, (1f - elapsed / 220f) * 0.85f)
-                            LyricAnimation.SHD -> if (elapsed < 500f) paint.setShadowLayer(12f, 0f, 4f, Color.argb(180, 0, 0, 0))
+                            LyricAnimation.SHD -> if (elapsed < 500f) { shadowOn = true; paint.setShadowLayer(12f, 0f, 4f, Color.argb(180, 0, 0, 0)) }
                             LyricAnimation.ECO -> { paint.color = Color.argb(80, Color.red(color), Color.green(color), Color.blue(color)); canvas.save(); canvas.translate(4f, 2f); canvas.drawText(part.text, drawX, drawY, paint); canvas.restore() }
                             else -> Unit
                         }
                     }
                     val finalSize = if (word.animation == LyricAnimation.DES && started) textSizePx * (1f - 0.25f * (elapsed / 400f).coerceIn(0f, 1f)) else textSizePx
                     paint.textSize = finalSize
+                    if (strokePx > 0f && alpha > 0) {
+                        // Contorno primeiro (sem a sombra do efeito SHD), preenchimento por cima.
+                        if (shadowOn) paint.clearShadowLayer()
+                        paint.style = Paint.Style.STROKE
+                        paint.strokeWidth = strokePx
+                        paint.strokeJoin = Paint.Join.ROUND
+                        paint.color = strokeColor
+                        paint.alpha = (Color.alpha(strokeColor) * (alpha / 255f) * (Color.alpha(color) / 255f)).toInt().coerceIn(0, 255)
+                        if (scale != 1f) { canvas.save(); canvas.scale(scale, scale, drawX, drawY); canvas.drawText(part.text, drawX, drawY, paint); canvas.restore() }
+                        else canvas.drawText(part.text, drawX, drawY, paint)
+                        paint.style = Paint.Style.FILL
+                        paint.strokeWidth = 0f
+                        if (shadowOn) paint.setShadowLayer(12f, 0f, 4f, Color.argb(180, 0, 0, 0))
+                    }
                     paint.color = color
                     paint.alpha = alpha
                     if (scale != 1f) { canvas.save(); canvas.scale(scale, scale, drawX, drawY); canvas.drawText(part.text, drawX, drawY, paint); canvas.restore() }
