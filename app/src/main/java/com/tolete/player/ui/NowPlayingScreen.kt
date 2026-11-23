@@ -207,6 +207,7 @@ import com.tolete.player.data.Track
 import com.tolete.player.video.LyricsVideoGenerator
 import com.tolete.player.video.WaveformExtractor
 import com.tolete.player.video.LyricsVideoStyle
+import com.tolete.player.visualizer.AudioTap
 import com.tolete.player.visualizer.MilkVisualizer
 import com.tolete.player.visualizer.ProjectMNative
 import kotlinx.coroutines.delay
@@ -587,6 +588,8 @@ fun NowPlayingScreen(
     onLyricsPopupEnabledChange: (Boolean) -> Unit = {},
     seekBarStyle: SeekBarStyle = SeekBarStyle.Standard,
     seekWaveformTheme: WaveformTheme = WaveformTheme.BARS,
+    liveWaveformEnabled: Boolean = false,
+    liveWaveformFps: Int = 30,
     immersiveNowPlaying: Boolean = true,
     getPlaybackSpeed: () -> Float = { 1f },
     onPlaybackSpeed: (Float) -> Unit = {},
@@ -795,6 +798,25 @@ fun NowPlayingScreen(
         if (id == track.id) {
             lyrics = loaded
         }
+        // A carga é uma só por faixa. Se veio vazia por causa de uma gravação/leitura concorrente
+        // (o popup ou outra rotina mexendo no .lrc/tags), a letra salva só apareceria ao trocar de
+        // faixa. Relê só do disco (sem rede) mais vezes, incluindo tags embutidas via TagReader.
+        if (loaded.isEmpty()) {
+            for (waitMs in longArrayOf(400L, 1_200L, 3_000L, 6_000L)) {
+                kotlinx.coroutines.delay(waitMs)
+                if (id != track.id) break
+                val retry = withContext(Dispatchers.IO) {
+                    // load() cobre .lrc + embutido; se ainda vazio, força só embutido
+                    val a = com.tolete.player.data.LyricsExtractor.load(context.applicationContext, track)
+                    if (a.isNotEmpty()) a
+                    else com.tolete.player.data.LyricsExtractor.loadEmbedded(context.applicationContext, track)
+                }
+                if (retry.isNotEmpty()) {
+                    lyrics = retry
+                    break
+                }
+            }
+        }
     }
 
     val duration = when {
@@ -806,15 +828,19 @@ fun NowPlayingScreen(
 
     // ── Waveform da seekbar: só trabalha quando esse estilo está ativo ─────────────
     val seekWaveActive = seekBarStyle == SeekBarStyle.Waveform
+    val liveWaveActive = seekWaveActive && liveWaveformEnabled
     val seekPeaksDurationMs = if (track.duration > 0L) track.duration else playerDurationMs
     var seekPeaks by remember(track.id) {
         mutableStateOf<FloatArray?>(
-            if (seekWaveActive && seekPeaksDurationMs > 0L) WaveformExtractor.seekCached(track.id, seekPeaksDurationMs) else null
+            if (seekWaveActive && !liveWaveformEnabled && seekPeaksDurationMs > 0L)
+                WaveformExtractor.seekCached(track.id, seekPeaksDurationMs)
+            else null
         )
     }
     var seekPeaksFailed by remember(track.id) { mutableStateOf(false) }
-    LaunchedEffect(track.id, seekPeaksDurationMs, seekWaveActive) {
-        if (!seekWaveActive || seekPeaksDurationMs <= 0L || seekPeaks != null) return@LaunchedEffect
+    // Envelope estático só quando NÃO está em modo ao vivo
+    LaunchedEffect(track.id, seekPeaksDurationMs, seekWaveActive, liveWaveformEnabled) {
+        if (!seekWaveActive || liveWaveformEnabled || seekPeaksDurationMs <= 0L || seekPeaks != null) return@LaunchedEffect
         if (WaveformExtractor.seekKnownFailed(track.id, seekPeaksDurationMs)) {
             seekPeaksFailed = true
             return@LaunchedEffect
@@ -831,6 +857,61 @@ fun NowPlayingScreen(
         }
         if (result != null) seekPeaks = result else seekPeaksFailed = true
     }
+
+    // ── Waveform ao vivo (posição atual): snapshot do AudioTap a N fps ────────────
+    // Buffer de PCM reutilizado (evita alocação a cada frame). ~0,6 s a 48 kHz.
+    val livePcmBuf = remember { FloatArray(32_000 * 2) }
+    // Estado suavizado: as barras ficam no lugar (só mudam de altura), como no vídeo de fundo branco.
+    val liveSmoothed = remember { FloatArray(480) }
+    var livePeaks by remember { mutableStateOf<FloatArray?>(null) }
+    // Mantém o AudioTap alimentado enquanto a seekbar ao vivo estiver ativa
+    DisposableEffect(liveWaveActive) {
+        if (liveWaveActive) AudioTap.acquire()
+        onDispose { if (liveWaveActive) AudioTap.release() }
+    }
+    LaunchedEffect(liveWaveActive, liveWaveformFps, isPlaying) {
+        if (!liveWaveActive) {
+            livePeaks = null
+            return@LaunchedEffect
+        }
+        val periodMs = (1000L / liveWaveformFps.coerceIn(30, 90)).coerceAtLeast(8L)
+        // Adiantamento de 0,5 s: o buffer do AudioTap já tem o áudio futuro (sink adiantado).
+        val advanceFrames = (AudioTap.effectiveSampleRate() * 0.5f).toInt().coerceAtLeast(0)
+        while (isActive) {
+            if (isPlaying) {
+                val frames = AudioTap.snapshotRecentAhead(livePcmBuf, 24_000, advanceFrames)
+                if (frames > 32) {
+                    // ~480 colunas no máximo; o SeekBar reduz depois conforme a largura
+                    // Suavização forte + decay → as barras “pulsam no lugar” em vez de deslizarem.
+                    livePeaks = pcmToLiveAmpsSmoothed(
+                        pcm = livePcmBuf,
+                        frames = frames,
+                        cols = 480,
+                        smoothed = liveSmoothed,
+                        attack = 0.42f,
+                        release = 0.18f
+                    )
+                }
+            } else {
+                // Em pausa: decai suavemente para o silêncio
+                var any = false
+                for (i in liveSmoothed.indices) {
+                    if (liveSmoothed[i] > 0.04f) {
+                        liveSmoothed[i] *= 0.92f
+                        any = true
+                    } else {
+                        liveSmoothed[i] = 0.04f
+                    }
+                }
+                if (any) livePeaks = liveSmoothed.copyOf()
+            }
+            delay(periodMs)
+        }
+    }
+    // Quando ao vivo, usamos livePeaks; senão o envelope estático
+    val effectivePeaks = if (liveWaveActive) livePeaks else seekPeaks
+    val effectivePeaksFailed = if (liveWaveActive) false else seekPeaksFailed
+
     val shownPosition = dragFraction?.let { (it * duration).toLong() } ?: position
 
     // Linha ativa (só sincronizadas com timeMs >= 0)
@@ -1738,8 +1819,8 @@ fun NowPlayingScreen(
                 accentColor = appColors.accent,
                 style = seekBarStyle,
                 isPlaying = isPlaying,
-                peaks = seekPeaks,
-                peaksFailed = seekPeaksFailed,
+                peaks = effectivePeaks,
+                peaksFailed = effectivePeaksFailed,
                 waveformTheme = seekWaveformTheme,
                 durationMs = duration,
                 onRequestExactJump = { showExactJump = true },
@@ -2540,6 +2621,81 @@ enum class SeekBarStyle {
     WavyLiquid, // onda que corre (Wavy) + thumb de vidro líquido (Liquid)
     Waveform,  // forma de onda real da música; o desenho é escolhido em Configurações
     Glass      // trilho escuro de vidro fumê, progresso champagne e cursor branco
+}
+
+/**
+ * Converte PCM estéreo intercalado (últimos [frames] frames) em amplitudes 0..1
+ * para a waveform ao vivo da seekbar. Usa RMS por coluna com leve boost visual.
+ * Mantido para compatibilidade; a versão ao vivo usa [pcmToLiveAmpsSmoothed].
+ */
+private fun pcmToLiveAmps(pcm: FloatArray, frames: Int, cols: Int): FloatArray {
+    val out = FloatArray(cols.coerceAtLeast(1))
+    if (frames <= 0 || cols <= 0) {
+        java.util.Arrays.fill(out, 0.08f)
+        return out
+    }
+    val samplesPerCol = (frames / cols).coerceAtLeast(1)
+    for (c in 0 until cols) {
+        val start = c * samplesPerCol
+        val end = minOf(frames, start + samplesPerCol)
+        var sumSq = 0.0
+        var n = 0
+        for (f in start until end) {
+            val i = f * 2
+            if (i + 1 >= pcm.size) break
+            val l = pcm[i]
+            val r = pcm[i + 1]
+            sumSq += (l * l + r * r).toDouble()
+            n++
+        }
+        val rms = if (n > 0) kotlin.math.sqrt(sumSq / n).toFloat() else 0f
+        // Escala para ficar visualmente parecida com a waveform estática
+        out[c] = (rms * 2.8f).coerceIn(0.04f, 1f)
+    }
+    return out
+}
+
+/**
+ * Versão “no lugar”: calcula RMS por coluna e aplica ataque/release no array [smoothed]
+ * (persistente entre frames). Assim as barras só sobem/descem de altura e não “deslizam”
+ * como uma janela de tempo se movendo — comportamento parecido com o vídeo de fundo branco.
+ */
+private fun pcmToLiveAmpsSmoothed(
+    pcm: FloatArray,
+    frames: Int,
+    cols: Int,
+    smoothed: FloatArray,
+    attack: Float,
+    release: Float
+): FloatArray {
+    val nCols = cols.coerceAtLeast(1).coerceAtMost(smoothed.size)
+    if (frames <= 0) {
+        for (c in 0 until nCols) {
+            smoothed[c] = (smoothed[c] * (1f - release)).coerceAtLeast(0.04f)
+        }
+        return smoothed.copyOf(nCols)
+    }
+    val samplesPerCol = (frames / nCols).coerceAtLeast(1)
+    for (c in 0 until nCols) {
+        val start = c * samplesPerCol
+        val end = minOf(frames, start + samplesPerCol)
+        var sumSq = 0.0
+        var n = 0
+        for (f in start until end) {
+            val i = f * 2
+            if (i + 1 >= pcm.size) break
+            val l = pcm[i]
+            val r = pcm[i + 1]
+            sumSq += (l * l + r * r).toDouble()
+            n++
+        }
+        val rms = if (n > 0) kotlin.math.sqrt(sumSq / n).toFloat() else 0f
+        val target = (rms * 2.8f).coerceIn(0.04f, 1f)
+        val prev = smoothed[c]
+        val coeff = if (target > prev) attack else release
+        smoothed[c] = (prev + (target - prev) * coeff).coerceIn(0.04f, 1f)
+    }
+    return smoothed.copyOf(nCols)
 }
 
 /**

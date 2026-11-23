@@ -342,6 +342,8 @@ fun TolereApp(
     val crossfadeMs by vm.crossfadeMs.collectAsStateWithLifecycle()
     val seekBarStyle by vm.seekBarStyle.collectAsStateWithLifecycle()
     val seekBarWaveformTheme by vm.seekBarWaveformTheme.collectAsStateWithLifecycle()
+    val liveWaveformEnabled by vm.liveWaveformEnabled.collectAsStateWithLifecycle()
+    val liveWaveformFps by vm.liveWaveformFps.collectAsStateWithLifecycle()
     val immersiveNowPlaying by vm.immersiveNowPlaying.collectAsStateWithLifecycle()
     val audioOutput by vm.audioOutput.collectAsStateWithLifecycle()
     val glassQuality by vm.glassQuality.collectAsStateWithLifecycle()
@@ -1535,6 +1537,10 @@ fun TolereApp(
                     onSeekBarStyleChange = vm::setSeekBarStyle,
                     seekBarWaveformTheme = seekBarWaveformTheme,
                     onSeekBarWaveformThemeChange = vm::setSeekBarWaveformTheme,
+                    liveWaveformEnabled = liveWaveformEnabled,
+                    onLiveWaveformEnabledChange = vm::setLiveWaveformEnabled,
+                    liveWaveformFps = liveWaveformFps,
+                    onLiveWaveformFpsChange = vm::setLiveWaveformFps,
                     immersiveNowPlaying = immersiveNowPlaying,
                     onImmersiveNowPlayingChange = vm::setImmersiveNowPlaying,
                     audioOutput = audioOutput,
@@ -1967,6 +1973,8 @@ fun TolereApp(
                         onLyricsPopupEnabledChange = vm::setLyricsPopupEnabled,
                         seekBarStyle = seekBarStyle,
                         seekWaveformTheme = seekBarWaveformTheme,
+                        liveWaveformEnabled = liveWaveformEnabled,
+                        liveWaveformFps = liveWaveformFps,
                         immersiveNowPlaying = immersiveNowPlaying,
                         onOpenContainingFolder = {
                             val path = current.path

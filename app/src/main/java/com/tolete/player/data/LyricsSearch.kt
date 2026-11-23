@@ -141,7 +141,9 @@ object LyricsSearch {
     suspend fun search(
         trackName: String,
         artistName: String,
-        preferRomanization: Boolean = LyricsSearch.preferRomanization
+        preferRomanization: Boolean = LyricsSearch.preferRomanization,
+        sourceOrder: List<String>? = null,
+        typeOrder: List<String>? = null
     ): List<LyricsSearchResult> =
         supervisorScope {
             val t = trackName.trim()
@@ -157,7 +159,12 @@ object LyricsSearch {
                 async(Dispatchers.IO) { safe(searchJob, "NetEase") { NeteaseLyricsClient.search(t, a, OTHER_MAX, preferRomanization) } },
                 async(Dispatchers.IO) { safe(searchJob, "KuGou") { KugouLyricsClient.search(t, a, OTHER_MAX) } }
             )
-            val ranked = rank(tasks.awaitAll().flatten().distinctBy { it.id }, t, a).map { result ->
+            val ranked = rank(
+                tasks.awaitAll().flatten().distinctBy { it.id },
+                t, a,
+                sourceOrder = sourceOrder,
+                typeOrder = typeOrder
+            ).map { result ->
                 result.copy(lines = LyricsFormat.normalizeBackgroundLines(result.lines))
             }
             lastReport = LyricsDiagnostics.summary(SOURCE_ORDER)
@@ -185,10 +192,29 @@ object LyricsSearch {
             emptyList()
         }
 
-    /** Resultados com título/artista iguais ao pedido sobem; dentro do mesmo grau mantém a ordem das fontes. */
-    private fun rank(all: List<LyricsSearchResult>, title: String, artist: String): List<LyricsSearchResult> {
+    /**
+     * Ordena resultados da busca manual (e também da automática quando chamada com as listas).
+     * Prioridade: match de título/artista → ordem de tipo configurada → ordem de fonte configurada
+     * → ordem em que chegaram. Se [sourceOrder]/[typeOrder] forem nulos, mantém o comportamento antigo
+     * (Lyron primeiro).
+     */
+    private fun rank(
+        all: List<LyricsSearchResult>,
+        title: String,
+        artist: String,
+        sourceOrder: List<String>? = null,
+        typeOrder: List<String>? = null
+    ): List<LyricsSearchResult> {
         val nt = norm(title)
         val na = norm(artist)
+        val sourceRank = sourceOrder
+            ?.mapIndexed { i, name -> name to i }
+            ?.toMap()
+            .orEmpty()
+        val typeRank = typeOrder
+            ?.mapIndexed { i, name -> name to i }
+            ?.toMap()
+            .orEmpty()
         fun score(r: LyricsSearchResult): Int {
             val rt = norm(r.trackName)
             val ra = norm(r.artistName)
@@ -206,9 +232,18 @@ object LyricsSearch {
         }
         return all.withIndex()
             .sortedWith(
-                compareBy<IndexedValue<LyricsSearchResult>> {
-                    if (it.value.source == LyricsSource.LYRON_REPOSITORY) 0 else 1
-                }.thenBy { score(it.value) }
+                compareBy<IndexedValue<LyricsSearchResult>> { score(it.value) }
+                    .thenBy {
+                        typeRank[it.value.type.name] ?: 99
+                    }
+                    .thenBy {
+                        if (sourceRank.isNotEmpty()) {
+                            sourceRank[it.value.source.name] ?: 99
+                        } else {
+                            // Fallback legado: Lyron primeiro
+                            if (it.value.source == LyricsSource.LYRON_REPOSITORY) 0 else 1
+                        }
+                    }
                     .thenBy { it.index }
             )
             .map { it.value }

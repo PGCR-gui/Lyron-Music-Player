@@ -28,11 +28,40 @@ object LyricsExtractor {
     /** Quanto do início de um .ogg/.opus examinamos atrás dos comentários. */
     private const val OGG_SCAN_BYTES = 512 * 1024
 
-    fun load(context: Context, track: Track): List<LyricLine> = try {
-        loadInternal(context, track)
-    } catch (_: OutOfMemoryError) {
-        // OOM é Error, não Exception: sem isto o app fecha. Letra é opcional.
-        emptyList()
+    fun load(context: Context, track: Track): List<LyricLine> {
+        // Espera uma gravação em andamento terminar (ver LyricsEmbedder.lyricsLock).
+        val lock = LyricsEmbedder.lyricsLock.readLock()
+        lock.lock()
+        return try {
+            loadInternal(context, track)
+        } catch (_: OutOfMemoryError) {
+            // OOM é Error, não Exception: sem isto o app fecha. Letra é opcional.
+            emptyList()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    /** Todos os sidecars possíveis da faixa, na ordem de prioridade da reprodução. */
+    internal fun sidecarFiles(track: Track): List<File> {
+        val base = when {
+            track.path.startsWith("/") -> track.path.substringBeforeLast('.')
+            track.uri.scheme == "file" && !track.uri.path.isNullOrBlank() ->
+                track.uri.path!!.substringBeforeLast('.')
+            else -> return emptyList()
+        }
+        return listOf("elrc", "ELRC", "lrc", "LRC", "ttml", "TTML").map { File("$base.$it") }
+    }
+
+    /** True se há letra embutida OU se a leitura falhou (incerto: tratar como "existe"). */
+    internal fun hasEmbeddedOrUncertain(context: Context, track: Track): Boolean {
+        val uncertain = BooleanArray(1)
+        val lines = try {
+            loadEmbeddedInternal(context, track, uncertain)
+        } catch (_: OutOfMemoryError) {
+            return true
+        }
+        return lines.isNotEmpty() || uncertain[0]
     }
 
     private fun loadInternal(context: Context, track: Track): List<LyricLine> {
@@ -47,12 +76,20 @@ object LyricsExtractor {
     }
 
     /** Só tags embutidas (para o editor quando o usuário escolhe essa fonte). */
-    fun loadEmbedded(context: Context, track: Track): List<LyricLine> {
+    fun loadEmbedded(context: Context, track: Track): List<LyricLine> =
+        loadEmbeddedInternal(context, track, BooleanArray(1))
+
+    /** [uncertain][0] vira true se alguma leitura lançou erro (não confundir com "sem letra"). */
+    private fun loadEmbeddedInternal(
+        context: Context,
+        track: Track,
+        uncertain: BooleanArray
+    ): List<LyricLine> {
         try {
             context.contentResolver.openInputStream(track.uri)?.use { stream ->
                 readEmbedded(stream)?.let { if (it.isNotEmpty()) return it }
             }
-        } catch (_: Exception) { }
+        } catch (_: Exception) { uncertain[0] = true }
 
         if (track.path.startsWith("/")) {
             try {
@@ -62,7 +99,7 @@ object LyricsExtractor {
                         readEmbedded(stream)?.let { if (it.isNotEmpty()) return it }
                     }
                 }
-            } catch (_: Exception) { }
+            } catch (_: Exception) { uncertain[0] = true }
         }
 
         // Formatos que o leitor nativo acima não cobre (M4A/MP4, WAV, AIFF, DSF, APE, WV…):
@@ -74,7 +111,7 @@ object LyricsExtractor {
                 val parsed = parseLyricsContent(text)
                 if (parsed.isNotEmpty()) return parsed
             }
-        } catch (_: Exception) { }
+        } catch (_: Exception) { uncertain[0] = true }
 
         try {
             val r = MediaMetadataRetriever()
@@ -219,7 +256,7 @@ object LyricsExtractor {
      * Usado para tags embutidas e arquivos externos sem extensão confiável.
      */
     fun parseLyricsContent(text: String): List<LyricLine> {
-        val trimmed = text.trim()
+        val trimmed = text.removePrefix("\uFEFF").trim()
         if (trimmed.isEmpty()) return emptyList()
         if (looksLikeTtml(trimmed)) {
             val ttml = parseTtml(trimmed)
@@ -231,28 +268,19 @@ object LyricsExtractor {
     }
 
     private fun externalLrc(track: Track): List<LyricLine>? {
-        val candidates = mutableListOf<String>()
-        if (track.path.startsWith("/")) {
-            val base = track.path.substringBeforeLast('.')
-            // eLRC keeps word-level sync; a newly saved plain LRC takes precedence over TTML.
-            candidates += "$base.elrc"
-            candidates += "$base.ELRC"
-            candidates += "$base.lrc"
-            candidates += "$base.LRC"
-            candidates += "$base.ttml"
-            candidates += "$base.TTML"
-        }
-        for (p in candidates) {
-            val f = File(p)
-            if (f.exists()) {
-                return try {
-                    val raw = f.readText()
-                    when {
-                        p.endsWith(".ttml", true) -> parseTtml(raw).ifEmpty { parseLyricsContent(raw) }
-                        else -> parseLyricsContent(raw)
-                    }
-                } catch (_: Exception) { null }
-            }
+        // Antes o primeiro arquivo que existisse encerrava a busca: um .elrc vazio/ilegível
+        // escondia um .lrc ou .ttml válido ao lado. Agora segue para o próximo candidato.
+        for (f in sidecarFiles(track)) {
+            try {
+                if (!f.isFile || f.length() <= 0L) continue
+                val raw = f.readText()
+                val parsed = if (f.name.endsWith(".ttml", true)) {
+                    parseTtml(raw).ifEmpty { parseLyricsContent(raw) }
+                } else {
+                    parseLyricsContent(raw)
+                }
+                if (parsed.isNotEmpty()) return parsed
+            } catch (_: Exception) { }
         }
         return null
     }
@@ -262,15 +290,29 @@ object LyricsExtractor {
         val lineRegex = Regex("""\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?](.*)""")
         // Word/syllable timestamp inside line (eLRC): <mm:ss.xx>
         val wordRegex = Regex("""<(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?>""")
+        val headerTagRegex = Regex("""^\[[A-Za-z#]{1,12}:[^\]]*]$""")
+        val extraTimestampRegex = Regex("""^\s*\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?]""")
         val lines = mutableListOf<LyricLine>()
         val rawLines = text.lines()
         for (raw in rawLines) {
             val trimmed = raw.trim()
             if (trimmed.isEmpty() || trimmed.startsWith("[ti:") || trimmed.startsWith("[ar:") ||
                 trimmed.startsWith("[al:") || trimmed.startsWith("[by:") || trimmed.startsWith("[offset:")) continue
+            // Outros cabeçalhos LRC ([length:], [re:], [ve:], [tool:], [au:], [id:]...) não são letra.
+            // Viravam linhas sem tempo e a letra inteira deixava de ser tratada como sincronizada.
+            if (headerTagRegex.matches(trimmed)) continue
             val m = lineRegex.find(trimmed)
             val time = m?.let { parseTimestamp(it.groupValues[1], it.groupValues[2], it.groupValues[3]) } ?: -1L
             var lyricPart = m?.groupValues?.get(4) ?: trimmed
+            // Vários timestamps na mesma linha ([00:10.00][00:50.00]refrão): cada um é uma linha.
+            val extraTimes = mutableListOf<Long>()
+            if (m != null) {
+                while (true) {
+                    val extra = extraTimestampRegex.find(lyricPart) ?: break
+                    extraTimes += parseTimestamp(extra.groupValues[1], extra.groupValues[2], extra.groupValues[3])
+                    lyricPart = lyricPart.substring(extra.range.last + 1)
+                }
+            }
             // Marcadores de tipo de linha vêm antes da primeira palavra, logo após o timestamp.
             var isTranslation = false
             var isBackground = false
@@ -312,15 +354,28 @@ object LyricsExtractor {
             }
             val plainText = lyricPart.replace(wordRegex, "").replace(wordMarkerRegex, "").trim()
             if (plainText.isNotEmpty() || words.isNotEmpty()) {
-                lines.add(
-                    LyricLine(
-                        timeMs = time,
-                        text = if (plainText.isNotEmpty()) plainText else words.joinToString("") { it.text },
-                        words = words,
-                        isTranslation = isTranslation,
-                        isBackground = isBackground
-                    )
+                val built = LyricLine(
+                    timeMs = time,
+                    text = if (plainText.isNotEmpty()) plainText else words.joinToString("") { it.text },
+                    words = words,
+                    isTranslation = isTranslation,
+                    isBackground = isBackground
                 )
+                lines.add(built)
+                for (extraTime in extraTimes) {
+                    val delta = extraTime - time
+                    lines.add(
+                        built.copy(
+                            timeMs = extraTime,
+                            words = built.words.map { w ->
+                                w.copy(
+                                    timeMs = if (w.timeMs >= 0L) w.timeMs + delta else w.timeMs,
+                                    endMs = if (w.endMs >= 0L) w.endMs + delta else w.endMs
+                                )
+                            }
+                        )
+                    )
+                }
             }
         }
         val ordered = if (lines.all { it.timeMs >= 0 }) lines.sortedBy { it.timeMs } else lines

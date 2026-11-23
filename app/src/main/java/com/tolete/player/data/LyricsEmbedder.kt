@@ -17,6 +17,53 @@ object LyricsEmbedder {
 
     enum class Target { LRC_FILE, EMBEDDED }
 
+    /** Resultado de [saveIfAbsent]. */
+    enum class SaveResult { SAVED, FAILED, ALREADY_STORED }
+
+    /**
+     * Gravações (escrita) excluem leituras: sem isto, o popup (que relê a letra a cada ~1,5 s) e a
+     * tela Tocando agora podiam ler o .lrc/tag NO MEIO de uma gravação (arquivo truncado/vazio),
+     * concluir "esta faixa não tem letra" e a busca automática sobrescrevia a letra salva.
+     */
+    internal val lyricsLock = java.util.concurrent.locks.ReentrantReadWriteLock()
+
+    /**
+     * Existe QUALQUER letra salva para a faixa (.lrc/.elrc/.ttml em qualquer caixa, ou embutida)?
+     * É conservadora: se não deu para ler com certeza (erro de E/S), responde true, porque
+     * sobrescrever uma letra existente é pior do que deixar de baixar uma.
+     */
+    fun hasStoredLyrics(context: Context, track: Track): Boolean {
+        lyricsLock.readLock().lock()
+        try {
+            if (LyricsExtractor.sidecarFiles(track).any { f ->
+                    try { f.isFile && f.length() > 0L } catch (_: Exception) { true }
+                }) return true
+            return LyricsExtractor.hasEmbeddedOrUncertain(context, track)
+        } finally {
+            lyricsLock.readLock().unlock()
+        }
+    }
+
+    /**
+     * Grava só se, NO MOMENTO da gravação, ainda não houver letra salva. Verificação e escrita
+     * ficam sob o mesmo lock, então duas rotinas (tela + popup) não se atropelam.
+     * Usado por todos os fluxos automáticos; só o editor (ação explícita) sobrescreve.
+     */
+    fun saveIfAbsent(
+        context: Context,
+        track: Track,
+        lines: List<LyricLine>,
+        target: Target
+    ): SaveResult {
+        lyricsLock.writeLock().lock()
+        try {
+            if (hasStoredLyrics(context, track)) return SaveResult.ALREADY_STORED
+            return if (save(context, track, lines, target)) SaveResult.SAVED else SaveResult.FAILED
+        } finally {
+            lyricsLock.writeLock().unlock()
+        }
+    }
+
     /**
      * Apaga o cache legado de letras (pasta cache/lyrics), se ainda existir.
      * Mantido para o MainActivity não quebrar em builds que chamam isto no onCreate.
@@ -250,7 +297,18 @@ object LyricsEmbedder {
                     )
                 if (writable) {
                     parent?.mkdirs()
-                    lrcFile.writeText(lrcText, Charsets.UTF_8)
+                    // Atômico: grava num temporário e renomeia. writeText direto trunca o arquivo
+                    // antes de escrever, e uma leitura nesse instante via um .lrc vazio.
+                    val tmp = File(lrcFile.path + ".tmp")
+                    var replaced = false
+                    try {
+                        tmp.writeText(lrcText, Charsets.UTF_8)
+                        replaced = tmp.length() > 0 && tmp.renameTo(lrcFile)
+                    } catch (_: Exception) { }
+                    if (!replaced) {
+                        try { tmp.delete() } catch (_: Exception) { }
+                        lrcFile.writeText(lrcText, Charsets.UTF_8)
+                    }
                     if (lrcFile.exists() && lrcFile.length() > 0) return true
                 }
             } catch (_: Exception) { }
@@ -269,6 +327,20 @@ object LyricsEmbedder {
     }
 
     fun save(
+        context: Context,
+        track: Track,
+        lines: List<LyricLine>,
+        target: Target
+    ): Boolean {
+        lyricsLock.writeLock().lock()
+        try {
+            return saveLocked(context, track, lines, target)
+        } finally {
+            lyricsLock.writeLock().unlock()
+        }
+    }
+
+    private fun saveLocked(
         context: Context,
         track: Track,
         lines: List<LyricLine>,

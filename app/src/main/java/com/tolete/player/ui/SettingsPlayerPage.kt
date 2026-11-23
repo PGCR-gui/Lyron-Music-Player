@@ -83,6 +83,10 @@ internal fun PlayerPage(
     onSeekBarStyleChange: (SeekBarStyle) -> Unit = {},
     seekBarWaveformTheme: WaveformTheme = WaveformTheme.BARS,
     onSeekBarWaveformThemeChange: (WaveformTheme) -> Unit = {},
+    liveWaveformEnabled: Boolean = false,
+    onLiveWaveformEnabledChange: (Boolean) -> Unit = {},
+    liveWaveformFps: Int = 30,
+    onLiveWaveformFpsChange: (Int) -> Unit = {},
     immersiveNowPlaying: Boolean = true,
     onImmersiveNowPlayingChange: (Boolean) -> Unit = {},
     audioOutput: AudioOutputBackend = AudioOutputBackend.DEFAULT,
@@ -439,8 +443,12 @@ internal fun PlayerPage(
                 modifier = Modifier.padding(bottom = 4.dp)
             )
             Text(
-                "Usa a cor de destaque do tema (exceto Multicolor). A forma de onda de cada música é calculada " +
-                    "uma vez, em segundo plano, e fica guardada para as próximas vezes.",
+                if (liveWaveformEnabled)
+                    "Modo ao vivo: a barra mostra a forma de onda do trecho que está tocando agora " +
+                        "(não o envelope da faixa inteira). Usa o mesmo áudio do visualizer milk."
+                else
+                    "Usa a cor de destaque do tema (exceto Multicolor). A forma de onda de cada música é calculada " +
+                        "uma vez, em segundo plano, e fica guardada para as próximas vezes.",
                 fontSize = 12.sp,
                 color = Color.White.copy(0.45f),
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -477,6 +485,74 @@ internal fun PlayerPage(
                             .width(110.dp)
                             .height(36.dp)
                     )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(0.06f))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Animação ao vivo",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "A waveform reflete o áudio que está tocando agora (posição atual)",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(0.5f)
+                    )
+                }
+                Switch(
+                    checked = liveWaveformEnabled,
+                    onCheckedChange = onLiveWaveformEnabledChange
+                )
+            }
+
+            if (liveWaveformEnabled) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Taxa de atualização",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(0.55f),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Text(
+                    "30 fps é o mais leve. 60 e 90 fps deixam a animação mais fluida, mas consomem mais " +
+                        "CPU/bateria — em celulares fracos prefira 30 fps.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.45f),
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                listOf(
+                    30 to "30 fps — recomendado (leve)",
+                    60 to "60 fps — fluido",
+                    90 to "90 fps — máximo (pode causar perda de desempenho em celulares fracos)"
+                ).forEach { (fps, label) ->
+                    val selected = liveWaveformFps == fps
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) Color.White.copy(0.14f) else Color.White.copy(0.06f))
+                            .clickable { onLiveWaveformFpsChange(fps) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selected,
+                            onClick = { onLiveWaveformFpsChange(fps) }
+                        )
+                        Text(label, fontSize = 15.sp, modifier = Modifier.padding(start = 4.dp))
+                    }
                 }
             }
         }

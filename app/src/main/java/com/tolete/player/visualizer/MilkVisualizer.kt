@@ -215,9 +215,12 @@ fun MilkVisualizer(
 
     // Só captura PCM enquanto a música está tocando (ao pausar o preset continua animando sem áudio novo)
     DisposableEffect(isPlaying, surfaceActive) {
-        AudioTap.resetReader()
-        AudioTap.active = isPlaying && surfaceActive
-        onDispose { AudioTap.active = false }
+        val need = isPlaying && surfaceActive
+        if (need) {
+            AudioTap.resetReader()
+            AudioTap.acquire()
+        }
+        onDispose { if (need) AudioTap.release() }
     }
 
     // Pausa/esconde a superfície enquanto um menu Compose está por cima

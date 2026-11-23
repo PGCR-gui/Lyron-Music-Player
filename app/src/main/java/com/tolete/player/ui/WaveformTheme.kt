@@ -39,6 +39,7 @@ import kotlin.math.sin
  */
 enum class WaveformTheme(val label: String, val description: String) {
     BARS("Barras", "Barras na cor de destaque do tema (padrão)."),
+    EQUALIZER("Equalizador", "Blocos empilhados estilo analisador de espectro (LED), na cor do tema."),
     MULTICOLOR("Multicolor", "Linhas finas em degradê de azul‑petróleo, verde e laranja."),
     SILHOUETTE("Silhueta", "Silhueta suave em camadas, na cor dominante do tema."),
     MESH("Malha", "Fitas entrelaçadas de linhas finas, na cor dominante do tema."),
@@ -117,6 +118,7 @@ internal fun DrawScope.drawWaveAmps(
     if (amps.isEmpty()) return
     when (theme) {
         WaveformTheme.BARS -> drawBarsTheme(amps, selL, selR, accent, offColor, barW, gap, minH)
+        WaveformTheme.EQUALIZER -> drawEqualizerTheme(amps, selL, selR, accent, offColor, barW, gap, minH)
         WaveformTheme.MULTICOLOR -> drawMulticolorTheme(amps, selL, selR, offColor, barW, gap, minH)
         WaveformTheme.SILHOUETTE -> drawSilhouetteTheme(amps, selL, selR, accent, offColor)
         WaveformTheme.MESH -> drawMeshTheme(amps, selL, selR, accent, offColor)
@@ -144,6 +146,49 @@ private fun DrawScope.drawBarsTheme(
             size = Size(barW, h),
             cornerRadius = CornerRadius(barW / 2f)
         )
+    }
+}
+
+/**
+ * Estilo equalizador / LED: blocos quadrados empilhados a partir da base (como o vídeo
+ * de espectro vermelho), com pequeno vão entre os blocos. Usa a cor de destaque do app.
+ */
+private fun DrawScope.drawEqualizerTheme(
+    amps: FloatArray, selL: Float, selR: Float, accent: Color, off: Color,
+    barW: Float, gap: Float, minH: Float
+) {
+    val colW = barW + gap
+    val hMax = size.height * AMP_SCALE
+    // Tamanho do bloco: um pouco menor que a largura da barra, para parecer LED
+    val block = (barW * 0.92f).coerceAtLeast(2.5f)
+    val blockGap = (block * 0.18f).coerceAtLeast(0.8f)
+    val step = block + blockGap
+    for (i in amps.indices) {
+        val targetH = max(minH, amps[i] * hMax)
+        val x = i * colW + (barW - block) / 2f
+        val inSel = (i * colW + barW / 2f) in selL..selR
+        val color = if (inSel) accent else off
+        // Empilha a partir da base (bottom-aligned), como analisador clássico
+        var y = size.height - block
+        var remaining = targetH
+        while (remaining > blockGap * 0.5f && y >= -block) {
+            val thisH = min(block, remaining)
+            val alpha = if (inSel) {
+                // Blocos mais altos ficam um pouco mais brilhantes
+                val t = 1f - (y / size.height).coerceIn(0f, 1f)
+                0.55f + 0.45f * t
+            } else {
+                color.alpha
+            }
+            drawRoundRect(
+                color = color.copy(alpha = alpha),
+                topLeft = Offset(x, y),
+                size = Size(block, thisH),
+                cornerRadius = CornerRadius(block * 0.18f)
+            )
+            remaining -= step
+            y -= step
+        }
     }
 }
 

@@ -43,8 +43,27 @@ object AudioTap {
     @Volatile private var sampleRate = TARGET_RATE
     @Volatile private var step = 1
 
-    /** Ligado enquanto existe um visualizador na tela. */
+    /**
+     * Ligado enquanto existe pelo menos um consumidor (visualizer milk ou waveform ao vivo da seekbar).
+     * Use [acquire] / [release] em vez de gravar [active] diretamente.
+     */
     @Volatile var active = false
+        private set
+
+    private val consumers = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Marca interesse em PCM (milk, live seekbar…). Quando o contador volta a 0, para de encher o ring. */
+    fun acquire() {
+        if (consumers.incrementAndGet() == 1) active = true
+    }
+
+    fun release() {
+        val n = consumers.decrementAndGet()
+        if (n <= 0) {
+            consumers.set(0)
+            active = false
+        }
+    }
 
     // sincronia: fim (em tempo de mídia) do que já entrou no sink x posição que está tocando
     @Volatile private var writtenEndUs = NONE
@@ -202,6 +221,51 @@ object AudioTap {
         debugTick()
         return n
     }
+
+    /**
+     * Cópia não-destrutiva dos frames mais recentes que estão soando agora
+     * (não avança o ponteiro de [drain] — seguro para usar junto com o milk).
+     * [out] deve ter capacidade para pelo menos maxFrames*2 floats (L,R intercalados).
+     * Retorna quantos frames foram copiados.
+     */
+    fun snapshotRecent(out: FloatArray, maxFrames: Int): Int {
+        if (maxFrames <= 0 || out.size < 2) return 0
+        val end = (writeFrames - aheadFrames()).coerceAtLeast(0L)
+        val available = end.coerceAtMost(CAPACITY.toLong())
+        val n = minOf(maxFrames, available.toInt())
+        if (n <= 0) return 0
+        val start = end - n
+        for (k in 0 until n) {
+            val i = (((start + k) and MASK).toInt()) * 2
+            out[k * 2] = ring[i]
+            out[k * 2 + 1] = ring[i + 1]
+        }
+        return n
+    }
+
+    /**
+     * Como [snapshotRecent], mas deslocado [advanceFrames] para o futuro (adiantamento).
+     * Útil para a waveform ao vivo da seekbar acompanhar o áudio com 0,5 s de antecipação.
+     * Se não houver frames futuros suficientes, usa o máximo disponível.
+     */
+    fun snapshotRecentAhead(out: FloatArray, maxFrames: Int, advanceFrames: Int): Int {
+        if (maxFrames <= 0 || out.size < 2) return 0
+        val now = (writeFrames - aheadFrames()).coerceAtLeast(0L)
+        val end = (now + advanceFrames.toLong()).coerceAtMost(writeFrames)
+        val available = end.coerceAtMost(CAPACITY.toLong())
+        val n = minOf(maxFrames, available.toInt())
+        if (n <= 0) return 0
+        val start = end - n
+        for (k in 0 until n) {
+            val i = (((start + k) and MASK).toInt()) * 2
+            out[k * 2] = ring[i]
+            out[k * 2 + 1] = ring[i + 1]
+        }
+        return n
+    }
+
+    /** Taxa efetiva após decimação (para quem calcula duração da janela). */
+    fun effectiveSampleRate(): Int = (sampleRate / step).coerceAtLeast(1)
 
     private fun debugTick() {
         if (!DEBUG) return

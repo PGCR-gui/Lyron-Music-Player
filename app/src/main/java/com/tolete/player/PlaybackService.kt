@@ -28,7 +28,9 @@ import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
+import java.nio.ByteBuffer
 import androidx.media3.common.MimeTypes
 import com.tolete.player.data.DsfExtractor
 import com.tolete.player.visualizer.AudioTapSink
@@ -133,6 +135,8 @@ class PlaybackService : MediaSessionService() {
         const val ACTION_CLOSE_APP = "com.tolete.player.CLOSE_APP"
         const val ACTION_SET_SPEED = "com.tolete.player.SET_SPEED"
         const val EXTRA_SPEED = "speed"
+        /** Maior velocidade que o app permite (setSpeed faz coerceIn(0.25, 2)); dimensiona o buffer da AudioTrack. */
+        private const val MAX_APP_PLAYBACK_SPEED = 2.0
 
         /** Preferências de áudio aplicadas na criação do player (para UI técnica). */
         @Volatile var appliedBackend: String = "DEFAULT"
@@ -180,6 +184,35 @@ class PlaybackService : MediaSessionService() {
     private var crossfadeHandoffInProgress = false
     private var crossfadeMonitorJob: Job? = null
     private var crossfadeMixJob: Job? = null
+
+    /**
+     * Com setEnableAudioOutputPlaybackParameters(true) o Media3 multiplica o buffer da AudioTrack
+     * pela velocidade máxima possível (8x), o que dava ~4 s de áudio pré-enfileirado (visto no
+     * dumpsys: FrmCnt 768000 a 192 kHz, latência ~4000 ms) e até falha de alocação (-12) em 192 kHz.
+     * O app só vai até 2x (ver EXTRA_SPEED), então o buffer é dimensionado para isso: ~1 s.
+     * Quanto menor o buffer, menos áudio uma reconfiguração da saída pode derrubar.
+     */
+    private val cappedAudioTrackBufferSizeProvider = object : DefaultAudioSink.AudioTrackBufferSizeProvider {
+        private val base = DefaultAudioTrackBufferSizeProvider.Builder().build()
+
+        override fun getBufferSizeInBytes(
+            minBufferSizeInBytes: Int,
+            encoding: Int,
+            outputMode: Int,
+            pcmFrameSize: Int,
+            sampleRate: Int,
+            bitrate: Int,
+            maxAudioTrackPlaybackSpeed: Double
+        ): Int = base.getBufferSizeInBytes(
+            minBufferSizeInBytes,
+            encoding,
+            outputMode,
+            pcmFrameSize,
+            sampleRate,
+            bitrate,
+            minOf(maxAudioTrackPlaybackSpeed, MAX_APP_PLAYBACK_SPEED)
+        )
+    }
 
     private fun prefs() = getSharedPreferences("tolete", MODE_PRIVATE)
     private fun fadeMs(): Int = prefs().getInt("fade_ms", 300).coerceIn(0, 3000)
@@ -611,6 +644,7 @@ class PlaybackService : MediaSessionService() {
                         )
                     ))
                     .setEnableAudioOutputPlaybackParameters(true)
+                    .setAudioTrackBufferSizeProvider(cappedAudioTrackBufferSizeProvider)
                 android.util.Log.i(
                     "PlaybackService",
                     "AudioSink: mode=$backendName device=${appliedDeviceLabel.ifBlank { "-" }} float=$useFloat"
@@ -620,6 +654,40 @@ class PlaybackService : MediaSessionService() {
                 // Fidelidade tenta alinhar o mixer USB à taxa PCM efetivamente selecionada.
                 val appCtx = context.applicationContext
                 return AudioTapSink(object : ForwardingAudioSink(sink) {
+                    /**
+                     * Troca do mixer USB aguardando o áudio da faixa anterior terminar.
+                     *
+                     * O renderer chama configure() da PRÓXIMA faixa assim que decodifica o início dela,
+                     * mas a AudioTrack da faixa atual ainda tem áudio enfileirado (o buffer chegava a
+                     * ~4 s). Reconfigurar o mixer do DAC naquele instante reabre a saída USB e derruba
+                     * a AudioTrack antiga, descartando o que faltava tocar: os últimos segundos sumiam
+                     * de repente (só quando a faixa seguinte pedia outro formato/taxa de mixer).
+                     * Agora o pedido fica guardado e só roda quando o sink não tem mais nada a tocar,
+                     * logo antes de criar a AudioTrack nova.
+                     */
+                    private var pendingMixerApply: (() -> Unit)? = null
+
+                    private fun runPendingMixerApplyIfDrained() {
+                        val apply = pendingMixerApply ?: return
+                        if (hasPendingData()) return
+                        pendingMixerApply = null
+                        apply()
+                    }
+
+                    override fun handleBuffer(
+                        buffer: ByteBuffer,
+                        presentationTimeUs: Long,
+                        encodedAccessUnitCount: Int
+                    ): Boolean {
+                        runPendingMixerApplyIfDrained()
+                        return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+                    }
+
+                    override fun reset() {
+                        pendingMixerApply = null
+                        super.reset()
+                    }
+
                     // Media3 1.11: o override agora é configure(AudioSinkConfig)
                     override fun configure(audioSinkConfig: AudioSink.AudioSinkConfig) {
                         val inputFormat = audioSinkConfig.format
@@ -683,14 +751,24 @@ class PlaybackService : MediaSessionService() {
                                 appliedTrackChannelCount = channels
                                 appliedTrackEncoding = trackEncoding
                                 if (usbExclusive) {
-                                    com.tolete.player.data.UsbMixer.applyForTrack(
-                                        appCtx,
-                                        sampleRate = outputSampleRate,
-                                        channelCount = channels,
-                                        encoding = trackEncoding,
-                                        preferredHz = preferredSr,
-                                        bitPerfect = bitPerfect && inputFormat.sampleRate == outputSampleRate
-                                    )
+                                    val bitPerfectForTrack = bitPerfect && inputFormat.sampleRate == outputSampleRate
+                                    val applyMixer = {
+                                        com.tolete.player.data.UsbMixer.applyForTrack(
+                                            appCtx,
+                                            sampleRate = outputSampleRate,
+                                            channelCount = channels,
+                                            encoding = trackEncoding,
+                                            preferredHz = preferredSr,
+                                            bitPerfect = bitPerfectForTrack
+                                        )
+                                    }
+                                    if (hasPendingData()) {
+                                        // Ainda há áudio da faixa anterior tocando: não mexe no mixer agora.
+                                        pendingMixerApply = applyMixer
+                                    } else {
+                                        pendingMixerApply = null
+                                        applyMixer()
+                                    }
                                 }
                                 android.util.Log.i(
                                     "PlaybackService",
@@ -1096,7 +1174,9 @@ class PlaybackService : MediaSessionService() {
                             pendingEmbedLines = emptyList()
                             withContext(Dispatchers.IO) {
                                 try {
-                                    com.tolete.player.data.LyricsEmbedder.save(
+                                    // A faixa tocou por minutos desde a busca: o usuário pode ter salvado
+                                    // uma letra nesse meio-tempo. Só grava se continuar sem nenhuma.
+                                    com.tolete.player.data.LyricsEmbedder.saveIfAbsent(
                                         applicationContext, pending, lines,
                                         com.tolete.player.data.LyricsEmbedder.Target.EMBEDDED
                                     )
@@ -1120,16 +1200,24 @@ class PlaybackService : MediaSessionService() {
                             cachedId = null
                             cachedLines = emptyList()
                         }
-                    } else if (!effectivelyPlaying(player) || id == null) {
+                    } else if (id == null ||
+                        player.playbackState == Player.STATE_IDLE ||
+                        player.playbackState == Player.STATE_ENDED
+                    ) {
+                        // Sem faixa ativa (nem tocando nem pausada): some popup e notificação
                         LyricsPopupOverlay.hide()
-                        // Mantém a notificação de controle enquanto o popup estiver habilitado
+                        if (lastNotifShown) {
+                            LyricsPopupNotifier.cancel(applicationContext)
+                            lastNotifShown = false
+                        }
+                        cachedId = null
+                        cachedLines = emptyList()
+                    } else if (!effectivelyPlaying(player)) {
+                        // Pausado: esconde só o overlay de letras; mantém a notificação de controle
+                        LyricsPopupOverlay.hide()
                         if (!lastNotifShown) {
                             LyricsPopupNotifier.show(applicationContext)
                             lastNotifShown = true
-                        }
-                        if (id == null) {
-                            cachedId = null
-                            cachedLines = emptyList()
                         }
                     } else {
                         val now = System.currentTimeMillis()
@@ -1139,6 +1227,11 @@ class PlaybackService : MediaSessionService() {
                             cachedLines = emptyList()
                             lastLocalReloadMs = 0L
                             networkFetchForId = null
+                            // Nova faixa: limpa o "pular nesta música" da anterior
+                            val prevSkip = prefs.getString("lyrics_popup_skip_track_id", null)
+                            if (prevSkip != null && prevSkip != id) {
+                                prefs.edit().remove("lyrics_popup_skip_track_id").apply()
+                            }
                         }
                         // Recarrega do disco a cada ~1,5s (pega inserção manual / auto-fetch do NP)
                         // e tenta rede se ainda vazio e auto-fetch ligado.
@@ -1195,18 +1288,22 @@ class PlaybackService : MediaSessionService() {
                                                 }
                                             )
                                             if (best != null && best.lines.isNotEmpty()) {
-                                                val stored = com.tolete.player.data.LyricsEmbedder.hasExternalLrc(track) ||
-                                                    com.tolete.player.data.LyricsExtractor.loadEmbedded(applicationContext, track).isNotEmpty()
-                                                if (stored) return@withContext com.tolete.player.data.LyricsExtractor.load(applicationContext, track)
                                                 val rawTarget = prefs.getString("auto_fetch_lyrics_target", "LRC_FILE")
                                                 val target = runCatching {
                                                     com.tolete.player.data.LyricsEmbedder.Target.valueOf(rawTarget ?: "LRC_FILE")
                                                 }.getOrDefault(com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE)
-                                                val saved = target == com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE &&
-                                                    com.tolete.player.data.LyricsEmbedder.save(
-                                                        applicationContext, track, best.lines, target
-                                                    )
-                                                if (!saved) {
+                                                // Verificação + gravação atômicas (nunca sobrescreve letra salva).
+                                                val outcome = if (target == com.tolete.player.data.LyricsEmbedder.Target.LRC_FILE) {
+                                                    com.tolete.player.data.LyricsEmbedder.saveIfAbsent(applicationContext, track, best.lines, target)
+                                                } else if (com.tolete.player.data.LyricsEmbedder.hasStoredLyrics(applicationContext, track)) {
+                                                    com.tolete.player.data.LyricsEmbedder.SaveResult.ALREADY_STORED
+                                                } else {
+                                                    com.tolete.player.data.LyricsEmbedder.SaveResult.FAILED
+                                                }
+                                                if (outcome == com.tolete.player.data.LyricsEmbedder.SaveResult.ALREADY_STORED) {
+                                                    return@withContext com.tolete.player.data.LyricsExtractor.load(applicationContext, track)
+                                                }
+                                                if (outcome != com.tolete.player.data.LyricsEmbedder.SaveResult.SAVED) {
                                                     // Destino = tags (ou .lrc sem permissão): adia a gravação
                                                     // para depois que esta faixa deixar de tocar.
                                                     pendingEmbedTrack = track
@@ -1224,7 +1321,22 @@ class PlaybackService : MediaSessionService() {
                         }
                         if (cachedLines.isEmpty()) {
                             LyricsPopupOverlay.hide()
+                            // Sem letra exata após auto-fetch: notificação com "Pular" e "Busca manual"
+                            val skipId = prefs.getString("lyrics_popup_skip_track_id", null)
+                            if (id != skipId && prefs.getBoolean("auto_fetch_lyrics", false)) {
+                                prefs.edit().putString("lyrics_popup_current_id", id).apply()
+                                LyricsPopupNotifier.showNoExact(applicationContext)
+                                lastNotifShown = true
+                            } else if (id == skipId) {
+                                if (lastNotifShown) {
+                                    LyricsPopupNotifier.cancel(applicationContext)
+                                    lastNotifShown = false
+                                }
+                            }
                         } else {
+                            if (prefs.getString("lyrics_popup_skip_track_id", null) == id) {
+                                prefs.edit().remove("lyrics_popup_skip_track_id").apply()
+                            }
                             val position = player.currentPosition.coerceAtLeast(0L)
                             val mainIdx = cachedLines.indexOfLast {
                                 !it.isTranslation && !it.isBackground && it.timeMs >= 0L && it.timeMs <= position

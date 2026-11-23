@@ -2242,7 +2242,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // (Now Playing / letras popup). Nunca em scans de biblioteca.
         if (_autoFetchLyrics.value && allowNetwork) {
             try {
-                val results = LyricsSearch.search(track.title, track.artist, _preferNeteaseRomanization.value)
+                val results = LyricsSearch.search(
+                    track.title,
+                    track.artist,
+                    _preferNeteaseRomanization.value,
+                    sourceOrder = _lyricsSourceOrder.value,
+                    typeOrder = _lyricsTypeOrder.value
+                )
                 if (results.isEmpty()) return@withContext emptyList()
                 // Busca automática rígida: título e artista normalizados devem ser iguais
                 fun norm(s: String) = java.text.Normalizer
@@ -2272,15 +2278,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 ) ?: return@withContext emptyList()
                 val lines = best.lines
                 if (lines.isNotEmpty()) {
-                    // Outra rotina pode ter gravado enquanto a rede respondia; não sobrescrever.
-                    val stored = LyricsEmbedder.hasExternalLrc(track) ||
-                        LyricsExtractor.loadEmbedded(getApplication(), track).isNotEmpty()
-                    if (stored) return@withContext LyricsExtractor.load(getApplication(), track)
+                    // A verificação "já existe letra salva?" e a gravação são uma operação só, sob
+                    // lock: outra rotina (popup) ou o editor podem ter gravado enquanto a rede
+                    // respondia, e a busca automática nunca sobrescreve letra existente.
                     val target = _autoLyricsSaveTarget.value
-                    val saved = LyricsEmbedder.save(getApplication(), track, lines, target)
+                    var result = LyricsEmbedder.saveIfAbsent(getApplication(), track, lines, target)
                     // Mantém o fallback histórico para .lrc quando a pasta não permite escrita.
-                    if (!saved && target == LyricsEmbedder.Target.LRC_FILE) {
-                        LyricsEmbedder.save(getApplication(), track, lines, LyricsEmbedder.Target.EMBEDDED)
+                    if (result == LyricsEmbedder.SaveResult.FAILED && target == LyricsEmbedder.Target.LRC_FILE) {
+                        result = LyricsEmbedder.saveIfAbsent(
+                            getApplication(), track, lines, LyricsEmbedder.Target.EMBEDDED
+                        )
+                    }
+                    if (result == LyricsEmbedder.SaveResult.ALREADY_STORED) {
+                        // Vale a letra que já estava salva, não a baixada.
+                        return@withContext LyricsExtractor.load(getApplication(), track)
                     }
                 }
                 lines
@@ -2302,7 +2313,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Busca manual: LRCLIB + QQ Music + NetEase + KuGou, todas ao mesmo tempo. */
     suspend fun searchLyrics(trackName: String, artistName: String): List<LyricsSearchResult> =
-        LyricsSearch.search(trackName, artistName, _preferNeteaseRomanization.value)
+        LyricsSearch.search(
+            trackName,
+            artistName,
+            _preferNeteaseRomanization.value,
+            sourceOrder = _lyricsSourceOrder.value,
+            typeOrder = _lyricsTypeOrder.value
+        )
 
     suspend fun embedLyricsResult(
         track: Track,
@@ -3702,6 +3719,38 @@ private val _firstPlayedAt = MutableStateFlow(
         prefs.edit().putString(KEY_SEEK_WAVEFORM_THEME, theme.name).apply()
     }
 
+    /**
+     * Quando true e o estilo da seekbar é Waveform, a barra mostra a forma de onda
+     * do trecho que está tocando agora (ao vivo) em vez do envelope estático da faixa inteira.
+     */
+    private val _liveWaveformEnabled = MutableStateFlow(prefs.getBoolean(KEY_LIVE_WAVEFORM, false))
+    val liveWaveformEnabled: StateFlow<Boolean> = _liveWaveformEnabled.asStateFlow()
+    fun setLiveWaveformEnabled(enabled: Boolean) {
+        _liveWaveformEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_LIVE_WAVEFORM, enabled).apply()
+    }
+
+    /** Taxa de atualização da waveform ao vivo (30 / 60 / 90). */
+    private val _liveWaveformFps = MutableStateFlow(
+        prefs.getInt(KEY_LIVE_WAVEFORM_FPS, 30).coerceIn(30, 90).let { v ->
+            when {
+                v >= 75 -> 90
+                v >= 45 -> 60
+                else -> 30
+            }
+        }
+    )
+    val liveWaveformFps: StateFlow<Int> = _liveWaveformFps.asStateFlow()
+    fun setLiveWaveformFps(fps: Int) {
+        val v = when {
+            fps >= 75 -> 90
+            fps >= 45 -> 60
+            else -> 30
+        }
+        _liveWaveformFps.value = v
+        prefs.edit().putInt(KEY_LIVE_WAVEFORM_FPS, v).apply()
+    }
+
     // ---------- Ordenação ----------
     enum class GroupSort { NAME, TRACK_COUNT, TOTAL_DURATION }
     enum class TrackSort { NAME, FILE_SIZE, DURATION, LAST_MODIFIED }
@@ -4046,6 +4095,8 @@ private val _firstPlayedAt = MutableStateFlow(
         obj.put("crossfadeMs", _crossfadeMs.value)
         obj.put("seekBarStyle", _seekBarStyle.value.name)
         obj.put("seekBarWaveformTheme", _seekBarWaveformTheme.value.name)
+        obj.put("liveWaveformEnabled", _liveWaveformEnabled.value)
+        obj.put("liveWaveformFps", _liveWaveformFps.value)
         obj.put("immersiveNowPlaying", _immersiveNowPlaying.value)
         obj.put("milkIntervalSec", _milkIntervalSec.value)
         obj.put("milkSwitchMode", _milkSwitchMode.value)
@@ -4274,6 +4325,8 @@ private val _firstPlayedAt = MutableStateFlow(
             obj.optString("seekBarWaveformTheme").takeIf { it.isNotBlank() }?.let {
                 setSeekBarWaveformTheme(WaveformTheme.fromName(it))
             }
+            if (obj.has("liveWaveformEnabled")) setLiveWaveformEnabled(obj.getBoolean("liveWaveformEnabled"))
+            if (obj.has("liveWaveformFps")) setLiveWaveformFps(obj.getInt("liveWaveformFps"))
             if (obj.has("immersiveNowPlaying")) setImmersiveNowPlaying(obj.getBoolean("immersiveNowPlaying"))
             if (obj.has("milkIntervalSec")) setMilkIntervalSec(obj.getInt("milkIntervalSec"))
             if (obj.has("milkSwitchMode")) setMilkSwitchMode(obj.getString("milkSwitchMode"))
@@ -4556,6 +4609,8 @@ private val _firstPlayedAt = MutableStateFlow(
         const val KEY_CROSSFADE_MS = "crossfade_ms"
         const val KEY_SEEK_BAR_STYLE = "seek_bar_style"
         const val KEY_SEEK_WAVEFORM_THEME = "seek_bar_waveform_theme"
+        const val KEY_LIVE_WAVEFORM = "seek_live_waveform"
+        const val KEY_LIVE_WAVEFORM_FPS = "seek_live_waveform_fps"
         const val KEY_GROUP_SORT = "group_sort"
         const val KEY_GROUP_ORDER = "group_order"
         const val KEY_TRACK_SORT = "track_sort"

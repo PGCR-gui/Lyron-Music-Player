@@ -1425,7 +1425,9 @@ fun LyricsEditorScreen(
                     },
                     text = {
                         // Entrada textual mm:ss.mmm.
-                        var timeText by remember(manualTimeMs) {
+                        // Importante: NÃO usar manualTimeMs como chave do remember — isso recria o
+                        // estado a cada parse parcial e faz os dígitos "reaparecerem"/serem substituídos.
+                        var timeText by remember(manualTimeTarget) {
                             mutableStateOf(formatTime(manualTimeMs))
                         }
                         Column {
@@ -1438,10 +1440,15 @@ fun LyricsEditorScreen(
                             BasicTextField(
                                 value = timeText,
                                 onValueChange = { input ->
-                                    timeText = input
-                                    parseTimeToMs(input)?.let { manualTimeMs = it }
+                                    // Só números, dois-pontos e ponto (teclado numérico + filtro)
+                                    val filtered = input.filter { it.isDigit() || it == ':' || it == '.' }
+                                    timeText = filtered
+                                    parseTimeToMs(filtered)?.let { manualTimeMs = it }
                                 },
                                 singleLine = true,
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                ),
                                 textStyle = TextStyle(
                                     color = MaterialTheme.colorScheme.primary,
                                     fontSize = 28.sp,

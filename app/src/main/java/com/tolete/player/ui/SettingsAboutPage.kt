@@ -270,6 +270,22 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 internal val changelogEntries = listOf(
     ChangelogEntry(
+        code = "360",
+        version = "1.1",
+        changes = listOf(
+            "Waveforms animadas na seekbar",
+            "Uma ideia que já não era boa executada terrívelmente (O wavy liquid ficou parecendo algo bem... sugestivo)",
+            "Correção de bug que mutava últimos 4 segundos de alguns áudios no modo 'fidelidade de som'",
+            "Correção nas configurações de borda de letras",
+            "Melhorada a busca na seekbar",
+            "NetEase, QQ Music e KuGou agora usados também como fontes de Tags",
+            "Correção na inserção manual de tempo no editor de letras",
+            "Edição de prioridade na pesquisa manual de letras",
+            "Opção de busca manual nas letras pop up",
+            "Outras melhorias que não me lembro"
+        )
+    ),
+    ChangelogEntry(
         code = "357",
         version = "1.0",
         changes = listOf(
