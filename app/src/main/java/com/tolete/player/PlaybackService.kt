@@ -1155,6 +1155,9 @@ class PlaybackService : MediaSessionService() {
         lyricsPopupMonitorJob = scope.launch {
             var cachedId: String? = null
             var cachedLines: List<LyricLine> = emptyList()
+            // Letras Expressivas só valem para letras palavra por palavra (recalculado quando a lista muda).
+            var wbwSource: List<LyricLine>? = null
+            var wbwValue = false
             var lastNotifShown = false
             var lastLocalReloadMs = 0L
             var lastNetworkFetchMs = 0L
@@ -1190,7 +1193,8 @@ class PlaybackService : MediaSessionService() {
                     val permitted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M ||
                         Settings.canDrawOverlays(this@PlaybackService)
                     val id = player.currentMediaItem?.mediaId
-                    if (!enabled || !permitted || appIsVisible) {
+                    // Com o app aberto o popup também aparece; só some na tela Tocando agora.
+                    if (!enabled || !permitted || (appIsVisible && LyricsPopupOverlay.nowPlayingOpen)) {
                         LyricsPopupOverlay.hide()
                         if (lastNotifShown) {
                             LyricsPopupNotifier.cancel(applicationContext)
@@ -1344,9 +1348,63 @@ class PlaybackService : MediaSessionService() {
                                 ?: cachedLines.indexOfFirst { !it.isTranslation && !it.isBackground }
                                     .takeIf { it >= 0 }
                             val mainLine = mainIdx?.let { cachedLines[it] }
-                            if (mainLine == null || mainLine.text.isBlank()) {
+                            // Letra sem sincronização (nenhuma linha com timestamp): o popup não aparece, nem o expressivo.
+                            if (mainLine == null || mainLine.text.isBlank() || cachedLines.none { it.timeMs >= 0L }) {
                                 LyricsPopupOverlay.hide()
+                            } else if (
+                                prefs.getBoolean(LyricsPopupOverlay.KEY_EXPRESSIVE, false) &&
+                                run {
+                                    if (wbwSource !== cachedLines) {
+                                        wbwSource = cachedLines
+                                        wbwValue = LyricsPopupOverlay.isWordByWord(cachedLines)
+                                    }
+                                    wbwValue
+                                }
+                            ) {
+                                // Letras Expressivas: tela cheia, só palavras (sem tradução). O popup simples some.
+                                val themeId = prefs.getString(LyricsPopupOverlay.KEY_THEME, LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
+                                    ?: LyricsPopupOverlay.PopupTheme.DYNAMIC.id
+                                val themeColors = LyricsPopupOverlay.themeTextColors(themeId, prefs)
+                                val isDyn = themeId == LyricsPopupOverlay.PopupTheme.DYNAMIC.id
+                                val primary = if (isDyn) prefs.getInt("lyrics_primary_color", 0xFFFFFFFF.toInt()) else themeColors.first
+                                val secondary = if (isDyn) prefs.getInt("lyrics_secondary_color", 0x66FFFFFF) else themeColors.second
+                                val mainTf = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_font_path", null))
+                                val mainBorderColor = prefs.getInt("lyrics_border_color", 0xFF000000.toInt())
+                                val mainBorderWidth = prefs.getFloat("lyrics_border_width", 0f)
+                                LyricsPopupOverlay.hideSimple()
+                                LyricsPopupOverlay.showExpressive(applicationContext)
+                                LyricsPopupOverlay.updateExpressive(
+                                    LyricsPopupOverlay.ExpressiveFrame(
+                                        trackKey = id ?: "",
+                                        main = mainLine,
+                                        backing = cachedLines.lastOrNull {
+                                            it.isBackground && !it.isTranslation && it.timeMs >= 0L && it.timeMs <= position &&
+                                                (it.endMs < 0L || position <= it.endMs + 800L)
+                                        },
+                                        positionMs = position,
+                                        primaryColor = primary,
+                                        secondaryColor = secondary,
+                                        backingColor = prefs.getInt("lyrics_backing_color", 0xFFCE93D8.toInt()),
+                                        fontSizeSp = prefs.getFloat(
+                                            LyricsPopupOverlay.KEY_FONT_SIZE,
+                                            prefs.getFloat("lyrics_font_size", 22f)
+                                        ).coerceIn(12f, 40f).coerceAtMost(32f),
+                                        mainTypeface = mainTf,
+                                        backingTypeface = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString("lyrics_backing_font_path", null)) ?: mainTf,
+                                        emphasisTypeface = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString(LyricsPopupOverlay.KEY_EMPHASIS_FONT, null)) ?: mainTf,
+                                        borderColor = mainBorderColor,
+                                        borderWidthDp = mainBorderWidth,
+                                        backingBorderColor = prefs.getInt("lyrics_backing_border_color", mainBorderColor),
+                                        backingBorderWidthDp = prefs.getFloat("lyrics_backing_border_width", mainBorderWidth)
+                                    )
+                                )
+                                if (!lastNotifShown) {
+                                    LyricsPopupNotifier.show(applicationContext)
+                                    lastNotifShown = true
+                                }
                             } else {
+                                // Popup simples (ou Letras Expressivas ligadas numa música sem letra palavra por palavra)
+                                LyricsPopupOverlay.hideExpressive()
                                 val themeId = prefs.getString(LyricsPopupOverlay.KEY_THEME, LyricsPopupOverlay.PopupTheme.DYNAMIC.id)
                                 ?: LyricsPopupOverlay.PopupTheme.DYNAMIC.id
                             val themeColors = LyricsPopupOverlay.themeTextColors(themeId, prefs)
@@ -1398,7 +1456,9 @@ class PlaybackService : MediaSessionService() {
                                     backingBorderColor = prefs.getInt("lyrics_backing_border_color", mainBorderColor),
                                     backingBorderWidthDp = prefs.getFloat("lyrics_backing_border_width", mainBorderWidth),
                                     translationBorderColor = prefs.getInt("lyrics_translation_border_color", mainBorderColor),
-                                    translationBorderWidthDp = prefs.getFloat("lyrics_translation_border_width", mainBorderWidth)
+                                    translationBorderWidthDp = prefs.getFloat("lyrics_translation_border_width", mainBorderWidth),
+                                    emphasisTypeface = LyricsPopupOverlay.resolveTypeface(applicationContext, prefs.getString(LyricsPopupOverlay.KEY_EMPHASIS_FONT, null))
+                                        ?: mainTf
                                 )
                             )
                             if (!lastNotifShown) {

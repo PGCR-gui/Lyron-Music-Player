@@ -255,7 +255,7 @@ object LyricsSearch {
 /** LRCLIB → modelo unificado. Retorna null se não houver letra utilizável. */
 internal fun LrcLibClient.SearchResult.toUnified(): LyricsSearchResult? {
     val lines = toLyricLines()
-    val raw = toLrcText()
+    val raw = toLrcText()?.let { LyricsFormat.unescapeHtml(it) }
     if (lines.isEmpty() || raw.isNullOrBlank()) return null
     return LyricsSearchResult(
         id = "lrclib:$id",
@@ -381,23 +381,41 @@ internal object LyricsFormat {
         )
     }
 
-    /** Entidades HTML que a QQ Music devolve no texto da letra. */
+    private val numericEntityRegex = Regex("&#(\\d+);")
+    private val hexEntityRegex = Regex("&#[xX]([0-9a-fA-F]+);")
+
+    /**
+     * Converte entidades HTML (&apos; &quot; &amp; &#39; &#x27; ...) em caracteres normais.
+     * Várias fontes (QQ Music, repositório Lyron, LRCLIB, Kugou...) entregam o texto assim.
+     * Repete até estabilizar para cobrir texto codificado em dobro (&amp;apos;).
+     */
     fun unescapeHtml(s: String): String {
         if (!s.contains('&')) return s
-        var out = s.replace("&apos;", "'")
-            .replace("&quot;", "\"")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&nbsp;", " ")
-        out = Regex("&#(\\d+);").replace(out) { m ->
-            try {
-                String(Character.toChars(m.groupValues[1].toInt()))
-            } catch (_: Exception) {
-                m.value
-            }
+        var out = s
+        repeat(3) {
+            if (!out.contains('&')) return out
+            val before = out
+            out = out
+                .replace("&apos;", "'")
+                .replace("&#039;", "'")
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&nbsp;", " ")
+            out = numericEntityRegex.replace(out) { m -> codePointToString(m.groupValues[1].toIntOrNull(), m.value) }
+            out = hexEntityRegex.replace(out) { m -> codePointToString(m.groupValues[1].toIntOrNull(16), m.value) }
+            out = out.replace("&amp;", "&")
+            if (out == before) return out
         }
-        return out.replace("&amp;", "&")
+        return out
     }
+
+    private fun codePointToString(cp: Int?, fallback: String): String =
+        try {
+            if (cp != null && Character.isValidCodePoint(cp)) String(Character.toChars(cp)) else fallback
+        } catch (_: Exception) {
+            fallback
+        }
 
     fun enc(s: String): String = URLEncoder.encode(s.trim(), "UTF-8")
 }

@@ -60,7 +60,9 @@ object LyricsPopupNotifier {
             .setSmallIcon(R.drawable.ic_lyrics_popup)
             .setContentTitle("Letras em popup")
             .setContentText(
-                if (locked) "Posição bloqueada · toques atravessam o popup"
+                if (LyricsPopupOverlay.isExpressive(ctx))
+                    "Letras Expressivas ligadas · em músicas palavra por palavra a tela fica livre para toques"
+                else if (locked) "Posição bloqueada · toques atravessam o popup"
                 else "Posição livre · arraste o popup para mover"
             )
             .setOngoing(true)

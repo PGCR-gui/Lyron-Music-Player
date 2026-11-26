@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tolete.player.LyricsPopupOverlay
 import com.tolete.player.PlaybackService
 import com.tolete.player.data.AudioOutputInfo
 import com.tolete.player.data.LibrarySettings
@@ -265,6 +266,53 @@ internal fun PlayerPage(
                     }
                 }
             )
+        }
+
+        if (lyricsPopupEnabled && hasOverlayPermission) {
+            var expressive by remember { mutableStateOf(LyricsPopupOverlay.isExpressive(context)) }
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Letras Expressivas", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "Em vez da caixa com a linha atual, cada palavra surge solta em um lugar aleatório da tela, " +
+                            "no tempo dela, com tamanho e rotação próprios e uma embaixo da outra dentro da mesma linha. ",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(0.55f)
+                    )
+                }
+                Switch(
+                    checked = expressive,
+                    onCheckedChange = {
+                        expressive = it
+                        LyricsPopupOverlay.setExpressive(context, it)
+                    }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(0.06f))
+                    .padding(12.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Icon(
+                    Icons.Rounded.Info,
+                    contentDescription = null,
+                    tint = Color.White.copy(0.6f),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "Aviso: as Letras Expressivas só aparecem em músicas com letra palavra por palavra (word by word). " +
+                        "Nas demais, o popup simples continua sendo usado. Linhas de tradução ({tr}) não são exibidas " +
+                        "nas Letras Expressivas.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.65f)
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))

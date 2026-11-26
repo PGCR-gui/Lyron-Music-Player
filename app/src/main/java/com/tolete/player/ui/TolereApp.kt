@@ -588,6 +588,12 @@ fun TolereApp(
     BackHandler(enabled = showFileManager && !showNowPlaying) { showFileManager = false }
     // Prioridade máxima: minimizar Now Playing antes de qualquer tela por baixo
     BackHandler(enabled = showNowPlaying) { showNowPlaying = false }
+    // O popup de letras aparece dentro do app, menos na tela Tocando agora (que já mostra a letra).
+    val nowPlayingOnScreen = showNowPlaying && nowPlaying != null
+    DisposableEffect(nowPlayingOnScreen) {
+        com.tolete.player.LyricsPopupOverlay.nowPlayingOpen = nowPlayingOnScreen
+        onDispose { com.tolete.player.LyricsPopupOverlay.nowPlayingOpen = false }
+    }
     BackHandler(enabled = showLastFm && !showNowPlaying) { showLastFm = false }
 
     fun openAddToPlaylist(tracks: List<Track>) {
@@ -1835,10 +1841,11 @@ fun TolereApp(
                                     val msg = when {
                                         ok && saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Letra salva no arquivo .lrc"
                                         ok && saveTarget == LyricsEmbedder.Target.EMBEDDED -> "Letra salva nas tags do arquivo"
-                                        saveTarget == LyricsEmbedder.Target.LRC_FILE -> "Falha ao salvar .lrc; o Android não autorizou a gravação nesta pasta"
-                                        else -> "Falha ao salvar letra nas tags"
+                                        saveTarget == LyricsEmbedder.Target.LRC_FILE ->
+                                            "Falha ao salvar .lrc: " + (LyricsEmbedder.lastError ?: "o Android não autorizou a gravação nesta pasta")
+                                        else -> "Falha ao salvar letra nas tags: " + (LyricsEmbedder.lastError ?: "erro desconhecido")
                                     }
-                                    android.widget.Toast.makeText(editCtx, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                    android.widget.Toast.makeText(editCtx, msg, if (ok) android.widget.Toast.LENGTH_SHORT else android.widget.Toast.LENGTH_LONG).show()
                                     if (ok) {
                                         lyricsEditTrack = null
                                     }

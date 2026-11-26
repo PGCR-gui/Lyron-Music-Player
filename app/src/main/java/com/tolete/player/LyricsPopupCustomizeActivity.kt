@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
@@ -61,6 +62,10 @@ class LyricsPopupCustomizeActivity : ComponentActivity() {
                         LyricsPopupOverlay.PopupTheme.DYNAMIC.id
                     ) ?: LyricsPopupOverlay.PopupTheme.DYNAMIC.id
                 )
+            }
+
+            var expressive by remember {
+                mutableStateOf(LyricsPopupOverlay.isExpressive(this@LyricsPopupCustomizeActivity))
             }
 
             fun persist() {
@@ -108,6 +113,32 @@ class LyricsPopupCustomizeActivity : ComponentActivity() {
                         persist()
                     },
                     valueRange = 0f..100f
+                )
+
+                Spacer(Modifier.height(16.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text("Letras Expressivas", color = Color.White, fontWeight = FontWeight.Medium)
+                        Text(
+                            "Palavras soltas em lugares aleatórios da tela, cada uma no seu tempo, com tamanho e rotação próprios.",
+                            color = Color.White.copy(0.5f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = expressive,
+                        onCheckedChange = {
+                            expressive = it
+                            LyricsPopupOverlay.setExpressive(this@LyricsPopupCustomizeActivity, it)
+                        }
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Aviso: só funciona em músicas com letra palavra por palavra (word by word); nas demais, " +
+                        "o popup simples é usado. Linhas de tradução ({tr}) não são exibidas nas Letras Expressivas.",
+                    color = Color.White.copy(0.55f),
+                    fontSize = 12.sp
                 )
 
                 Spacer(Modifier.height(16.dp))

@@ -779,7 +779,7 @@ fun LyricsEditorScreen(
                                     rebuildTextFromWords(adjusted.translationWords)
                                 } else {
                                     adjusted.translationText
-                                        .replace(Regex("\\{(?:sil|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE), "")
+                                        .replace(Regex("\\{(?:sil|nt|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE), "")
                                         .trim()
                                 }
                                 out += LyricLine(
@@ -983,9 +983,17 @@ fun LyricsEditorScreen(
                                 } else {
                                     // Ao editar texto da linha, invalida palavras se o texto mudou bastante.
                                     val updated = line.copy(text = cleanText)
-                                    lines[index] = if (line.words.isNotEmpty() &&
-                                        line.words.joinToString(" ") { it.text } != cleanText.trim()
-                                    ) updated.copy(words = emptyList()) else updated
+                                    val newParts = cleanText.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+                                    lines[index] = when {
+                                        line.words.isEmpty() -> updated
+                                        // Comparação com as sílabas coladas (antes usava espaço e zerava as palavras
+                                        // de qualquer linha com sílabas ao menor toque no texto).
+                                        rebuildTextFromWords(line.words) == cleanText.trim() -> updated
+                                        // Mesma quantidade de palavras (ex.: corrigir uma letra): mantém os tempos.
+                                        line.words.none { it.isSyllable } && newParts.size == line.words.size ->
+                                            updated.copy(words = line.words.mapIndexed { i, w -> w.copy(text = newParts[i]) })
+                                        else -> updated.copy(words = emptyList())
+                                    }
                                 }
                             },
                             onLongPressWord = { charOffset ->

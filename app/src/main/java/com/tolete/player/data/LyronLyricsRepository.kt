@@ -40,6 +40,7 @@ internal object LyronLyricsRepository {
 
         return candidates.mapNotNull { item ->
             val rawLyrics = LyricsHttp.get(rawFileUrl(item.path))?.trim()?.takeIf { it.isNotBlank() }
+                ?.let { LyricsFormat.unescapeHtml(it) }
                 ?: return@mapNotNull null
             val lines = LyricsExtractor.parseLyricsContent(rawLyrics)
             if (lines.isEmpty()) return@mapNotNull null

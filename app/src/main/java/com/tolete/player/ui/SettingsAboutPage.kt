@@ -243,9 +243,40 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
         }
 
         Spacer(Modifier.height(20.dp))
+        Text("Outros Projetos", fontSize = 13.sp, color = Color.White.copy(0.55f))
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(0.08f))
+                .clickable {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/PGCR-gui/Lyron-Story-Teller"))
+                    context.startActivity(intent)
+                }
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.Description, contentDescription = null, tint = Color.White)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("Lyron Story Teller", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "Um app que fiz pra escrever e ler umas histórias duvidosas",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(0.5f)
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(0.4f)
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
         Row {
             Text(
-                "Feito com Grok, Claude.Ai e ",
+                "Feito com Grok, Claude, Manus e ",
                 fontSize = 14.sp,
                 color = Color.White.copy(0.7f)
             )
@@ -269,6 +300,15 @@ internal fun AboutPage(onOpenChangelog: () -> Unit = {}, onOpenLicenses: () -> U
 
 
 internal val changelogEntries = listOf(
+   ChangelogEntry(
+        code = "365",
+        version = "1.2",
+        changes = listOf(
+        "Correção dos efeitos {pop} e {des} na exibição pop up",
+        "Letras pop up agora volta a aparecer dentro do app (exceto na tela do Now Playing por motivos óbvios)",
+        "Letras Expressivas: Novo modo de exibição de letras pop up para letras com sincronização Palavra-por-Palavra"
+        )
+   ),
     ChangelogEntry(
         code = "360",
         version = "1.1",

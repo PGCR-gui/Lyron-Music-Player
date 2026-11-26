@@ -27,6 +27,14 @@ object LyricsEmbedder {
      */
     internal val lyricsLock = java.util.concurrent.locks.ReentrantReadWriteLock()
 
+    /** Motivo da última falha de [save] (para o aviso do editor dizer o que realmente deu errado). */
+    @Volatile
+    var lastError: String? = null
+
+    /** Último .lrc gravado com sucesso por [embedLrc] (a conferência relê exatamente este arquivo). */
+    @Volatile
+    private var lastWrittenLrc: File? = null
+
     /**
      * Existe QUALQUER letra salva para a faixa (.lrc/.elrc/.ttml em qualquer caixa, ou embutida)?
      * É conservadora: se não deu para ler com certeza (erro de E/S), responde true, porque
@@ -235,8 +243,10 @@ object LyricsEmbedder {
                                 append('<').append(fmtTs(end)).append('>')
                             }
                         } else {
-                            // Palavra ainda sem tempo: cola no texto anterior, sem tag.
+                            // Palavra ainda sem tempo (sincronização parcial): vai marcada com {nt}, senão a leitura
+                            // a colava na palavra anterior ou lhe dava um tempo inventado e a sincronização "sumia".
                             if (i > 0 && !w.isSyllable) append(' ')
+                            append("{nt}")
                             if (w.isSyllable) append("{sil}")
                             append(w.text)
                             append(animationTag(w.animation))
@@ -309,7 +319,10 @@ object LyricsEmbedder {
                         try { tmp.delete() } catch (_: Exception) { }
                         lrcFile.writeText(lrcText, Charsets.UTF_8)
                     }
-                    if (lrcFile.exists() && lrcFile.length() > 0) return true
+                    if (lrcFile.exists() && lrcFile.length() > 0) {
+                        lastWrittenLrc = lrcFile
+                        return true
+                    }
                 }
             } catch (_: Exception) { }
         }
@@ -320,8 +333,11 @@ object LyricsEmbedder {
     fun embedInTags(context: Context, track: Track, lrcText: String): Boolean {
         if (lrcText.isBlank()) return false
         return try {
-            TagWriter.writeLyricsOnly(context, track, lrcText).ok
-        } catch (_: Exception) {
+            val result = TagWriter.writeLyricsOnly(context, track, lrcText)
+            if (!result.ok) lastError = result.message
+            result.ok
+        } catch (e: Exception) {
+            lastError = e.message?.take(160)
             false
         }
     }
@@ -346,32 +362,55 @@ object LyricsEmbedder {
         lines: List<LyricLine>,
         target: Target
     ): Boolean {
+        lastError = null
         val text = linesToLrcText(lines)
-        if (text.isBlank()) return false
+        if (text.isBlank()) {
+            lastError = "não há linhas com texto para gravar"
+            return false
+        }
+        lastWrittenLrc = null
         val wrote = when (target) {
             Target.LRC_FILE -> embedLrc(context, track, text)
             Target.EMBEDDED -> embedInTags(context, track, text)
         }
-        if (!wrote) return false
+        if (!wrote) {
+            if (lastError == null) lastError = "não foi possível gravar (sem permissão na pasta/arquivo)"
+            return false
+        }
 
         // Releitura imediata: alguns formatos/tag handlers podem aceitar commit sem
         // manter o campo LYRICS. Não feche o editor nem indique sucesso se os tempos sumiram.
-        val savedText = when (target) {
-            Target.LRC_FILE -> externalLrcPath(track)?.let { file ->
+        val savedText: String? = when (target) {
+            // Relê o arquivo que acabou de ser gravado (o caminho pode ter vindo do MediaStore, e aí
+            // externalLrcPath() não o enxerga e a conferência reprovava uma gravação correta).
+            Target.LRC_FILE -> (lastWrittenLrc ?: externalLrcPath(track))?.let { file ->
                 try { if (file.isFile) file.readText(Charsets.UTF_8) else null } catch (_: Exception) { null }
             }
-            Target.EMBEDDED -> TagReader.read(context, track)?.lyrics
-        } ?: return false
-        if (savedText.isBlank()) return false
+            Target.EMBEDDED -> try { TagReader.read(context, track)?.lyrics } catch (_: Exception) { null }
+        }
+        // Não deu para reler: a gravação em si já foi confirmada, então não reprova por isso.
+        if (savedText == null) return true
+        if (savedText.isBlank()) {
+            lastError = "a letra gravada voltou vazia na releitura"
+            return false
+        }
         val expectedTimes = syncTimes(lines)
         if (expectedTimes.isEmpty()) return true
         val savedTimes = syncTimes(LyricsExtractor.parseLyricsContent(savedText))
         val remaining = savedTimes.toMutableList()
+        var matched = 0
         for (expected in expectedTimes) {
             val match = remaining.indices.minByOrNull { index ->
                 kotlin.math.abs(remaining[index] - expected)
-            }?.takeIf { kotlin.math.abs(remaining[it] - expected) <= 10L } ?: return false
+            }?.takeIf { kotlin.math.abs(remaining[it] - expected) <= 10L } ?: continue
             remaining.removeAt(match)
+            matched++
+        }
+        // O objetivo da conferência é detectar tempos que SUMIRAM (formato que descarta o timestamp).
+        // Antes, uma única palavra fora da tolerância reprovava a letra inteira, mesmo gravada certa.
+        if (matched * 2 < expectedTimes.size) {
+            lastError = "os tempos não foram preservados na gravação ($matched de ${expectedTimes.size})"
+            return false
         }
         return true
     }

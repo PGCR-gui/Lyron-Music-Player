@@ -237,7 +237,7 @@ object LyricsExtractor {
     }
 
     private fun toPlainLines(text: String): List<LyricLine> =
-        text.lines().map { it.trim() }.filter { it.isNotEmpty() }.map { LyricLine(-1, it) }
+        LyricsFormat.unescapeHtml(text).lines().map { it.trim() }.filter { it.isNotEmpty() }.map { LyricLine(-1, it) }
 
     /** Detecta TTML (Apple Music, etc.) pelo conteúdo, independente da extensão. */
     private fun looksLikeTtml(text: String): Boolean {
@@ -326,6 +326,8 @@ object LyricsExtractor {
                 lyricPart = lyricPart.substring(marker.range.last + 1)
             }
             val words = mutableListOf<LyricWord>()
+            // Entidades HTML (&apos;, &quot;, &amp;...) só são convertidas aqui, depois de separar
+            // timestamps e marcadores, para que um "&lt;" não vire uma tag <mm:ss> falsa.
             if (wordRegex.containsMatchIn(lyricPart)) {
                 val parts = wordRegex.split(lyricPart)
                 val tags = wordRegex.findAll(lyricPart).toList()
@@ -336,13 +338,18 @@ object LyricsExtractor {
                 for (i in tags.indices) {
                     val wTime = parseTimestamp(tags[i].groupValues[1], tags[i].groupValues[2], tags[i].groupValues[3])
                     val rawText = if (i + 1 < parts.size) parts[i + 1] else ""
-                    if (rawText.isBlank()) {
+                    // Texto que começa com {nt} (palavra sem tempo) nunca pertence a esta tag: o editor só grava
+                    // tag de tempo para palavra COM tempo, então aqui a tag é o fim da palavra anterior.
+                    val leadsUntimed = rawText.trimStart().startsWith("{nt}", ignoreCase = true)
+                    if (rawText.isBlank() || leadsUntimed) {
                         // eLRC: tag sem texto logo após uma palavra marca o FIM dela (<t>palavra<fim>).
                         // Antes era descartada e o endMs definido à mão se perdia ao salvar.
                         val last = words.lastOrNull()
                         if (last != null && last.timeMs >= 0 && wTime > last.timeMs && last.endMs <= last.timeMs) {
                             words[words.lastIndex] = last.copy(endMs = wTime)
                         }
+                        // Palavras sem tempo que vêm depois do fim: seguem sem tempo (antes ganhavam o tempo do fim).
+                        if (leadsUntimed) appendWordSegment(words, rawText, -1L)
                         continue
                     }
                     appendWordSegment(words, rawText, wTime)
@@ -352,7 +359,9 @@ object LyricsExtractor {
                 // Mantém animações/sílabas em linhas simples, sem timestamps de palavra.
                 appendWordSegment(words, lyricPart, time)
             }
-            val plainText = lyricPart.replace(wordRegex, "").replace(wordMarkerRegex, "").trim()
+            val plainText = LyricsFormat.unescapeHtml(
+                lyricPart.replace(wordRegex, "").replace(wordMarkerRegex, "")
+            ).trim()
             if (plainText.isNotEmpty() || words.isNotEmpty()) {
                 val built = LyricLine(
                     timeMs = time,
@@ -428,7 +437,8 @@ object LyricsExtractor {
         } else line
     }
 
-    private val wordMarkerRegex = Regex("\\{(sil|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE)
+    /** {nt} = "no time": a palavra seguinte NÃO tem tempo (sincronização parcial palavra por palavra). */
+    private val wordMarkerRegex = Regex("\\{(sil|nt|glo|pop|des|ded|eco|zou|zin|sli|typ|fla|vib|rnb|frz|shd|wav)\\}", RegexOption.IGNORE_CASE)
 
     /** Converte um trecho e seus marcadores em palavras, sem criar timestamps artificiais. */
     private fun appendWordSegment(words: MutableList<LyricWord>, raw: String, timeMs: Long) {
@@ -436,26 +446,29 @@ object LyricsExtractor {
         var cursor = 0
         var firstWord = true
         var nextIsSyllable = false
+        var nextIsUntimed = false
         fun appendChunk(chunk: String) {
-            val trimmed = chunk.trim()
+            val trimmed = LyricsFormat.unescapeHtml(chunk).trim()
             val pieces = if (markers.isEmpty()) listOf(trimmed).filter { it.isNotEmpty() }
             else trimmed.split(Regex("\\s+")).filter { it.isNotEmpty() }
             pieces.forEach { piece ->
                 words.add(
                     LyricWord(
-                        timeMs = if (firstWord) timeMs else -1L,
+                        timeMs = if (firstWord && !nextIsUntimed) timeMs else -1L,
                         text = piece,
                         isSyllable = nextIsSyllable
                     )
                 )
                 firstWord = false
                 nextIsSyllable = false
+                nextIsUntimed = false
             }
         }
         markers.forEach { match ->
             appendChunk(raw.substring(cursor, match.range.first))
             when (match.groupValues[1].lowercase()) {
                 "sil" -> nextIsSyllable = true
+                "nt" -> nextIsUntimed = true
                 "glo" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.GLO)
                 "pop" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.POP)
                 "des" -> if (words.isNotEmpty()) words[words.lastIndex] = words.last().copy(animation = LyricAnimation.DES)
